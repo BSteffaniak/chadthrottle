@@ -276,32 +276,49 @@ fn draw_process_list(f: &mut Frame, area: Rect, app: &mut AppState) {
         Span::styled("UL Rate    ", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled("Total DL   ", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled("Total UL   ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::styled("T", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("Throttled", Style::default().add_modifier(Modifier::BOLD)),
     ]);
 
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Network Activity"),
-        )
-        .highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        );
-
-    // Render header separately
-    // +2 for border, +2 for manual selection indicator "▶ " or "  "
+    // Split the area: header takes first row inside border, list gets the rest
     let header_area = Rect {
-        x: area.x + 4,
+        x: area.x + 4, // +2 for border, +2 for manual selection indicator
         y: area.y + 1,
         width: area.width - 4,
         height: 1,
     };
+
+    let list_area = Rect {
+        x: area.x,
+        y: area.y + 2, // Start below the header
+        width: area.width,
+        height: area.height.saturating_sub(2),
+    };
+
+    // Render the border and title separately
+    let border = Block::default()
+        .borders(Borders::ALL)
+        .title("Network Activity");
+    f.render_widget(border, area);
+
+    // Render header
     f.render_widget(Paragraph::new(header), header_area);
 
-    f.render_stateful_widget(list, area, &mut app.list_state);
+    // Render list without its own border (since we drew it above)
+    let list = List::new(items).highlight_style(
+        Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    // Adjust list_state rendering to account for the inner area (inside borders)
+    let inner_list_area = Rect {
+        x: list_area.x + 1,
+        y: list_area.y,
+        width: list_area.width.saturating_sub(2),
+        height: list_area.height.saturating_sub(1),
+    };
+
+    f.render_stateful_widget(list, inner_list_area, &mut app.list_state);
 }
 
 fn draw_status_bar(f: &mut Frame, area: Rect, app: &AppState) {
