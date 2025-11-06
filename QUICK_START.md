@@ -66,14 +66,16 @@ sudo ./target/release/chadthrottle --restore
 ## Available Backends
 
 ### Upload (Egress)
+- **nftables** (Better) - nftables, requires: nftables + cgroups (RECOMMENDED)
 - **tc_htb** (Good) - TC HTB, requires: TC + cgroups
 
 ### Download (Ingress)
+- **nftables** (Better) - nftables, requires: nftables + cgroups (RECOMMENDED, no IFB needed!)
 - **ifb_tc** (Good) - IFB+TC HTB, requires: TC + cgroups + IFB module
 - **tc_police** (Fallback) - TC Police, requires: TC only (no per-process filtering)
 
 ### Future
-- **ebpf_cgroup** (Best) - eBPF cgroup (coming soon!)
+- **ebpf_cgroup** (Best) - eBPF cgroup (planned)
 
 ## Troubleshooting
 

@@ -11,6 +11,9 @@ pub mod upload;
 #[cfg(target_os = "linux")]
 pub mod linux_tc_utils;
 
+#[cfg(target_os = "linux")]
+pub mod linux_nft_utils;
+
 // Re-export manager
 pub use manager::ThrottleManager;
 
@@ -114,6 +117,15 @@ pub struct DownloadBackendInfo {
 pub fn detect_upload_backends() -> Vec<UploadBackendInfo> {
     let mut backends = Vec::new();
 
+    #[cfg(feature = "throttle-nftables")]
+    {
+        backends.push(UploadBackendInfo {
+            name: "nftables",
+            priority: BackendPriority::Better,
+            available: upload::linux::nftables::NftablesUpload::is_available(),
+        });
+    }
+
     #[cfg(feature = "throttle-tc-htb")]
     {
         backends.push(UploadBackendInfo {
@@ -129,6 +141,15 @@ pub fn detect_upload_backends() -> Vec<UploadBackendInfo> {
 /// Detect all available download backends
 pub fn detect_download_backends() -> Vec<DownloadBackendInfo> {
     let mut backends = Vec::new();
+
+    #[cfg(feature = "throttle-nftables")]
+    {
+        backends.push(DownloadBackendInfo {
+            name: "nftables",
+            priority: BackendPriority::Better,
+            available: download::linux::nftables::NftablesDownload::is_available(),
+        });
+    }
 
     #[cfg(feature = "throttle-ifb-tc")]
     {
@@ -189,6 +210,9 @@ pub fn select_download_backend(
 fn create_upload_backend(name: &str) -> Result<Box<dyn UploadThrottleBackend>> {
     log::debug!("Creating upload backend {name}");
     match name {
+        #[cfg(feature = "throttle-nftables")]
+        "nftables" => Ok(Box::new(upload::linux::nftables::NftablesUpload::new()?)),
+
         #[cfg(feature = "throttle-tc-htb")]
         "tc_htb" => Ok(Box::new(upload::linux::tc_htb::TcHtbUpload::new()?)),
 
@@ -199,6 +223,9 @@ fn create_upload_backend(name: &str) -> Result<Box<dyn UploadThrottleBackend>> {
 /// Create a download backend by name
 fn create_download_backend(name: &str) -> Result<Box<dyn DownloadThrottleBackend>> {
     match name {
+        #[cfg(feature = "throttle-nftables")]
+        "nftables" => Ok(Box::new(download::linux::nftables::NftablesDownload::new()?)),
+
         #[cfg(feature = "throttle-ifb-tc")]
         "ifb_tc" => Ok(Box::new(download::linux::ifb_tc::IfbTcDownload::new()?)),
 

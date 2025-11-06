@@ -5,3 +5,6 @@ pub mod ifb_tc;
 
 #[cfg(feature = "throttle-tc-police")]
 pub mod tc_police;
+
+#[cfg(feature = "throttle-nftables")]
+pub mod nftables;
