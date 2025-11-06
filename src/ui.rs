@@ -14,7 +14,7 @@ use ratatui::{
 
 pub struct AppState {
     pub process_list: Vec<ProcessInfo>,
-    pub selected_index: usize,
+    pub selected_index: Option<usize>,
     pub list_state: ListState,
     pub show_help: bool,
     pub show_throttle_dialog: bool,
@@ -103,11 +103,11 @@ impl ThrottleDialog {
 impl AppState {
     pub fn new() -> Self {
         let mut list_state = ListState::default();
-        list_state.select(Some(0));
+        list_state.select(None); // Nothing selected initially
 
         Self {
             process_list: Vec::new(),
-            selected_index: 0,
+            selected_index: None, // Nothing selected initially
             list_state,
             history: HistoryTracker::new(),
             show_graph: false,
@@ -131,9 +131,11 @@ impl AppState {
         self.process_list = processes;
 
         // Adjust selection if out of bounds
-        if self.selected_index >= self.process_list.len() && !self.process_list.is_empty() {
-            self.selected_index = self.process_list.len() - 1;
-            self.list_state.select(Some(self.selected_index));
+        if let Some(index) = self.selected_index {
+            if index >= self.process_list.len() && !self.process_list.is_empty() {
+                self.selected_index = Some(self.process_list.len() - 1);
+                self.list_state.select(Some(self.process_list.len() - 1));
+            }
         }
     }
 
@@ -142,8 +144,13 @@ impl AppState {
             return;
         }
 
-        self.selected_index = (self.selected_index + 1) % self.process_list.len();
-        self.list_state.select(Some(self.selected_index));
+        let new_index = match self.selected_index {
+            None => 0, // If nothing selected, select first item
+            Some(idx) => (idx + 1) % self.process_list.len(),
+        };
+
+        self.selected_index = Some(new_index);
+        self.list_state.select(Some(new_index));
     }
 
     pub fn select_previous(&mut self) {
@@ -151,16 +158,19 @@ impl AppState {
             return;
         }
 
-        if self.selected_index == 0 {
-            self.selected_index = self.process_list.len() - 1;
-        } else {
-            self.selected_index -= 1;
-        }
-        self.list_state.select(Some(self.selected_index));
+        let new_index = match self.selected_index {
+            None => 0, // If nothing selected, select first item
+            Some(0) => self.process_list.len() - 1,
+            Some(idx) => idx - 1,
+        };
+
+        self.selected_index = Some(new_index);
+        self.list_state.select(Some(new_index));
     }
 
     pub fn get_selected_process(&self) -> Option<&ProcessInfo> {
-        self.process_list.get(self.selected_index)
+        self.selected_index
+            .and_then(|idx| self.process_list.get(idx))
     }
 }
 
