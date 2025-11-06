@@ -1,5 +1,82 @@
 # ChadThrottle Changelog
 
+## v0.6.0 - Trait-Based Architecture Refactoring (2025-11-06)
+
+### 🏗️ Major Architectural Changes
+
+**Complete refactoring to trait-based, pluggable backend system!**
+
+This release lays the foundation for cross-platform support and multiple throttling methods.
+
+### Added
+- ✅ **Backend trait system** - Separate traits for monitoring and throttling
+- ✅ **UploadThrottleBackend trait** - Upload (egress) throttling interface
+- ✅ **DownloadThrottleBackend trait** - Download (ingress) throttling interface
+- ✅ **MonitorBackend trait** - Network monitoring interface
+- ✅ **ThrottleManager coordinator** - Manages separate upload/download backends
+- ✅ **Backend priority system** - Auto-selects best available backend
+- ✅ **Feature-gated compilation** - Only compile backends you need
+- ✅ **Shared TC/cgroup utilities** - Reusable Linux traffic control code
+- ✅ **Backend selection API** - Choose backends at runtime or compile-time
+
+### Backend Implementations
+- ✅ **PnetMonitor** - Packet capture monitoring (wraps existing monitor.rs)
+- ✅ **TcHtbUpload** - TC HTB upload throttling (extracted from v0.5.0)
+- ✅ **IfbTcDownload** - IFB+TC download throttling (extracted from v0.5.0)
+
+### Technical Improvements
+- Separated upload and download throttling into independent backends
+- Each backend can be selected/implemented independently
+- Backends report capabilities and availability
+- Graceful fallback when backends unavailable
+- Clean separation of concerns
+
+### Feature Flags
+```toml
+default = ["monitor-pnet", "throttle-tc-htb", "throttle-ifb-tc"]
+monitor-pnet = ["pnet", "pnet_datalink", "pnet_packet"]
+throttle-tc-htb = []     # Upload throttling (always available)
+throttle-ifb-tc = []     # Download throttling (needs IFB)
+```
+
+### Documentation
+- Added [ARCHITECTURE.md](ARCHITECTURE.md) - Complete architecture documentation
+- Added [REFACTORING_PLAN.md](REFACTORING_PLAN.md) - Implementation tracking
+- Updated README.md with new architecture info
+
+### Breaking Changes
+- None for end users - API remains compatible
+- Internal architecture completely redesigned
+- Legacy throttle.rs will be removed in future version
+
+### Migration Guide
+No changes needed for users. The new backend system is transparent:
+
+**v0.5.0:**
+```rust
+let mut throttle = ThrottleManager::new()?;
+```
+
+**v0.6.0:**
+```rust
+let upload = select_upload_backend(None)?;
+let download = select_download_backend(None);
+let mut throttle = ThrottleManager::new(upload, download);
+```
+
+### Future Roadmap
+This architecture enables:
+- v0.7.0: eBPF backends (best performance on Linux)
+- v0.8.0: Additional Linux backends (TC police, nftables)
+- v0.9.0: macOS support (PacketFilter)
+- v1.0.0: Windows support (WFP - feature parity with NetLimiter!)
+
+### Performance
+- No performance impact - same underlying implementations
+- Slightly more flexible at negligible cost
+
+---
+
 ## v0.5.0 - Production Ready Throttling (2025-11-06)
 
 ### 🔥 Major Changes

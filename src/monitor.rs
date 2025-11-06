@@ -1,19 +1,19 @@
-use anyhow::{Result, Context};
-use procfs::process::{all_processes, FDTarget};
-use pnet::datalink::{self, NetworkInterface, Channel};
-use pnet::packet::ethernet::{EthernetPacket, EtherTypes};
-use pnet::packet::ip::{IpNextHeaderProtocols};
+use crate::process::{ProcessInfo, ProcessMap};
+use anyhow::{Context, Result};
+use pnet::datalink::{self, Channel, NetworkInterface};
+use pnet::packet::Packet;
+use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
+use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::Ipv4Packet;
 use pnet::packet::ipv6::Ipv6Packet;
 use pnet::packet::tcp::TcpPacket;
 use pnet::packet::udp::UdpPacket;
-use pnet::packet::Packet;
+use procfs::process::{FDTarget, all_processes};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Instant, Duration};
-use crate::process::{ProcessInfo, ProcessMap};
+use std::time::{Duration, Instant};
 
 /// Connection identifier for tracking packets
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
@@ -69,7 +69,7 @@ impl NetworkMonitor {
         let tracker_clone = Arc::clone(&bandwidth_tracker);
         let capture_handle = thread::spawn(move || {
             if let Err(e) = Self::capture_packets(tracker_clone) {
-                eprintln!("Packet capture error: {}", e);
+                log::error!("Packet capture error: {}", e);
             }
         });
 
@@ -83,34 +83,34 @@ impl NetworkMonitor {
     pub fn update(&mut self) -> Result<ProcessMap> {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_update).as_secs_f64();
-        
+
         // Update socket inode mapping
         self.update_socket_map()?;
-        
+
         // Calculate rates and build process map
         let mut process_map = ProcessMap::new();
         let mut tracker = self.bandwidth_tracker.lock().unwrap();
-        
+
         for (&pid, bandwidth) in &mut tracker.process_bandwidth {
             let rx_diff = bandwidth.rx_bytes.saturating_sub(bandwidth.last_rx_bytes);
             let tx_diff = bandwidth.tx_bytes.saturating_sub(bandwidth.last_tx_bytes);
-            
+
             let download_rate = if elapsed > 0.0 {
                 (rx_diff as f64 / elapsed) as u64
             } else {
                 0
             };
-            
+
             let upload_rate = if elapsed > 0.0 {
                 (tx_diff as f64 / elapsed) as u64
             } else {
                 0
             };
-            
+
             // Update last values for next calculation
             bandwidth.last_rx_bytes = bandwidth.rx_bytes;
             bandwidth.last_tx_bytes = bandwidth.tx_bytes;
-            
+
             // Only show processes with activity
             if download_rate > 0 || upload_rate > 0 {
                 let mut proc_info = ProcessInfo::new(pid, bandwidth.name.clone());
@@ -118,11 +118,11 @@ impl NetworkMonitor {
                 proc_info.upload_rate = upload_rate;
                 proc_info.total_download = bandwidth.rx_bytes;
                 proc_info.total_upload = bandwidth.tx_bytes;
-                
+
                 process_map.insert(pid, proc_info);
             }
         }
-        
+
         self.last_update = now;
         Ok(process_map)
     }
@@ -132,20 +132,20 @@ impl NetworkMonitor {
         let mut tracker = self.bandwidth_tracker.lock().unwrap();
         tracker.socket_map.clear();
         tracker.connection_map.clear();
-        
+
         // Build socket inode -> PID map
         let all_procs = all_processes()?;
-        
+
         for proc_result in all_procs {
             if let Ok(process) = proc_result {
                 let pid = process.pid();
-                
+
                 let name = if let Ok(stat) = process.stat() {
                     stat.comm
                 } else {
                     format!("PID {}", pid)
                 };
-                
+
                 // Scan file descriptors for sockets
                 if let Ok(fds) = process.fd() {
                     for fd_result in fds {
@@ -158,7 +158,7 @@ impl NetworkMonitor {
                 }
             }
         }
-        
+
         // Map connections to PIDs via socket inodes
         if let Ok(tcp_entries) = procfs::net::tcp() {
             for entry in tcp_entries {
@@ -174,7 +174,7 @@ impl NetworkMonitor {
                 }
             }
         }
-        
+
         if let Ok(tcp6_entries) = procfs::net::tcp6() {
             for entry in tcp6_entries {
                 if let Some(&(pid, _)) = tracker.socket_map.get(&entry.inode) {
@@ -189,7 +189,7 @@ impl NetworkMonitor {
                 }
             }
         }
-        
+
         if let Ok(udp_entries) = procfs::net::udp() {
             for entry in udp_entries {
                 if let Some(&(pid, _)) = tracker.socket_map.get(&entry.inode) {
@@ -204,7 +204,7 @@ impl NetworkMonitor {
                 }
             }
         }
-        
+
         if let Ok(udp6_entries) = procfs::net::udp6() {
             for entry in udp6_entries {
                 if let Some(&(pid, _)) = tracker.socket_map.get(&entry.inode) {
@@ -219,23 +219,22 @@ impl NetworkMonitor {
                 }
             }
         }
-        
+
         Ok(())
     }
 
     /// Packet capture thread - runs continuously
     fn capture_packets(tracker: Arc<Mutex<BandwidthTracker>>) -> Result<()> {
         // Find a suitable network interface
-        let interface = Self::find_interface()
-            .context("Failed to find network interface")?;
-        
+        let interface = Self::find_interface().context("Failed to find network interface")?;
+
         // Create channel for packet capture
         let (_, mut rx) = match datalink::channel(&interface, Default::default()) {
             Ok(Channel::Ethernet(tx, rx)) => (tx, rx),
             Ok(_) => return Err(anyhow::anyhow!("Unsupported channel type")),
             Err(e) => return Err(anyhow::anyhow!("Failed to create channel: {}", e)),
         };
-        
+
         // Capture packets
         loop {
             match rx.next() {
@@ -243,12 +242,12 @@ impl NetworkMonitor {
                     if let Err(e) = Self::process_packet(packet, &tracker) {
                         // Don't spam errors, just continue
                         if std::env::var("DEBUG").is_ok() {
-                            eprintln!("Packet processing error: {}", e);
+                            log::error!("Packet processing error: {}", e);
                         }
                     }
                 }
                 Err(e) => {
-                    eprintln!("Packet receive error: {}", e);
+                    log::error!("Packet receive error: {}", e);
                     thread::sleep(Duration::from_millis(100));
                 }
             }
@@ -258,17 +257,12 @@ impl NetworkMonitor {
     fn find_interface() -> Option<NetworkInterface> {
         datalink::interfaces()
             .into_iter()
-            .find(|iface| {
-                iface.is_up() 
-                && !iface.is_loopback() 
-                && !iface.ips.is_empty()
-            })
+            .find(|iface| iface.is_up() && !iface.is_loopback() && !iface.ips.is_empty())
     }
 
     fn process_packet(packet: &[u8], tracker: &Arc<Mutex<BandwidthTracker>>) -> Result<()> {
-        let ethernet = EthernetPacket::new(packet)
-            .context("Failed to parse Ethernet packet")?;
-        
+        let ethernet = EthernetPacket::new(packet).context("Failed to parse Ethernet packet")?;
+
         match ethernet.get_ethertype() {
             EtherTypes::Ipv4 => {
                 if let Some(ipv4) = Ipv4Packet::new(ethernet.payload()) {
@@ -282,7 +276,7 @@ impl NetworkMonitor {
             }
             _ => {}
         }
-        
+
         Ok(())
     }
 
@@ -293,7 +287,7 @@ impl NetworkMonitor {
     ) -> Result<()> {
         let src_addr = IpAddr::V4(ipv4.get_source());
         let dst_addr = IpAddr::V4(ipv4.get_destination());
-        
+
         match ipv4.get_next_level_protocol() {
             IpNextHeaderProtocols::Tcp => {
                 if let Some(tcp) = TcpPacket::new(ipv4.payload()) {
@@ -323,7 +317,7 @@ impl NetworkMonitor {
             }
             _ => {}
         }
-        
+
         Ok(())
     }
 
@@ -334,7 +328,7 @@ impl NetworkMonitor {
     ) -> Result<()> {
         let src_addr = IpAddr::V6(ipv6.get_source());
         let dst_addr = IpAddr::V6(ipv6.get_destination());
-        
+
         match ipv6.get_next_header() {
             IpNextHeaderProtocols::Tcp => {
                 if let Some(tcp) = TcpPacket::new(ipv6.payload()) {
@@ -364,7 +358,7 @@ impl NetworkMonitor {
             }
             _ => {}
         }
-        
+
         Ok(())
     }
 
@@ -378,7 +372,7 @@ impl NetworkMonitor {
         tracker: &Arc<Mutex<BandwidthTracker>>,
     ) {
         let mut tracker = tracker.lock().unwrap();
-        
+
         // Try both directions to find which one matches our connection map
         let key_outbound = ConnectionKey {
             local_addr: src_addr,
@@ -387,7 +381,7 @@ impl NetworkMonitor {
             remote_port: dst_port,
             protocol,
         };
-        
+
         let key_inbound = ConnectionKey {
             local_addr: dst_addr,
             local_port: dst_port,
@@ -395,37 +389,47 @@ impl NetworkMonitor {
             remote_port: src_port,
             protocol,
         };
-        
+
         // Check if this is an outbound packet (src = local)
         if let Some(&pid) = tracker.connection_map.get(&key_outbound) {
-            let name = tracker.socket_map.values()
+            let name = tracker
+                .socket_map
+                .values()
                 .find(|(p, _)| *p == pid)
                 .map(|(_, n)| n.clone())
                 .unwrap_or_else(|| format!("PID {}", pid));
-            
-            let bandwidth = tracker.process_bandwidth.entry(pid).or_insert(ProcessBandwidth {
-                name,
-                rx_bytes: 0,
-                tx_bytes: 0,
-                last_rx_bytes: 0,
-                last_tx_bytes: 0,
-            });
+
+            let bandwidth = tracker
+                .process_bandwidth
+                .entry(pid)
+                .or_insert(ProcessBandwidth {
+                    name,
+                    rx_bytes: 0,
+                    tx_bytes: 0,
+                    last_rx_bytes: 0,
+                    last_tx_bytes: 0,
+                });
             bandwidth.tx_bytes += packet_len as u64;
         }
         // Check if this is an inbound packet (dst = local)
         else if let Some(&pid) = tracker.connection_map.get(&key_inbound) {
-            let name = tracker.socket_map.values()
+            let name = tracker
+                .socket_map
+                .values()
                 .find(|(p, _)| *p == pid)
                 .map(|(_, n)| n.clone())
                 .unwrap_or_else(|| format!("PID {}", pid));
-            
-            let bandwidth = tracker.process_bandwidth.entry(pid).or_insert(ProcessBandwidth {
-                name,
-                rx_bytes: 0,
-                tx_bytes: 0,
-                last_rx_bytes: 0,
-                last_tx_bytes: 0,
-            });
+
+            let bandwidth = tracker
+                .process_bandwidth
+                .entry(pid)
+                .or_insert(ProcessBandwidth {
+                    name,
+                    rx_bytes: 0,
+                    tx_bytes: 0,
+                    last_rx_bytes: 0,
+                    last_tx_bytes: 0,
+                });
             bandwidth.rx_bytes += packet_len as u64;
         }
     }
