@@ -9,6 +9,7 @@ pub struct ProcessInfo {
     pub total_download: u64, // total bytes
     pub total_upload: u64,   // total bytes
     pub throttle_limit: Option<ThrottleLimit>,
+    pub is_terminated: bool, // whether the process has terminated
 }
 
 #[derive(Debug, Clone)]
@@ -27,6 +28,7 @@ impl ProcessInfo {
             total_download: 0,
             total_upload: 0,
             throttle_limit: None,
+            is_terminated: false,
         }
     }
 

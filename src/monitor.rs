@@ -15,6 +15,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// How long to keep terminated processes visible (in seconds)
+const TERMINATED_DISPLAY_DURATION: Duration = Duration::from_secs(10);
+
 /// Connection identifier for tracking packets
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 struct ConnectionKey {
@@ -47,6 +50,8 @@ struct BandwidthTracker {
     socket_map: HashMap<u64, (i32, String)>,
     // PID -> bandwidth tracking
     process_bandwidth: HashMap<i32, ProcessBandwidth>,
+    // PID -> termination time (for showing terminated processes temporarily)
+    terminated_processes: HashMap<i32, Instant>,
 }
 
 struct ProcessBandwidth {
@@ -63,6 +68,7 @@ impl NetworkMonitor {
             connection_map: HashMap::new(),
             socket_map: HashMap::new(),
             process_bandwidth: HashMap::new(),
+            terminated_processes: HashMap::new(),
         }));
 
         // Start packet capture thread
@@ -91,7 +97,10 @@ impl NetworkMonitor {
         let mut process_map = ProcessMap::new();
         let mut tracker = self.bandwidth_tracker.lock().unwrap();
 
-        for (&pid, bandwidth) in &mut tracker.process_bandwidth {
+        // First pass: collect all data we need (to avoid multiple borrows)
+        let mut process_data = Vec::new();
+
+        for (&pid, bandwidth) in &tracker.process_bandwidth {
             let rx_diff = bandwidth.rx_bytes.saturating_sub(bandwidth.last_rx_bytes);
             let tx_diff = bandwidth.tx_bytes.saturating_sub(bandwidth.last_tx_bytes);
 
@@ -107,20 +116,97 @@ impl NetworkMonitor {
                 0
             };
 
-            // Update last values for next calculation
+            let process_exists = procfs::process::Process::new(pid).is_ok();
+            let term_time = tracker.terminated_processes.get(&pid).copied();
+
+            process_data.push((
+                pid,
+                bandwidth.name.clone(),
+                bandwidth.rx_bytes,
+                bandwidth.tx_bytes,
+                download_rate,
+                upload_rate,
+                process_exists,
+                term_time,
+            ));
+        }
+
+        // Update last values now that we're done reading
+        for (&pid, bandwidth) in &mut tracker.process_bandwidth {
             bandwidth.last_rx_bytes = bandwidth.rx_bytes;
             bandwidth.last_tx_bytes = bandwidth.tx_bytes;
+        }
 
-            // Check if process still exists before including it
-            if procfs::process::Process::new(pid).is_ok() {
-                let mut proc_info = ProcessInfo::new(pid, bandwidth.name.clone());
+        // Track PIDs to remove and newly terminated
+        let mut pids_to_remove = Vec::new();
+        let mut newly_terminated = Vec::new();
+
+        // Second pass: build process map based on collected data
+        for (
+            pid,
+            name,
+            rx_bytes,
+            tx_bytes,
+            download_rate,
+            upload_rate,
+            process_exists,
+            term_time,
+        ) in process_data
+        {
+            if process_exists {
+                // Process is alive - include it normally
+                let mut proc_info = ProcessInfo::new(pid, name);
                 proc_info.download_rate = download_rate;
                 proc_info.upload_rate = upload_rate;
-                proc_info.total_download = bandwidth.rx_bytes;
-                proc_info.total_upload = bandwidth.tx_bytes;
+                proc_info.total_download = rx_bytes;
+                proc_info.total_upload = tx_bytes;
+                proc_info.is_terminated = false;
 
                 process_map.insert(pid, proc_info);
+            } else {
+                // Process terminated
+                if let Some(term_time) = term_time {
+                    let since_termination = now.duration_since(term_time);
+
+                    if since_termination < TERMINATED_DISPLAY_DURATION {
+                        // Still within display window - show with skull icon
+                        let mut proc_info = ProcessInfo::new(pid, name);
+                        proc_info.download_rate = 0;
+                        proc_info.upload_rate = 0;
+                        proc_info.total_download = rx_bytes;
+                        proc_info.total_upload = tx_bytes;
+                        proc_info.is_terminated = true;
+
+                        process_map.insert(pid, proc_info);
+                    } else {
+                        // Too old - mark for removal
+                        pids_to_remove.push(pid);
+                    }
+                } else {
+                    // Newly terminated - show it and record termination time
+                    newly_terminated.push(pid);
+
+                    let mut proc_info = ProcessInfo::new(pid, name);
+                    proc_info.download_rate = 0;
+                    proc_info.upload_rate = 0;
+                    proc_info.total_download = rx_bytes;
+                    proc_info.total_upload = tx_bytes;
+                    proc_info.is_terminated = true;
+
+                    process_map.insert(pid, proc_info);
+                }
             }
+        }
+
+        // Record newly terminated processes
+        for pid in newly_terminated {
+            tracker.terminated_processes.insert(pid, now);
+        }
+
+        // Clean up old terminated processes
+        for pid in pids_to_remove {
+            tracker.process_bandwidth.remove(&pid);
+            tracker.terminated_processes.remove(&pid);
         }
 
         self.last_update = now;

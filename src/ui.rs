@@ -121,11 +121,18 @@ impl AppState {
     pub fn update_processes(&mut self, process_map: ProcessMap) {
         let mut processes: Vec<ProcessInfo> = process_map.into_values().collect();
 
-        // Sort by total bandwidth (download + upload)
+        // Sort: terminated processes go to bottom, then by total bandwidth
         processes.sort_by(|a, b| {
-            let a_total = a.download_rate + a.upload_rate;
-            let b_total = b.download_rate + b.upload_rate;
-            b_total.cmp(&a_total)
+            match (a.is_terminated, b.is_terminated) {
+                (true, false) => std::cmp::Ordering::Greater, // a terminated, b active -> a goes after b
+                (false, true) => std::cmp::Ordering::Less, // a active, b terminated -> a goes before b
+                _ => {
+                    // Both have same termination state, sort by bandwidth
+                    let a_total = a.download_rate + a.upload_rate;
+                    let b_total = b.download_rate + b.upload_rate;
+                    b_total.cmp(&a_total)
+                }
+            }
         });
 
         self.process_list = processes;
@@ -227,13 +234,54 @@ fn draw_process_list(f: &mut Frame, area: Rect, app: &mut AppState) {
         .iter()
         .enumerate()
         .map(|(index, proc)| {
-            let throttle_indicator = if proc.is_throttled() { "⚡" } else { " " };
+            // Determine status indicator: throttled (⚡), terminated (💀), or nothing
+            let status_indicator = if proc.is_throttled() {
+                "⚡"
+            } else if proc.is_terminated {
+                "💀"
+            } else {
+                " "
+            };
 
             // Manual selection indicator - always present for consistent alignment
             let selection_indicator = if Some(index) == app.list_state.selected() {
                 "▶ "
             } else {
                 "  "
+            };
+
+            // Use gray colors for terminated processes
+            let terminated_color = Color::Gray;
+
+            let name_color = if proc.is_terminated {
+                terminated_color
+            } else {
+                Color::White
+            };
+            let dl_rate_color = if proc.is_terminated {
+                terminated_color
+            } else {
+                Color::Green
+            };
+            let ul_rate_color = if proc.is_terminated {
+                terminated_color
+            } else {
+                Color::Yellow
+            };
+            let dl_total_color = if proc.is_terminated {
+                terminated_color
+            } else {
+                Color::Cyan
+            };
+            let ul_total_color = if proc.is_terminated {
+                terminated_color
+            } else {
+                Color::Magenta
+            };
+            let status_color = if proc.is_terminated {
+                terminated_color
+            } else {
+                Color::Red
             };
 
             let content = Line::from(vec![
@@ -248,27 +296,29 @@ fn draw_process_list(f: &mut Frame, area: Rect, app: &mut AppState) {
                             proc.name.clone()
                         }
                     ),
-                    Style::default().fg(Color::White),
+                    Style::default().fg(name_color),
                 ),
                 Span::styled(
                     format!("↓{:>10} ", ProcessInfo::format_rate(proc.download_rate)),
-                    Style::default().fg(Color::Green),
+                    Style::default().fg(dl_rate_color),
                 ),
                 Span::styled(
                     format!("↑{:>10} ", ProcessInfo::format_rate(proc.upload_rate)),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(ul_rate_color),
                 ),
                 Span::styled(
                     format!("{:>10} ", ProcessInfo::format_bytes(proc.total_download)),
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(dl_total_color),
                 ),
                 Span::styled(
                     format!("{:>10} ", ProcessInfo::format_bytes(proc.total_upload)),
-                    Style::default().fg(Color::Magenta),
+                    Style::default().fg(ul_total_color),
                 ),
                 Span::styled(
-                    throttle_indicator,
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    status_indicator,
+                    Style::default()
+                        .fg(status_color)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]);
 
@@ -286,7 +336,7 @@ fn draw_process_list(f: &mut Frame, area: Rect, app: &mut AppState) {
         Span::styled("UL Rate    ", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled("Total DL   ", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled("Total UL   ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::styled("Throttled", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("Status", Style::default().add_modifier(Modifier::BOLD)),
     ]);
 
     // Split the area: header takes first row inside border, list gets the rest
