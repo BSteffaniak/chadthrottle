@@ -8,7 +8,7 @@ mod ui;
 use anyhow::Result;
 use clap::Parser;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -302,6 +302,11 @@ async fn run_app<B: ratatui::backend::Backend>(
                         _ => {}
                     }
                     continue;
+                }
+
+                // Check for Ctrl+C first
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                    return Ok(());
                 }
 
                 match key.code {
