@@ -139,6 +139,15 @@ pub fn detect_download_backends() -> Vec<DownloadBackendInfo> {
         });
     }
 
+    #[cfg(feature = "throttle-tc-police")]
+    {
+        backends.push(DownloadBackendInfo {
+            name: "tc_police",
+            priority: BackendPriority::Fallback,
+            available: download::linux::tc_police::TcPoliceDownload::is_available(),
+        });
+    }
+
     backends
 }
 
@@ -192,6 +201,9 @@ fn create_download_backend(name: &str) -> Result<Box<dyn DownloadThrottleBackend
     match name {
         #[cfg(feature = "throttle-ifb-tc")]
         "ifb_tc" => Ok(Box::new(download::linux::ifb_tc::IfbTcDownload::new()?)),
+
+        #[cfg(feature = "throttle-tc-police")]
+        "tc_police" => Ok(Box::new(download::linux::tc_police::TcPoliceDownload::new()?)),
 
         _ => Err(anyhow::anyhow!("Unknown download backend: {}", name)),
     }
