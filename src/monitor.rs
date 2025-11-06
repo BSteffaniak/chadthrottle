@@ -111,8 +111,8 @@ impl NetworkMonitor {
             bandwidth.last_rx_bytes = bandwidth.rx_bytes;
             bandwidth.last_tx_bytes = bandwidth.tx_bytes;
 
-            // Only show processes with activity
-            if download_rate > 0 || upload_rate > 0 {
+            // Check if process still exists before including it
+            if procfs::process::Process::new(pid).is_ok() {
                 let mut proc_info = ProcessInfo::new(pid, bandwidth.name.clone());
                 proc_info.download_rate = download_rate;
                 proc_info.upload_rate = upload_rate;
