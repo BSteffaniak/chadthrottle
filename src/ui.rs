@@ -322,41 +322,56 @@ fn draw_process_list(f: &mut Frame, area: Rect, app: &mut AppState) {
 }
 
 fn draw_status_bar(f: &mut Frame, area: Rect, app: &AppState) {
-    let status = Paragraph::new(vec![Line::from(vec![
-        Span::styled("[↑↓]", Style::default().fg(Color::Yellow)),
-        Span::raw(" Navigate  "),
-        Span::styled("[t]", Style::default().fg(Color::Yellow)),
-        Span::raw(" Throttle  "),
-        Span::styled("[h]", Style::default().fg(Color::Yellow)),
-        Span::raw(" Help  "),
-        Span::styled("[q]", Style::default().fg(Color::Yellow)),
-        Span::raw(" Quit  |  "),
-        Span::styled(&app.status_message, Style::default().fg(Color::Gray)),
-    ])])
-    .block(Block::default().borders(Borders::ALL));
+    // Auto-generate status bar from centralized keybindings
+    let mut spans = vec![];
+
+    for (i, (key, description)) in crate::keybindings::get_status_bar_keybindings()
+        .iter()
+        .enumerate()
+    {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(
+            format!("[{}]", key),
+            Style::default().fg(Color::Yellow),
+        ));
+        spans.push(Span::raw(format!(" {}  ", description)));
+    }
+
+    spans.push(Span::raw("|  "));
+    spans.push(Span::styled(
+        &app.status_message,
+        Style::default().fg(Color::Gray),
+    ));
+
+    let status =
+        Paragraph::new(vec![Line::from(spans)]).block(Block::default().borders(Borders::ALL));
 
     f.render_widget(status, area);
 }
 
 fn draw_help_overlay(f: &mut Frame, area: Rect) {
-    let help_text = vec![
+    // Auto-generate help text from centralized keybindings
+    let mut help_text = vec![
         Line::from(""),
         Line::from(Span::styled(
             "ChadThrottle - Keyboard Shortcuts",
             Style::default().add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from("  ↑/k         - Move selection up"),
-        Line::from("  ↓/j         - Move selection down"),
-        Line::from("  t           - Throttle selected process"),
-        Line::from("  r           - Remove throttle"),
-        Line::from("  g           - Toggle bandwidth graph"),
-        Line::from("  l           - Launch process with throttle"),
-        Line::from("  h/?         - Toggle this help"),
-        Line::from("  q/Esc       - Quit"),
-        Line::from(""),
-        Line::from("Press any key to close..."),
     ];
+
+    // Get all keybindings and generate help lines
+    for binding in crate::keybindings::get_all_keybindings() {
+        help_text.push(Line::from(format!(
+            "  {:12} - {}",
+            binding.key, binding.description
+        )));
+    }
+
+    help_text.push(Line::from(""));
+    help_text.push(Line::from("Press any key to close..."));
 
     let help = Paragraph::new(help_text)
         .style(Style::default().bg(Color::Black).fg(Color::White))

@@ -1,6 +1,7 @@
 mod backends;
 mod config;
 mod history;
+mod keybindings;
 mod monitor;
 mod process;
 mod ui;
