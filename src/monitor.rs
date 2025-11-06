@@ -16,7 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 /// How long to keep terminated processes visible (in seconds)
-const TERMINATED_DISPLAY_DURATION: Duration = Duration::from_secs(10);
+const TERMINATED_DISPLAY_DURATION: Duration = Duration::from_secs(5);
 
 /// Connection identifier for tracking packets
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
