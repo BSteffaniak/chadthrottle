@@ -215,10 +215,19 @@ fn draw_process_list(f: &mut Frame, area: Rect, app: &mut AppState) {
     let items: Vec<ListItem> = app
         .process_list
         .iter()
-        .map(|proc| {
+        .enumerate()
+        .map(|(index, proc)| {
             let throttle_indicator = if proc.is_throttled() { "⚡" } else { " " };
 
+            // Manual selection indicator - always present for consistent alignment
+            let selection_indicator = if Some(index) == app.list_state.selected() {
+                "▶ "
+            } else {
+                "  "
+            };
+
             let content = Line::from(vec![
+                Span::styled(selection_indicator, Style::default().fg(Color::Yellow)),
                 Span::raw(format!("{:7} ", proc.pid)),
                 Span::styled(
                     format!(
@@ -280,12 +289,12 @@ fn draw_process_list(f: &mut Frame, area: Rect, app: &mut AppState) {
             Style::default()
                 .bg(Color::DarkGray)
                 .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("▶ ");
+        );
 
     // Render header separately
+    // +2 for border, +2 for manual selection indicator "▶ " or "  "
     let header_area = Rect {
-        x: area.x + 2,
+        x: area.x + 4,
         y: area.y + 1,
         width: area.width - 4,
         height: 1,
