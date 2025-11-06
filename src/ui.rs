@@ -240,6 +240,14 @@ fn draw_process_list(f: &mut Frame, area: Rect, app: &mut AppState) {
                     Style::default().fg(Color::Yellow),
                 ),
                 Span::styled(
+                    format!("{:>10} ", ProcessInfo::format_bytes(proc.total_download)),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(
+                    format!("{:>10} ", ProcessInfo::format_bytes(proc.total_upload)),
+                    Style::default().fg(Color::Magenta),
+                ),
+                Span::styled(
                     throttle_indicator,
                     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 ),
@@ -255,8 +263,10 @@ fn draw_process_list(f: &mut Frame, area: Rect, app: &mut AppState) {
             "Process              ",
             Style::default().add_modifier(Modifier::BOLD),
         ),
-        Span::styled("Download   ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::styled("Upload     ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("DL Rate    ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("UL Rate    ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("Total DL   ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("Total UL   ", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled("T", Style::default().add_modifier(Modifier::BOLD)),
     ]);
 
