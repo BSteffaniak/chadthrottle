@@ -1,0 +1,186 @@
+// Throttling backend traits and implementations
+
+use anyhow::Result;
+use std::collections::HashMap;
+use super::{BackendCapabilities, BackendPriority, ActiveThrottle};
+
+pub mod upload;
+pub mod download;
+pub mod manager;
+
+/// Upload (egress) throttling backend trait
+pub trait UploadThrottleBackend: Send + Sync {
+    /// Backend name (e.g., "tc_htb", "ebpf_cgroup", "wfp")
+    fn name(&self) -> &'static str;
+    
+    /// Backend priority for auto-selection
+    fn priority(&self) -> BackendPriority;
+    
+    /// Check if this backend is available on the current system
+    fn is_available() -> bool where Self: Sized;
+    
+    /// Get backend capabilities
+    fn capabilities(&self) -> BackendCapabilities;
+    
+    /// Initialize the backend
+    fn init(&mut self) -> Result<()>;
+    
+    /// Apply upload throttle to a process
+    fn throttle_upload(
+        &mut self,
+        pid: i32,
+        process_name: String,
+        limit_bytes_per_sec: u64,
+    ) -> Result<()>;
+    
+    /// Remove upload throttle from a process
+    fn remove_upload_throttle(&mut self, pid: i32) -> Result<()>;
+    
+    /// Get active upload throttle for a process
+    fn get_upload_throttle(&self, pid: i32) -> Option<u64>;
+    
+    /// Get all active upload throttles
+    fn get_all_throttles(&self) -> HashMap<i32, u64>;
+    
+    /// Cleanup on shutdown
+    fn cleanup(&mut self) -> Result<()>;
+}
+
+/// Download (ingress) throttling backend trait
+pub trait DownloadThrottleBackend: Send + Sync {
+    /// Backend name (e.g., "ifb_tc", "ebpf_cgroup", "ebpf_xdp")
+    fn name(&self) -> &'static str;
+    
+    /// Backend priority for auto-selection
+    fn priority(&self) -> BackendPriority;
+    
+    /// Check if this backend is available on the current system
+    fn is_available() -> bool where Self: Sized;
+    
+    /// Get backend capabilities
+    fn capabilities(&self) -> BackendCapabilities;
+    
+    /// Initialize the backend
+    fn init(&mut self) -> Result<()>;
+    
+    /// Apply download throttle to a process
+    fn throttle_download(
+        &mut self,
+        pid: i32,
+        process_name: String,
+        limit_bytes_per_sec: u64,
+    ) -> Result<()>;
+    
+    /// Remove download throttle from a process
+    fn remove_download_throttle(&mut self, pid: i32) -> Result<()>;
+    
+    /// Get active download throttle for a process
+    fn get_download_throttle(&self, pid: i32) -> Option<u64>;
+    
+    /// Get all active download throttles
+    fn get_all_throttles(&self) -> HashMap<i32, u64>;
+    
+    /// Cleanup on shutdown
+    fn cleanup(&mut self) -> Result<()>;
+}
+
+/// Upload backend metadata for selection
+#[derive(Debug, Clone)]
+pub struct UploadBackendInfo {
+    pub name: &'static str,
+    pub priority: BackendPriority,
+    pub available: bool,
+}
+
+/// Download backend metadata for selection
+#[derive(Debug, Clone)]
+pub struct DownloadBackendInfo {
+    pub name: &'static str,
+    pub priority: BackendPriority,
+    pub available: bool,
+}
+
+/// Detect all available upload backends
+pub fn detect_upload_backends() -> Vec<UploadBackendInfo> {
+    let mut backends = Vec::new();
+    
+    #[cfg(feature = "throttle-tc-htb")]
+    {
+        backends.push(UploadBackendInfo {
+            name: "tc_htb",
+            priority: BackendPriority::Good,
+            available: upload::linux::tc_htb::TcHtbUpload::is_available(),
+        });
+    }
+    
+    backends
+}
+
+/// Detect all available download backends
+pub fn detect_download_backends() -> Vec<DownloadBackendInfo> {
+    let mut backends = Vec::new();
+    
+    #[cfg(feature = "throttle-ifb-tc")]
+    {
+        backends.push(DownloadBackendInfo {
+            name: "ifb_tc",
+            priority: BackendPriority::Good,
+            available: download::linux::ifb_tc::IfbTcDownload::is_available(),
+        });
+    }
+    
+    backends
+}
+
+/// Auto-select best available upload backend
+pub fn select_upload_backend(preference: Option<&str>) -> Result<Box<dyn UploadThrottleBackend>> {
+    let available = detect_upload_backends();
+    
+    if let Some(name) = preference {
+        return create_upload_backend(name);
+    }
+    
+    // Auto-select best available
+    available
+        .iter()
+        .filter(|b| b.available)
+        .max_by_key(|b| b.priority)
+        .and_then(|info| create_upload_backend(info.name).ok())
+        .ok_or_else(|| anyhow::anyhow!("No upload throttling backend available"))
+}
+
+/// Auto-select best available download backend (returns None if unavailable)
+pub fn select_download_backend(preference: Option<&str>) -> Option<Box<dyn DownloadThrottleBackend>> {
+    let available = detect_download_backends();
+    
+    if let Some(name) = preference {
+        return create_download_backend(name).ok();
+    }
+    
+    // Auto-select best available
+    available
+        .iter()
+        .filter(|b| b.available)
+        .max_by_key(|b| b.priority)
+        .and_then(|info| create_download_backend(info.name).ok())
+}
+
+/// Create an upload backend by name
+fn create_upload_backend(name: &str) -> Result<Box<dyn UploadThrottleBackend>> {
+    match name {
+        #[cfg(feature = "throttle-tc-htb")]
+        "tc_htb" => Ok(Box::new(upload::linux::tc_htb::TcHtbUpload::new()?)),
+        
+        _ => Err(anyhow::anyhow!("Unknown upload backend: {}", name)),
+    }
+}
+
+/// Create a download backend by name
+fn create_download_backend(name: &str) -> Result<Box<dyn DownloadThrottleBackend>> {
+    match name {
+        #[cfg(feature = "throttle-ifb-tc")]
+        "ifb_tc" => Ok(Box::new(download::linux::ifb_tc::IfbTcDownload::new()?)),
+        
+        _ => Err(anyhow::anyhow!("Unknown download backend: {}", name)),
+    }
+}
