@@ -219,7 +219,7 @@ fn draw_process_list(f: &mut Frame, area: Rect, app: &mut AppState) {
             let throttle_indicator = if proc.is_throttled() { "⚡" } else { " " };
 
             let content = Line::from(vec![
-                Span::raw(format!("{:6} ", proc.pid)),
+                Span::raw(format!("{:7} ", proc.pid)),
                 Span::styled(
                     format!(
                         "{:20} ",
@@ -258,7 +258,7 @@ fn draw_process_list(f: &mut Frame, area: Rect, app: &mut AppState) {
         .collect();
 
     let header = Line::from(vec![
-        Span::styled("PID    ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("PID     ", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled(
             "Process              ",
             Style::default().add_modifier(Modifier::BOLD),
