@@ -246,6 +246,11 @@ async fn run_app<B: ratatui::backend::Backend>(
         // Handle input with timeout
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
+                // ALWAYS check Ctrl+C first - force quit regardless of modal state
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                    return Ok(());
+                }
+
                 // If help is shown, any key closes it
                 if app.show_help {
                     app.show_help = false;
@@ -303,11 +308,6 @@ async fn run_app<B: ratatui::backend::Backend>(
                         _ => {}
                     }
                     continue;
-                }
-
-                // Check for Ctrl+C first
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                    return Ok(());
                 }
 
                 match key.code {

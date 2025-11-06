@@ -62,8 +62,13 @@ pub fn get_all_keybindings() -> Vec<KeyBinding> {
             category: KeyCategory::System,
         },
         KeyBinding {
-            key: "q/Esc/Ctrl+C",
-            description: "Quit",
+            key: "q/Esc",
+            description: "Quit (or close modal if open)",
+            category: KeyCategory::System,
+        },
+        KeyBinding {
+            key: "Ctrl+C",
+            description: "Force quit (always exits)",
             category: KeyCategory::System,
         },
     ]
