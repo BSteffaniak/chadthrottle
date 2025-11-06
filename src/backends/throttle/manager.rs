@@ -116,6 +116,43 @@ impl ThrottleManager {
         self.download_backend.is_some()
     }
 
+    /// Get all active throttles (merged from upload and download backends)
+    pub fn get_all_throttles(&self) -> HashMap<i32, ActiveThrottle> {
+        let mut throttles: HashMap<i32, ActiveThrottle> = HashMap::new();
+
+        // Collect upload throttles
+        if let Some(ref backend) = self.upload_backend {
+            for (pid, upload_limit) in backend.get_all_throttles() {
+                throttles.entry(pid).or_insert_with(|| ActiveThrottle {
+                    pid,
+                    process_name: String::new(),
+                    upload_limit: Some(upload_limit),
+                    download_limit: None,
+                });
+                if let Some(throttle) = throttles.get_mut(&pid) {
+                    throttle.upload_limit = Some(upload_limit);
+                }
+            }
+        }
+
+        // Collect download throttles
+        if let Some(ref backend) = self.download_backend {
+            for (pid, download_limit) in backend.get_all_throttles() {
+                throttles.entry(pid).or_insert_with(|| ActiveThrottle {
+                    pid,
+                    process_name: String::new(),
+                    upload_limit: None,
+                    download_limit: Some(download_limit),
+                });
+                if let Some(throttle) = throttles.get_mut(&pid) {
+                    throttle.download_limit = Some(download_limit);
+                }
+            }
+        }
+
+        throttles
+    }
+
     /// Cleanup all throttles
     pub fn cleanup(&mut self) -> Result<()> {
         if let Some(ref mut backend) = self.upload_backend {

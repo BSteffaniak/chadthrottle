@@ -1,0 +1,127 @@
+// Configuration save/restore functionality
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
+
+const CONFIG_DIR: &str = ".config/chadthrottle";
+const CONFIG_FILE: &str = "throttles.json";
+
+/// Saved throttle configuration for a process
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedThrottle {
+    pub process_name: String,
+    pub upload_limit: Option<u64>,
+    pub download_limit: Option<u64>,
+}
+
+/// Configuration file structure
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Config {
+    /// Throttles by PID
+    pub throttles: HashMap<i32, SavedThrottle>,
+
+    /// Auto-restore throttles on startup
+    pub auto_restore: bool,
+
+    /// Preferred upload backend
+    pub preferred_upload_backend: Option<String>,
+
+    /// Preferred download backend
+    pub preferred_download_backend: Option<String>,
+}
+
+impl Config {
+    /// Get the config file path
+    pub fn config_path() -> Result<PathBuf> {
+        let home = std::env::var("HOME").context("HOME environment variable not set")?;
+        let config_dir = PathBuf::from(home).join(CONFIG_DIR);
+
+        // Create config directory if it doesn't exist
+        fs::create_dir_all(&config_dir).context(format!(
+            "Failed to create config directory: {:?}",
+            config_dir
+        ))?;
+
+        Ok(config_dir.join(CONFIG_FILE))
+    }
+
+    /// Load configuration from disk
+    pub fn load() -> Result<Self> {
+        let path = Self::config_path()?;
+
+        if !path.exists() {
+            log::debug!("Config file not found, using defaults");
+            return Ok(Config::default());
+        }
+
+        let contents =
+            fs::read_to_string(&path).context(format!("Failed to read config file: {:?}", path))?;
+
+        let config: Config =
+            serde_json::from_str(&contents).context("Failed to parse config file")?;
+
+        log::info!("Loaded configuration from {:?}", path);
+        Ok(config)
+    }
+
+    /// Save configuration to disk
+    pub fn save(&self) -> Result<()> {
+        let path = Self::config_path()?;
+
+        let contents = serde_json::to_string_pretty(self).context("Failed to serialize config")?;
+
+        fs::write(&path, contents).context(format!("Failed to write config file: {:?}", path))?;
+
+        log::info!("Saved configuration to {:?}", path);
+        Ok(())
+    }
+
+    /// Add or update a throttle
+    pub fn set_throttle(&mut self, pid: i32, throttle: SavedThrottle) {
+        self.throttles.insert(pid, throttle);
+    }
+
+    /// Remove a throttle
+    pub fn remove_throttle(&mut self, pid: i32) {
+        self.throttles.remove(&pid);
+    }
+
+    /// Get all saved throttles
+    pub fn get_throttles(&self) -> &HashMap<i32, SavedThrottle> {
+        &self.throttles
+    }
+
+    /// Clear all throttles
+    pub fn clear_throttles(&mut self) {
+        self.throttles.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_serialization() {
+        let mut config = Config::default();
+        config.auto_restore = true;
+        config.set_throttle(
+            1234,
+            SavedThrottle {
+                process_name: "firefox".to_string(),
+                upload_limit: Some(1000000),
+                download_limit: Some(5000000),
+            },
+        );
+
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        println!("{}", json);
+
+        let deserialized: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.throttles.len(), 1);
+        assert_eq!(deserialized.auto_restore, true);
+    }
+}

@@ -1,8 +1,8 @@
 // Network monitoring backend trait and implementations
 
-use anyhow::Result;
-use crate::process::ProcessMap;
 use super::{BackendCapabilities, BackendPriority};
+use crate::process::ProcessMap;
+use anyhow::Result;
 
 #[cfg(feature = "monitor-pnet")]
 pub mod pnet;
@@ -11,22 +11,24 @@ pub mod pnet;
 pub trait MonitorBackend: Send + Sync {
     /// Backend name (e.g., "pnet", "ebpf", "wfp")
     fn name(&self) -> &'static str;
-    
+
     /// Backend priority for auto-selection
     fn priority(&self) -> BackendPriority;
-    
+
     /// Check if this backend is available on the current system
-    fn is_available() -> bool where Self: Sized;
-    
+    fn is_available() -> bool
+    where
+        Self: Sized;
+
     /// Get backend capabilities
     fn capabilities(&self) -> BackendCapabilities;
-    
+
     /// Initialize the monitor
     fn init(&mut self) -> Result<()>;
-    
+
     /// Update network statistics (called periodically)
     fn update(&mut self) -> Result<ProcessMap>;
-    
+
     /// Cleanup on shutdown
     fn cleanup(&mut self) -> Result<()>;
 }
@@ -42,7 +44,7 @@ pub struct MonitorBackendInfo {
 /// Detect all available monitor backends on current system
 pub fn detect_available_backends() -> Vec<MonitorBackendInfo> {
     let mut backends = Vec::new();
-    
+
     #[cfg(feature = "monitor-pnet")]
     {
         backends.push(MonitorBackendInfo {
@@ -51,19 +53,19 @@ pub fn detect_available_backends() -> Vec<MonitorBackendInfo> {
             available: pnet::PnetMonitor::is_available(),
         });
     }
-    
+
     backends
 }
 
 /// Auto-select best available monitor backend
 pub fn select_monitor_backend(preference: Option<&str>) -> Result<Box<dyn MonitorBackend>> {
     let available = detect_available_backends();
-    
+
     if let Some(name) = preference {
         // User explicitly requested a backend
         return create_monitor_backend(name);
     }
-    
+
     // Auto-select best available
     available
         .iter()
@@ -78,7 +80,7 @@ fn create_monitor_backend(name: &str) -> Result<Box<dyn MonitorBackend>> {
     match name {
         #[cfg(feature = "monitor-pnet")]
         "pnet" => Ok(Box::new(pnet::PnetMonitor::new()?)),
-        
+
         _ => Err(anyhow::anyhow!("Unknown monitor backend: {}", name)),
     }
 }

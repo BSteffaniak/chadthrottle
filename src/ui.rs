@@ -1,11 +1,16 @@
+use crate::history::HistoryTracker;
+use crate::process::{ProcessInfo, ProcessMap};
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
+    symbols,
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Clear},
-    Frame,
+    widgets::{
+        Axis, Block, Borders, Chart, Clear, Dataset, GraphType, List, ListItem, ListState,
+        Paragraph,
+    },
 };
-use crate::process::{ProcessInfo, ProcessMap};
 
 pub struct AppState {
     pub process_list: Vec<ProcessInfo>,
@@ -15,6 +20,8 @@ pub struct AppState {
     pub show_throttle_dialog: bool,
     pub throttle_dialog: ThrottleDialog,
     pub status_message: String,
+    pub history: HistoryTracker,
+    pub show_graph: bool,
 }
 
 pub struct ThrottleDialog {
@@ -59,8 +66,12 @@ impl ThrottleDialog {
 
     pub fn handle_backspace(&mut self) {
         match self.selected_field {
-            ThrottleField::Download => { self.download_input.pop(); },
-            ThrottleField::Upload => { self.upload_input.pop(); },
+            ThrottleField::Download => {
+                self.download_input.pop();
+            }
+            ThrottleField::Upload => {
+                self.upload_input.pop();
+            }
         }
     }
 
@@ -93,11 +104,13 @@ impl AppState {
     pub fn new() -> Self {
         let mut list_state = ListState::default();
         list_state.select(Some(0));
-        
+
         Self {
             process_list: Vec::new(),
             selected_index: 0,
             list_state,
+            history: HistoryTracker::new(),
+            show_graph: false,
             show_help: false,
             show_throttle_dialog: false,
             throttle_dialog: ThrottleDialog::new(),
@@ -107,16 +120,16 @@ impl AppState {
 
     pub fn update_processes(&mut self, process_map: ProcessMap) {
         let mut processes: Vec<ProcessInfo> = process_map.into_values().collect();
-        
+
         // Sort by total bandwidth (download + upload)
         processes.sort_by(|a, b| {
             let a_total = a.download_rate + a.upload_rate;
             let b_total = b.download_rate + b.upload_rate;
             b_total.cmp(&a_total)
         });
-        
+
         self.process_list = processes;
-        
+
         // Adjust selection if out of bounds
         if self.selected_index >= self.process_list.len() && !self.process_list.is_empty() {
             self.selected_index = self.process_list.len() - 1;
@@ -128,7 +141,7 @@ impl AppState {
         if self.process_list.is_empty() {
             return;
         }
-        
+
         self.selected_index = (self.selected_index + 1) % self.process_list.len();
         self.list_state.select(Some(self.selected_index));
     }
@@ -137,7 +150,7 @@ impl AppState {
         if self.process_list.is_empty() {
             return;
         }
-        
+
         if self.selected_index == 0 {
             self.selected_index = self.process_list.len() - 1;
         } else {
@@ -155,9 +168,9 @@ pub fn draw_ui(f: &mut Frame, app: &mut AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Header
-            Constraint::Min(10),    // Process list
-            Constraint::Length(3),  // Status bar
+            Constraint::Length(3), // Header
+            Constraint::Min(10),   // Process list
+            Constraint::Length(3), // Status bar
         ])
         .split(f.area());
 
@@ -179,56 +192,69 @@ pub fn draw_ui(f: &mut Frame, app: &mut AppState) {
     if app.show_throttle_dialog {
         draw_throttle_dialog(f, f.area(), app);
     }
+
+    // Bandwidth graph overlay
+    if app.show_graph {
+        draw_bandwidth_graph(f, f.area(), app);
+    }
 }
 
 fn draw_header(f: &mut Frame, area: Rect) {
     let header = Paragraph::new("🔥 ChadThrottle v0.1.0 - Network Monitor & Throttler 🔥")
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .block(Block::default().borders(Borders::ALL));
-    
+
     f.render_widget(header, area);
 }
 
 fn draw_process_list(f: &mut Frame, area: Rect, app: &mut AppState) {
-    let items: Vec<ListItem> = app.process_list.iter().map(|proc| {
-        let throttle_indicator = if proc.is_throttled() {
-            "⚡"
-        } else {
-            " "
-        };
-        
-        let content = Line::from(vec![
-            Span::raw(format!("{:6} ", proc.pid)),
-            Span::styled(
-                format!("{:20} ", 
-                    if proc.name.len() > 20 {
-                        format!("{}...", &proc.name[..17])
-                    } else {
-                        proc.name.clone()
-                    }
+    let items: Vec<ListItem> = app
+        .process_list
+        .iter()
+        .map(|proc| {
+            let throttle_indicator = if proc.is_throttled() { "⚡" } else { " " };
+
+            let content = Line::from(vec![
+                Span::raw(format!("{:6} ", proc.pid)),
+                Span::styled(
+                    format!(
+                        "{:20} ",
+                        if proc.name.len() > 20 {
+                            format!("{}...", &proc.name[..17])
+                        } else {
+                            proc.name.clone()
+                        }
+                    ),
+                    Style::default().fg(Color::White),
                 ),
-                Style::default().fg(Color::White)
-            ),
-            Span::styled(
-                format!("↓{:>10} ", ProcessInfo::format_rate(proc.download_rate)),
-                Style::default().fg(Color::Green)
-            ),
-            Span::styled(
-                format!("↑{:>10} ", ProcessInfo::format_rate(proc.upload_rate)),
-                Style::default().fg(Color::Yellow)
-            ),
-            Span::styled(
-                throttle_indicator,
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-            ),
-        ]);
-        
-        ListItem::new(content)
-    }).collect();
+                Span::styled(
+                    format!("↓{:>10} ", ProcessInfo::format_rate(proc.download_rate)),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::styled(
+                    format!("↑{:>10} ", ProcessInfo::format_rate(proc.upload_rate)),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled(
+                    throttle_indicator,
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+            ]);
+
+            ListItem::new(content)
+        })
+        .collect();
 
     let header = Line::from(vec![
         Span::styled("PID    ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::styled("Process              ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Process              ",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
         Span::styled("Download   ", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled("Upload     ", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled("T", Style::default().add_modifier(Modifier::BOLD)),
@@ -238,12 +264,12 @@ fn draw_process_list(f: &mut Frame, area: Rect, app: &mut AppState) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Network Activity")
+                .title("Network Activity"),
         )
         .highlight_style(
             Style::default()
                 .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▶ ");
 
@@ -260,19 +286,17 @@ fn draw_process_list(f: &mut Frame, area: Rect, app: &mut AppState) {
 }
 
 fn draw_status_bar(f: &mut Frame, area: Rect, app: &AppState) {
-    let status = Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled("[↑↓]", Style::default().fg(Color::Yellow)),
-            Span::raw(" Navigate  "),
-            Span::styled("[t]", Style::default().fg(Color::Yellow)),
-            Span::raw(" Throttle  "),
-            Span::styled("[h]", Style::default().fg(Color::Yellow)),
-            Span::raw(" Help  "),
-            Span::styled("[q]", Style::default().fg(Color::Yellow)),
-            Span::raw(" Quit  |  "),
-            Span::styled(&app.status_message, Style::default().fg(Color::Gray)),
-        ]),
-    ])
+    let status = Paragraph::new(vec![Line::from(vec![
+        Span::styled("[↑↓]", Style::default().fg(Color::Yellow)),
+        Span::raw(" Navigate  "),
+        Span::styled("[t]", Style::default().fg(Color::Yellow)),
+        Span::raw(" Throttle  "),
+        Span::styled("[h]", Style::default().fg(Color::Yellow)),
+        Span::raw(" Help  "),
+        Span::styled("[q]", Style::default().fg(Color::Yellow)),
+        Span::raw(" Quit  |  "),
+        Span::styled(&app.status_message, Style::default().fg(Color::Gray)),
+    ])])
     .block(Block::default().borders(Borders::ALL));
 
     f.render_widget(status, area);
@@ -281,12 +305,16 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &AppState) {
 fn draw_help_overlay(f: &mut Frame, area: Rect) {
     let help_text = vec![
         Line::from(""),
-        Line::from(Span::styled("ChadThrottle - Keyboard Shortcuts", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            "ChadThrottle - Keyboard Shortcuts",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
         Line::from(""),
         Line::from("  ↑/k         - Move selection up"),
         Line::from("  ↓/j         - Move selection down"),
         Line::from("  t           - Throttle selected process"),
         Line::from("  r           - Remove throttle"),
+        Line::from("  g           - Toggle bandwidth graph"),
         Line::from("  l           - Launch process with throttle"),
         Line::from("  h/?         - Toggle this help"),
         Line::from("  q/Esc       - Quit"),
@@ -300,7 +328,7 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .title("Help")
-                .style(Style::default().fg(Color::Cyan))
+                .style(Style::default().fg(Color::Cyan)),
         );
 
     let help_area = centered_rect(60, 50, area);
@@ -330,7 +358,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 
 fn draw_throttle_dialog(f: &mut Frame, area: Rect, app: &AppState) {
     let dialog = &app.throttle_dialog;
-    
+
     let title = if let (Some(pid), Some(name)) = (dialog.target_pid, &dialog.target_name) {
         format!("Throttle: {} (PID {})", name, pid)
     } else {
@@ -338,13 +366,17 @@ fn draw_throttle_dialog(f: &mut Frame, area: Rect, app: &AppState) {
     };
 
     let download_style = if dialog.selected_field == ThrottleField::Download {
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::White)
     };
 
     let upload_style = if dialog.selected_field == ThrottleField::Upload {
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::White)
     };
@@ -354,23 +386,31 @@ fn draw_throttle_dialog(f: &mut Frame, area: Rect, app: &AppState) {
         Line::from(vec![
             Span::styled("Download Limit (KB/s): ", download_style),
             Span::styled(
-                if dialog.download_input.is_empty() { "unlimited" } else { &dialog.download_input },
-                download_style
+                if dialog.download_input.is_empty() {
+                    "unlimited"
+                } else {
+                    &dialog.download_input
+                },
+                download_style,
             ),
         ]),
         Line::from(""),
         Line::from(vec![
             Span::styled("Upload Limit (KB/s):   ", upload_style),
             Span::styled(
-                if dialog.upload_input.is_empty() { "unlimited" } else { &dialog.upload_input },
-                upload_style
+                if dialog.upload_input.is_empty() {
+                    "unlimited"
+                } else {
+                    &dialog.upload_input
+                },
+                upload_style,
             ),
         ]),
         Line::from(""),
         Line::from(""),
         Line::from(Span::styled(
             "[Tab] Switch field  [Enter] Apply  [Esc] Cancel",
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(Color::DarkGray),
         )),
     ];
 
@@ -380,10 +420,108 @@ fn draw_throttle_dialog(f: &mut Frame, area: Rect, app: &AppState) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(title)
-                .style(Style::default().fg(Color::Cyan))
+                .style(Style::default().fg(Color::Cyan)),
         );
 
     let dialog_area = centered_rect(60, 30, area);
     f.render_widget(Clear, dialog_area);
     f.render_widget(dialog_widget, dialog_area);
+}
+
+fn draw_bandwidth_graph(f: &mut Frame, area: Rect, app: &AppState) {
+    // Get selected process
+    let selected_proc = app.get_selected_process();
+    if selected_proc.is_none() {
+        return;
+    }
+
+    let proc = selected_proc.unwrap();
+    let history = app.history.get_history(proc.pid);
+
+    if history.is_none() || history.unwrap().samples.is_empty() {
+        // No history data available
+        let no_data = Paragraph::new("No historical data available yet...")
+            .style(Style::default().bg(Color::Black).fg(Color::Yellow))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("Bandwidth Graph: {} (PID {})", proc.name, proc.pid))
+                    .style(Style::default().fg(Color::Cyan)),
+            );
+
+        let graph_area = centered_rect(80, 60, area);
+        f.render_widget(Clear, graph_area);
+        f.render_widget(no_data, graph_area);
+        return;
+    }
+
+    let history = history.unwrap();
+    let (download_data, upload_data) = history.get_graph_data();
+
+    // Find max values for scaling
+    let max_download = history.max_download_rate() as f64;
+    let max_upload = history.max_upload_rate() as f64;
+    let max_value = max_download.max(max_upload).max(1.0); // Avoid division by zero
+
+    // Create datasets
+    let datasets = vec![
+        Dataset::default()
+            .name("Download")
+            .marker(symbols::Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::Green))
+            .data(&download_data),
+        Dataset::default()
+            .name("Upload")
+            .marker(symbols::Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::Yellow))
+            .data(&upload_data),
+    ];
+
+    // Create chart
+    let chart = Chart::new(datasets)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(
+                    "Bandwidth Graph: {} (PID {}) | Max: ↓{} ↑{} | Avg: ↓{} ↑{}",
+                    proc.name,
+                    proc.pid,
+                    ProcessInfo::format_rate(history.max_download_rate()),
+                    ProcessInfo::format_rate(history.max_upload_rate()),
+                    ProcessInfo::format_rate(history.avg_download_rate()),
+                    ProcessInfo::format_rate(history.avg_upload_rate()),
+                ))
+                .style(Style::default().fg(Color::Cyan)),
+        )
+        .x_axis(
+            Axis::default()
+                .title("Time (samples)")
+                .style(Style::default().fg(Color::Gray))
+                .bounds([0.0, 60.0]),
+        )
+        .y_axis(
+            Axis::default()
+                .title("Bandwidth (bytes/s)")
+                .style(Style::default().fg(Color::Gray))
+                .bounds([0.0, max_value * 1.1]), // Add 10% headroom
+        );
+
+    let graph_area = centered_rect(90, 70, area);
+    f.render_widget(Clear, graph_area);
+    f.render_widget(chart, graph_area);
+
+    // Draw instructions at bottom
+    let instructions = Paragraph::new("Press 'g' to close graph")
+        .style(Style::default().fg(Color::DarkGray))
+        .alignment(ratatui::layout::Alignment::Center);
+
+    let inst_area = Rect {
+        x: graph_area.x,
+        y: graph_area.y + graph_area.height - 2,
+        width: graph_area.width,
+        height: 1,
+    };
+    f.render_widget(instructions, inst_area);
 }

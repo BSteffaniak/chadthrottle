@@ -1,10 +1,10 @@
 // pnet-based network monitoring backend
 
-use anyhow::Result;
-use crate::backends::{BackendCapabilities, BackendPriority};
 use crate::backends::monitor::MonitorBackend;
-use crate::process::ProcessMap;
+use crate::backends::{BackendCapabilities, BackendPriority};
 use crate::monitor::NetworkMonitor as LegacyNetworkMonitor;
+use crate::process::ProcessMap;
+use anyhow::Result;
 
 /// pnet packet capture monitoring backend
 pub struct PnetMonitor {
@@ -23,19 +23,19 @@ impl MonitorBackend for PnetMonitor {
     fn name(&self) -> &'static str {
         "pnet"
     }
-    
+
     fn priority(&self) -> BackendPriority {
         BackendPriority::Good
     }
-    
+
     fn is_available() -> bool {
         // pnet works on Linux and BSD with raw sockets
-        cfg!(target_os = "linux") || 
-        cfg!(target_os = "freebsd") || 
-        cfg!(target_os = "openbsd") ||
-        cfg!(target_os = "netbsd")
+        cfg!(target_os = "linux")
+            || cfg!(target_os = "freebsd")
+            || cfg!(target_os = "openbsd")
+            || cfg!(target_os = "netbsd")
     }
-    
+
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
             ipv4_support: true,
@@ -44,16 +44,16 @@ impl MonitorBackend for PnetMonitor {
             per_connection: false,
         }
     }
-    
+
     fn init(&mut self) -> Result<()> {
         // Initialization already done in new()
         Ok(())
     }
-    
+
     fn update(&mut self) -> Result<ProcessMap> {
         self.inner.update()
     }
-    
+
     fn cleanup(&mut self) -> Result<()> {
         // NetworkMonitor doesn't need explicit cleanup
         Ok(())

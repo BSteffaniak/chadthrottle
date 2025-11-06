@@ -203,7 +203,9 @@ fn create_download_backend(name: &str) -> Result<Box<dyn DownloadThrottleBackend
         "ifb_tc" => Ok(Box::new(download::linux::ifb_tc::IfbTcDownload::new()?)),
 
         #[cfg(feature = "throttle-tc-police")]
-        "tc_police" => Ok(Box::new(download::linux::tc_police::TcPoliceDownload::new()?)),
+        "tc_police" => Ok(Box::new(
+            download::linux::tc_police::TcPoliceDownload::new()?
+        )),
 
         _ => Err(anyhow::anyhow!("Unknown download backend: {}", name)),
     }

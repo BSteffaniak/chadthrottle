@@ -1,10 +1,12 @@
 mod backends;
+mod config;
+mod history;
 mod monitor;
 mod process;
-mod throttle;
 mod ui;
 
 use anyhow::Result;
+use clap::Parser;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
@@ -16,18 +18,106 @@ use std::time::Duration;
 use tokio::time::interval;
 
 use crate::backends::throttle::ThrottleManager;
-use crate::backends::throttle::{select_download_backend, select_upload_backend};
+use crate::backends::throttle::{
+    detect_download_backends, detect_upload_backends, select_download_backend,
+    select_upload_backend,
+};
 use crate::monitor::NetworkMonitor;
+use crate::process::ThrottleLimit;
 use crate::ui::AppState;
+
+/// ChadThrottle - A TUI network monitor and throttler for Linux
+#[derive(Parser, Debug)]
+#[command(name = "chadthrottle")]
+#[command(version = "0.6.0")]
+#[command(about = "Network monitor and throttler - like NetLimiter but chad", long_about = None)]
+struct Args {
+    /// Upload throttling backend to use
+    #[arg(long, value_name = "BACKEND")]
+    upload_backend: Option<String>,
+
+    /// Download throttling backend to use
+    #[arg(long, value_name = "BACKEND")]
+    download_backend: Option<String>,
+
+    /// List all available backends and exit
+    #[arg(long)]
+    list_backends: bool,
+
+    /// Auto-restore saved throttles on startup
+    #[arg(long)]
+    restore: bool,
+
+    /// Don't save throttles on exit
+    #[arg(long)]
+    no_save: bool,
+}
+
+fn print_available_backends() {
+    println!("ChadThrottle v0.6.0 - Available Backends\n");
+
+    // Upload backends
+    println!("Upload Backends:");
+    let upload_backends = detect_upload_backends();
+    if upload_backends.is_empty() {
+        println!("  (none compiled in)");
+    } else {
+        for backend in upload_backends {
+            let status = if backend.available {
+                "✅ available"
+            } else {
+                "❌ unavailable"
+            };
+            println!(
+                "  {:20} [priority: {:?}] {}",
+                backend.name, backend.priority, status
+            );
+        }
+    }
+
+    println!();
+
+    // Download backends
+    println!("Download Backends:");
+    let download_backends = detect_download_backends();
+    if download_backends.is_empty() {
+        println!("  (none compiled in)");
+    } else {
+        for backend in download_backends {
+            let status = if backend.available {
+                "✅ available"
+            } else {
+                "❌ unavailable"
+            };
+            println!(
+                "  {:20} [priority: {:?}] {}",
+                backend.name, backend.priority, status
+            );
+        }
+    }
+
+    println!();
+    println!("Usage:");
+    println!("  chadthrottle --upload-backend <name> --download-backend <name>");
+    println!("  chadthrottle  (auto-selects best available backends)");
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Parse CLI arguments
+    let args = Args::parse();
+
     if std::env::var("RUST_LOG").is_ok() {
         pretty_env_logger::formatted_builder()
             .parse_default_env()
             .init();
     }
-    // Throttling uses cgroups + tc, no external dependencies needed
+
+    // Handle --list-backends
+    if args.list_backends {
+        print_available_backends();
+        return Ok(());
+    }
 
     // Setup terminal
     enable_raw_mode()?;
@@ -40,8 +130,8 @@ async fn main() -> Result<()> {
     let mut app = AppState::new();
 
     // Select and create backends
-    let upload_backend = select_upload_backend(None);
-    let download_backend = select_download_backend(None);
+    let upload_backend = select_upload_backend(args.upload_backend.as_deref());
+    let download_backend = select_download_backend(args.download_backend.as_deref());
 
     // Show backend status
     log::error!("🔥 ChadThrottle v0.6.0 - Backend Status:");
@@ -75,8 +165,54 @@ async fn main() -> Result<()> {
     let mut throttle_manager = ThrottleManager::new(upload_backend, download_backend);
     let mut monitor = NetworkMonitor::new()?;
 
+    // Load and optionally restore saved config
+    let mut config = config::Config::load().unwrap_or_default();
+    if args.restore {
+        log::info!("Restoring saved throttles...");
+        for (pid, saved_throttle) in config.get_throttles() {
+            let limit = ThrottleLimit {
+                upload_limit: saved_throttle.upload_limit,
+                download_limit: saved_throttle.download_limit,
+            };
+            if let Err(e) =
+                throttle_manager.throttle_process(*pid, saved_throttle.process_name.clone(), &limit)
+            {
+                log::warn!("Failed to restore throttle for PID {}: {}", pid, e);
+            } else {
+                log::info!(
+                    "Restored throttle for {} (PID {})",
+                    saved_throttle.process_name,
+                    pid
+                );
+            }
+        }
+    }
+
     // Run the app
     let res = run_app(&mut terminal, &mut app, &mut monitor, &mut throttle_manager).await;
+
+    // Save config before exit (unless --no-save specified)
+    if !args.no_save {
+        config.clear_throttles();
+        for (pid, throttle) in throttle_manager.get_all_throttles() {
+            config.set_throttle(
+                pid,
+                config::SavedThrottle {
+                    process_name: throttle.process_name,
+                    upload_limit: throttle.upload_limit,
+                    download_limit: throttle.download_limit,
+                },
+            );
+        }
+        if let Err(e) = config.save() {
+            log::warn!("Failed to save config: {}", e);
+        } else {
+            log::info!(
+                "Saved {} throttle(s) to config",
+                config.get_throttles().len()
+            );
+        }
+    }
 
     // Restore terminal
     disable_raw_mode()?;
@@ -175,6 +311,9 @@ async fn run_app<B: ratatui::backend::Backend>(
                     KeyCode::Char('h') | KeyCode::Char('?') => {
                         app.show_help = true;
                     }
+                    KeyCode::Char('g') => {
+                        app.show_graph = !app.show_graph;
+                    }
                     KeyCode::Down | KeyCode::Char('j') => {
                         app.select_next();
                     }
@@ -224,7 +363,7 @@ async fn run_app<B: ratatui::backend::Backend>(
         {
             match monitor.update() {
                 Ok(mut process_map) => {
-                    // Update throttle status for each process
+                    // Update throttle status and history for each process
                     for (pid, process_info) in process_map.iter_mut() {
                         if let Some(throttle) = throttle_manager.get_throttle(*pid) {
                             process_info.throttle_limit = Some(crate::process::ThrottleLimit {
@@ -232,6 +371,14 @@ async fn run_app<B: ratatui::backend::Backend>(
                                 upload_limit: throttle.upload_limit,
                             });
                         }
+
+                        // Track bandwidth history
+                        app.history.update(
+                            *pid,
+                            process_info.name.clone(),
+                            process_info.download_rate,
+                            process_info.upload_rate,
+                        );
                     }
 
                     app.update_processes(process_map);

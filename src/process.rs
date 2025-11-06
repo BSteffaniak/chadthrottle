@@ -38,7 +38,10 @@ impl ProcessInfo {
         } else if bytes_per_sec < 1024 * 1024 * 1024 {
             format!("{:.1} MB/s", bytes_per_sec as f64 / (1024.0 * 1024.0))
         } else {
-            format!("{:.1} GB/s", bytes_per_sec as f64 / (1024.0 * 1024.0 * 1024.0))
+            format!(
+                "{:.1} GB/s",
+                bytes_per_sec as f64 / (1024.0 * 1024.0 * 1024.0)
+            )
         }
     }
 
