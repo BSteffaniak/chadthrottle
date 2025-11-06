@@ -2,7 +2,13 @@
 
 ## Overview
 
-ChadThrottle implements **per-process bandwidth throttling** using Linux cgroups and traffic control (tc). This allows you to limit the network bandwidth of individual processes with high accuracy.
+ChadThrottle implements **bidirectional per-process bandwidth throttling** using Linux cgroups, traffic control (tc), and IFB devices. This allows you to limit both upload AND download bandwidth of individual processes with high accuracy.
+
+**Key Features:**
+- ✅ Upload throttling (always available)
+- ✅ Download throttling (requires IFB kernel module)
+- ✅ IPv4 + IPv6 support (dual-stack)
+- ✅ Graceful degradation (upload-only if IFB unavailable)
 
 ## How It Works
 
@@ -49,7 +55,26 @@ User selects process → Press 't' → Set limits → Apply
                         └──────────────────────────────────────┘
                                       │
                                       ▼
-                            ⚡ Throttle Active ⚡
+                        ┌──────────────────────────────────────┐
+                        │  7. Setup IFB device (if download    │
+                        │     limit specified)                 │
+                        └──────────────────────────────────────┘
+                                      │
+                                      ▼
+                        ┌──────────────────────────────────────┐
+                        │  8. Redirect ingress → IFB           │
+                        │     Makes downloads appear as        │
+                        │     outgoing traffic on IFB          │
+                        └──────────────────────────────────────┘
+                                      │
+                                      ▼
+                        ┌──────────────────────────────────────┐
+                        │  9. Apply HTB on IFB for download    │
+                        │     Same mechanism as upload!        │
+                        └──────────────────────────────────────┘
+                                      │
+                                      ▼
+                        ⚡ Bidirectional Throttle Active ⚡
 ```
 
 ### Technical Details
@@ -64,12 +89,19 @@ User selects process → Press 't' → Set limits → Apply
 - Provides guaranteed rate limiting
 - Prevents bursting above limit
 
+**IFB (Intermediate Functional Block) Device:**
+- Virtual network device for ingress shaping
+- Redirects incoming packets to appear as outgoing on IFB
+- Allows applying egress rules to download traffic
+- Created dynamically when download throttling is used
+
 **Why This Works:**
 - ✅ Follows process even if it opens new connections
 - ✅ Works for all protocols (TCP, UDP, etc.)
 - ✅ Works for all ports
 - ✅ Child processes inherit cgroup unless moved
 - ✅ Accurate rate limiting via kernel
+- ✅ Both directions throttled with same mechanism
 
 ## Usage
 
@@ -116,10 +148,17 @@ User selects process → Press 't' → Set limits → Apply
 
 ### System Requirements
 
+**Always Required:**
 - ✅ Linux kernel 2.6.29+ (cgroups support)
 - ✅ `tc` (traffic control) - usually part of `iproute2` package
 - ✅ Root access (for cgroups and tc operations)
 - ✅ net_cls cgroup controller enabled
+
+**Required for Download Throttling:**
+- ✅ `ifb` (Intermediate Functional Block) kernel module
+- See [IFB_SETUP.md](IFB_SETUP.md) for installation instructions
+
+**Without IFB:** Upload throttling and monitoring still work perfectly!
 
 ### Check If Available
 
@@ -130,6 +169,9 @@ cat /proc/cgroups | grep net_cls
 # Check if tc is installed
 which tc
 
+# Check if ifb module is available
+modprobe ifb && echo "IFB supported"
+
 # Check your network interface
 ip link show
 ```
@@ -138,17 +180,24 @@ ip link show
 
 ### Current Implementation
 
-1. **Upload Only** - Currently only throttles egress (upload/outgoing) traffic
-   - Download (ingress) throttling requires IFB (Intermediate Functional Block) device
-   - Will be added in future version
-
-2. **Single Interface** - Throttles on first non-loopback interface found
+1. **Single Interface** - Throttles on first non-loopback interface found
    - Multi-interface support planned
 
-3. **No Persistence** - Throttles are removed when:
+2. **No Persistence** - Throttles are removed when:
    - ChadThrottle exits
    - Process dies
    - Manual removal with 'r' key
+
+3. **IFB Dependency for Download Throttling**
+   - **Upload throttling:** Always works (no special requirements)
+   - **Download throttling:** Requires `ifb` kernel module
+   - **Automatic detection:** ChadThrottle checks IFB availability on startup
+   - **Graceful fallback:** If IFB unavailable, only upload throttling is applied
+   - **Setup instructions:** See [IFB_SETUP.md](IFB_SETUP.md)
+
+4. **IPv6 Support** - Full support for both IPv4 and IPv6
+   - Separate TC filters for each protocol
+   - Both protocols throttled identically
 
 ### Known Issues
 
@@ -192,6 +241,25 @@ sudo tc qdisc del dev eth0 root
 
 ## Troubleshooting
 
+### "Warning: Download throttling requested but IFB module not available"
+
+**Symptom:** You set a download limit, but see a warning message
+
+**Cause:** IFB kernel module not loaded or available
+
+**Fix:** See [IFB_SETUP.md](IFB_SETUP.md) for detailed setup instructions
+
+**Quick check:**
+```bash
+# Try to load IFB
+sudo modprobe ifb numifbs=1
+
+# Verify it worked
+ip link show type ifb
+```
+
+**Workaround:** Upload throttling will still work. Download throttling requires IFB.
+
 ### "Failed to create cgroup"
 - **Cause:** net_cls controller not available
 - **Fix:** Check kernel config, recompile with `CONFIG_NET_CLS_CGROUP=y`
@@ -206,10 +274,20 @@ sudo tc qdisc del dev eth0 root
 3. Check TC classes: `sudo tc class show dev eth0`
 4. Check if process moved to cgroup: `cat /sys/fs/cgroup/net_cls/chadthrottle/pid_*/cgroup.procs`
 
+### Only upload throttling works (download not throttled)
+- **Cause:** IFB module not available
+- **Fix:** See [IFB_SETUP.md](IFB_SETUP.md) to enable IFB
+- **Note:** This is expected behavior - upload throttling works without IFB
+
 ### Process won't throttle
 - Some processes use multiple child processes
 - Try throttling the parent process
 - Check if process has special network capabilities
+
+### IPv6 traffic not throttled
+- Ensure both IPv4 and IPv6 filters are installed
+- Check with: `sudo tc filter show dev eth0`
+- Should see filters for both `protocol ip` and `protocol ipv6`
 
 ## Performance Impact
 
@@ -225,7 +303,11 @@ sudo tc qdisc del dev eth0 root
 
 ## Future Enhancements
 
-- [ ] Download (ingress) throttling via IFB
+- [x] Download (ingress) throttling via IFB
+- [x] IPv4 + IPv6 support
+- [x] Graceful degradation without IFB
+- [x] IFB availability detection
+- [ ] eBPF-based throttling (alternative to IFB)
 - [ ] Per-connection throttling
 - [ ] Throttle profiles/presets
 - [ ] Save/restore throttles on restart

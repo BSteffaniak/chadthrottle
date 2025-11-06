@@ -1,10 +1,81 @@
 # ChadThrottle Changelog
 
+## v0.5.0 - Production Ready Throttling (2025-11-06)
+
+### 🔥 Major Changes
+
+**Made download throttling production-ready with proper error handling, IPv6 support, and graceful degradation!**
+
+### Added
+- ✅ **IFB availability detection** - Automatically checks if IFB module is available
+- ✅ **IPv6 support** - Full dual-stack throttling (IPv4 + IPv6)
+- ✅ **Graceful degradation** - Upload throttling works even without IFB
+- ✅ **Better error messages** - Clear warnings when IFB unavailable
+- ✅ **IFB setup guide** - Comprehensive documentation for enabling IFB ([IFB_SETUP.md](IFB_SETUP.md))
+- ✅ **Platform-specific setup** - Instructions for NixOS, Ubuntu, Fedora, Arch, etc.
+
+### Technical Improvements
+- IPv6 TC filters added alongside IPv4 for all traffic control rules
+- IFB module availability checked on startup
+- Download throttling gracefully disabled if IFB unavailable
+- Upload throttling continues to work regardless of IFB status
+- Separate TC filters for IPv4 (`protocol ip`) and IPv6 (`protocol ipv6`)
+- Ingress redirect now handles both IPv4 and IPv6 traffic
+
+### Fixed
+- **Critical:** Download throttling would fail silently if IFB not available
+- **Critical:** IPv6 traffic was not being throttled (only IPv4 worked)
+- **Critical:** No error reporting when IFB module missing
+- **Critical:** No fallback when download throttling unavailable
+
+### Documentation
+- Added [IFB_SETUP.md](IFB_SETUP.md) with platform-specific setup instructions
+- Updated README.md with capability matrix
+- Updated THROTTLING.md with IFB requirements and troubleshooting
+- Updated QUICKSTART.md with IFB troubleshooting
+- Added NixOS-specific kernel module configuration
+
+### Breaking Changes
+- None - fully backward compatible
+
+---
+
+## v0.4.0 - Bidirectional Throttling (2025-11-06)
+
+### 🔥 Major Changes
+
+**Added download (ingress) throttling via IFB device!**
+
+### Added
+- ✅ **Download throttling** using IFB (Intermediate Functional Block) device
+- ✅ **Bidirectional throttling** - Both upload AND download limits
+- ✅ **Automatic IFB management** - Creates/destroys IFB device as needed
+- ✅ **Ingress redirection** - Redirects incoming traffic to IFB device
+- ✅ **Unified mechanism** - Same TC HTB approach for both directions
+
+### How Download Throttling Works
+1. Creates IFB virtual device (ifb0)
+2. Redirects ingress traffic from main interface to IFB
+3. Applies egress shaping on IFB (treats downloads as uploads)
+4. Uses same cgroup tagging mechanism as upload throttling
+
+### Updated
+- TC class creation now handles both upload and download
+- Cleanup now removes IFB device and ingress redirects
+- Documentation updated to reflect bidirectional support
+
+### Known Issues (Fixed in v0.5.0)
+- ⚠️ IPv6 traffic not throttled
+- ⚠️ No IFB availability check
+- ⚠️ Poor error messages when IFB unavailable
+
+---
+
 ## v0.3.0 - Bandwidth Throttling (2025-11-06)
 
 ### 🔥 Major Changes
 
-**Added complete per-process bandwidth throttling!**
+**Added complete per-process upload throttling!**
 
 ### Added
 - ✅ **Per-process throttling** using Linux cgroups (net_cls) + TC (HTB qdisc)
@@ -35,9 +106,8 @@
 - Automatic cleanup of cgroups and tc rules on exit
 
 ### Known Limitations
-- Currently throttles upload (egress) only
-- Download (ingress) throttling requires IFB device (planned)
 - Throttles are not persisted across restarts
+- Single interface support only
 
 ### Requirements
 - Linux kernel 2.6.29+ with cgroups support

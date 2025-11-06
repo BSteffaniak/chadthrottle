@@ -6,21 +6,26 @@
 
 - 📊 **Real-time network monitoring** - See which processes are using bandwidth (100% accurate)
 - ⚡ **Per-process bandwidth throttling** - Limit bandwidth using cgroups + tc
+- 🔄 **Bidirectional throttling** - Both upload AND download limits (requires IFB module)
+- 🌐 **IPv4 + IPv6 support** - Full dual-stack throttling
 - 🎨 **Beautiful TUI** - Built with Ratatui for a slick terminal interface
 - 🚀 **Fast & lightweight** - Written in Rust for maximum performance
 - 🔧 **No external dependencies** - Pure Rust with kernel APIs only
 - 💪 **Production ready** - Accurate packet capture and rate limiting
+- 🛡️ **Graceful degradation** - Upload throttling works even without IFB
 
 ## Installation
 
 ### Prerequisites
 
-```bash
-# Install trickle for bandwidth throttling
-sudo apt install trickle  # Debian/Ubuntu
-sudo dnf install trickle  # Fedora
-sudo pacman -S trickle    # Arch
-```
+**Required:**
+- Linux kernel 2.6.29+ with cgroups support
+- `tc` (traffic control) - usually part of `iproute2` package
+- Root access for packet capture and traffic control
+
+**Optional (for download throttling):**
+- `ifb` kernel module - See [IFB_SETUP.md](IFB_SETUP.md) for installation
+- Without IFB: Upload throttling still works
 
 ### Build from source
 
@@ -85,21 +90,34 @@ ChadThrottle uses **accurate packet-level tracking** to monitor network usage pe
 - ✅ **Single static binary** - No need for libpcap or other C libraries
 - ✅ **Real-time tracking** - Captures packets as they flow through the network
 
-### Throttling (cgroups + TC)
-ChadThrottle implements accurate per-process throttling using:
+### Throttling (cgroups + TC + IFB)
+ChadThrottle implements accurate **bidirectional** per-process throttling using:
 
 1. **Linux cgroups (net_cls)** - Tags all packets from a process
-2. **TC (Traffic Control) HTB** - Rate limits based on packet tags
-3. **Guaranteed limits** - Kernel-enforced, no way to bypass
+2. **TC (Traffic Control) HTB** - Rate limits upload (egress)
+3. **IFB (Intermediate Functional Block)** - Redirects download (ingress) → treats as egress
+4. **IPv4 + IPv6 support** - Full dual-stack throttling
+5. **Guaranteed limits** - Kernel-enforced, no way to bypass
 
 **How to use:**
 - Select a process and press `t`
-- Enter download/upload limits in KB/s
+- Enter download/upload limits in KB/s (leave empty for unlimited)
 - Press Enter to apply
 - Look for ⚡ indicator on throttled processes
 - Press `r` to remove throttle
 
-See [THROTTLING.md](THROTTLING.md) for detailed documentation.
+**Throttling capabilities:**
+- ✅ **Upload throttling** - Always works (TC HTB on main interface)
+- ✅ **Download throttling** - Requires IFB module (TC HTB on IFB device)
+- ✅ **IPv4 + IPv6** - Both protocols fully supported
+- 🛡️ **Graceful fallback** - Upload-only if IFB unavailable
+
+**Note:** If IFB module is not available, ChadThrottle will:
+- Show a warning when you try to set download limits
+- Apply upload throttling only
+- Continue working normally for monitoring and upload limits
+
+See [THROTTLING.md](THROTTLING.md) for detailed documentation and [IFB_SETUP.md](IFB_SETUP.md) for enabling download throttling.
 
 ## Roadmap
 
@@ -107,13 +125,16 @@ See [THROTTLING.md](THROTTLING.md) for detailed documentation.
 - [x] 100% accurate per-process bandwidth tracking
 - [x] Pure Rust implementation with no external C dependencies
 - [x] Process list with bandwidth usage
-- [x] Trickle integration framework
-- [ ] Interactive throttle dialog
-- [ ] Apply throttling to existing processes (cgroups)
+- [x] Interactive throttle dialog
+- [x] Bidirectional throttling (upload + download)
+- [x] IPv4 + IPv6 support
+- [x] Graceful degradation without IFB
+- [x] Apply throttling to existing processes (cgroups)
 - [ ] Bandwidth usage graphs
 - [ ] Save/load throttle profiles
 - [ ] Per-connection throttling
 - [ ] Domain whitelist/blacklist
+- [ ] eBPF-based throttling (alternative to IFB)
 
 ## Why "ChadThrottle"?
 

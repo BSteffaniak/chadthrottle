@@ -42,7 +42,11 @@ You should see these processes appear in ChadThrottle with their bandwidth usage
 **Current Features:**
 - ✅ Real-time packet capture with 100% accuracy
 - ✅ Per-process bandwidth tracking (TCP & UDP, IPv4 & IPv6)
-- ✅ Per-process bandwidth throttling (cgroups + tc)
+- ✅ **Upload throttling** (always works)
+- ✅ **Download throttling** (requires IFB kernel module - see [IFB_SETUP.md](IFB_SETUP.md))
+- ✅ IPv4 + IPv6 dual-stack support
+- ✅ Automatic IFB device management for download throttling
+- ✅ Graceful degradation (upload-only if IFB unavailable)
 - ✅ Pure Rust, no external dependencies
 - ✅ Beautiful TUI with process list
 - ✅ Interactive throttle dialog
@@ -84,11 +88,21 @@ Make sure there's active network traffic. Try running `curl` or `wget` in anothe
 
 **Note:** ChadThrottle now uses packet capture for 100% accurate bandwidth tracking! Every byte is counted as it flows through your network interface.
 
-### "trickle not found" warning
-Install trickle for throttling support:
+### Download throttling not working (upload works)
+
+**Symptom:** You can throttle upload but download limits don't apply
+
+**Cause:** IFB kernel module not available
+
+**Fix:** See [IFB_SETUP.md](IFB_SETUP.md) for setup instructions
+
+**Quick test:**
 ```bash
-sudo apt install trickle  # Ubuntu/Debian
+sudo modprobe ifb numifbs=1
+ip link show type ifb  # Should show ifb0
 ```
+
+**Note:** Upload throttling works without IFB. Only download throttling requires it.
 
 ## Next Steps
 

@@ -1,5 +1,4 @@
 use anyhow::{Result, anyhow, Context};
-use pnet::datalink;
 use std::collections::HashMap;
 use std::fs;
 use std::process::Command;
@@ -23,19 +22,63 @@ pub struct ThrottleManager {
     active_throttles: HashMap<i32, ActiveThrottle>,
     next_classid: u32,
     interface: String,
+    ifb_device: String,
     tc_initialized: bool,
+    ifb_initialized: bool,
+    ifb_available: bool, // Whether IFB module is available on the system
 }
 
 impl ThrottleManager {
     pub fn new() -> Result<Self> {
         let interface = Self::detect_interface()?;
+        let ifb_available = Self::check_ifb_availability();
         
         Ok(Self {
             active_throttles: HashMap::new(),
             next_classid: 100, // Start at 100 to avoid conflicts
             interface,
+            ifb_device: "ifb0".to_string(),
             tc_initialized: false,
+            ifb_initialized: false,
+            ifb_available,
         })
+    }
+    
+    /// Check if IFB (Intermediate Functional Block) module is available
+    fn check_ifb_availability() -> bool {
+        // Try to load the module first
+        let _ = Command::new("modprobe")
+            .arg("ifb")
+            .arg("numifbs=1")
+            .output();
+        
+        // Check if we can create an IFB device (or if one exists)
+        let check = Command::new("ip")
+            .args(&["link", "add", "name", "ifb_test", "type", "ifb"])
+            .output();
+        
+        if let Ok(output) = check {
+            if output.status.success() {
+                // Clean up test device
+                let _ = Command::new("ip")
+                    .args(&["link", "del", "ifb_test"])
+                    .output();
+                return true;
+            }
+        }
+        
+        // Also check if IFB device already exists
+        let check_existing = Command::new("ip")
+            .args(&["link", "show", "type", "ifb"])
+            .output();
+        
+        if let Ok(output) = check_existing {
+            if output.status.success() && !output.stdout.is_empty() {
+                return true;
+            }
+        }
+        
+        false
     }
 
     /// Detect the network interface to use for throttling
@@ -91,6 +134,7 @@ impl ThrottleManager {
 
         // Add cgroup filter to match packets based on cgroup classid
         // This allows us to match all packets from processes in our cgroups
+        // Add IPv4 filter
         let status = Command::new("tc")
             .args(&[
                 "filter", "add", "dev", &self.interface,
@@ -98,13 +142,165 @@ impl ThrottleManager {
                 "prio", "1", "handle", "1:", "cgroup"
             ])
             .status()
-            .context("Failed to add cgroup filter")?;
+            .context("Failed to add IPv4 cgroup filter")?;
         
         if !status.success() {
-            return Err(anyhow!("Failed to setup cgroup filter"));
+            return Err(anyhow!("Failed to setup IPv4 cgroup filter"));
+        }
+
+        // Add IPv6 filter
+        let status = Command::new("tc")
+            .args(&[
+                "filter", "add", "dev", &self.interface,
+                "parent", "1:", "protocol", "ipv6",
+                "prio", "1", "handle", "2:", "cgroup"
+            ])
+            .status()
+            .context("Failed to add IPv6 cgroup filter")?;
+        
+        if !status.success() {
+            return Err(anyhow!("Failed to setup IPv6 cgroup filter"));
         }
 
         self.tc_initialized = true;
+        Ok(())
+    }
+
+    /// Setup IFB (Intermediate Functional Block) device for ingress shaping
+    fn setup_ifb(&mut self) -> Result<()> {
+        if self.ifb_initialized {
+            return Ok(());
+        }
+
+        // Load IFB kernel module if not loaded
+        let _ = Command::new("modprobe")
+            .arg("ifb")
+            .output();
+
+        // Check if IFB device exists
+        let check_ifb = Command::new("ip")
+            .args(&["link", "show", &self.ifb_device])
+            .output();
+
+        if check_ifb.is_err() || !check_ifb.unwrap().status.success() {
+            // Create IFB device
+            let status = Command::new("ip")
+                .args(&["link", "add", &self.ifb_device, "type", "ifb"])
+                .status()
+                .context("Failed to create IFB device")?;
+            
+            if !status.success() {
+                return Err(anyhow!("Failed to create IFB device"));
+            }
+        }
+
+        // Bring up IFB device
+        let status = Command::new("ip")
+            .args(&["link", "set", "dev", &self.ifb_device, "up"])
+            .status()
+            .context("Failed to bring up IFB device")?;
+        
+        if !status.success() {
+            return Err(anyhow!("Failed to bring up IFB device"));
+        }
+
+        // Setup ingress qdisc on main interface (if not exists)
+        let check_ingress = Command::new("tc")
+            .args(&["qdisc", "show", "dev", &self.interface, "ingress"])
+            .output()
+            .context("Failed to check ingress qdisc")?;
+
+        let output = String::from_utf8_lossy(&check_ingress.stdout);
+        if !output.contains("ingress") {
+            // Add ingress qdisc
+            let status = Command::new("tc")
+                .args(&[
+                    "qdisc", "add", "dev", &self.interface,
+                    "handle", "ffff:", "ingress"
+                ])
+                .status()
+                .context("Failed to add ingress qdisc")?;
+            
+            if !status.success() {
+                return Err(anyhow!("Failed to setup ingress qdisc"));
+            }
+        }
+
+        // Redirect all ingress traffic to IFB device
+        // This makes incoming traffic appear as outgoing traffic on IFB
+        // IPv4 redirect
+        let status = Command::new("tc")
+            .args(&[
+                "filter", "add", "dev", &self.interface,
+                "parent", "ffff:", "protocol", "ip",
+                "u32", "match", "u32", "0", "0",
+                "action", "mirred", "egress", "redirect", "dev", &self.ifb_device
+            ])
+            .status()
+            .context("Failed to redirect IPv4 ingress to IFB")?;
+        
+        if !status.success() {
+            return Err(anyhow!("Failed to redirect IPv4 ingress traffic to IFB"));
+        }
+
+        // IPv6 redirect
+        let status = Command::new("tc")
+            .args(&[
+                "filter", "add", "dev", &self.interface,
+                "parent", "ffff:", "protocol", "ipv6",
+                "u32", "match", "u32", "0", "0",
+                "action", "mirred", "egress", "redirect", "dev", &self.ifb_device
+            ])
+            .status()
+            .context("Failed to redirect IPv6 ingress to IFB")?;
+        
+        if !status.success() {
+            return Err(anyhow!("Failed to redirect IPv6 ingress traffic to IFB"));
+        }
+
+        // Setup HTB qdisc on IFB device (for download throttling)
+        let status = Command::new("tc")
+            .args(&[
+                "qdisc", "add", "dev", &self.ifb_device,
+                "root", "handle", "2:", "htb", "default", "999"
+            ])
+            .status()
+            .context("Failed to create HTB qdisc on IFB")?;
+        
+        if !status.success() {
+            return Err(anyhow!("Failed to setup IFB HTB qdisc"));
+        }
+
+        // Add cgroup filter on IFB device
+        // IPv4 filter
+        let status = Command::new("tc")
+            .args(&[
+                "filter", "add", "dev", &self.ifb_device,
+                "parent", "2:", "protocol", "ip",
+                "prio", "1", "handle", "1:", "cgroup"
+            ])
+            .status()
+            .context("Failed to add IPv4 cgroup filter on IFB")?;
+        
+        if !status.success() {
+            return Err(anyhow!("Failed to setup IPv4 IFB cgroup filter"));
+        }
+
+        // IPv6 filter
+        let status = Command::new("tc")
+            .args(&[
+                "filter", "add", "dev", &self.ifb_device,
+                "parent", "2:", "protocol", "ipv6",
+                "prio", "1", "handle", "2:", "cgroup"
+            ])
+            .status()
+            .context("Failed to add IPv6 cgroup filter on IFB")?;
+        
+        if !status.success() {
+            return Err(anyhow!("Failed to setup IPv6 IFB cgroup filter"));
+        }
+
+        self.ifb_initialized = true;
         Ok(())
     }
 
@@ -148,50 +344,66 @@ impl ThrottleManager {
         Ok(())
     }
 
-    /// Create TC class for rate limiting
-    fn create_tc_class(&self, classid: u32, _download_limit_kbps: u32, upload_limit_kbps: u32) -> Result<()> {
-        // Create class for download (ingress) - typically limited by ISP, we focus on upload
-        // For now, we'll create classes for egress (upload) which is what we can control
-        
-        // Create HTB class for this throttle
-        // Rate is in kbit (kilobits per second)
-        let rate = if upload_limit_kbps > 0 {
-            format!("{}kbit", upload_limit_kbps)
-        } else {
-            "1000mbit".to_string() // Very high = unlimited
-        };
-        
-        let status = Command::new("tc")
-            .args(&[
-                "class", "add", "dev", &self.interface,
-                "parent", "1:", "classid", &format!("1:{}", classid),
-                "htb", "rate", &rate,
-                "ceil", &rate, // Ceiling = no bursting above rate
-            ])
-            .status()
-            .context("Failed to create TC class")?;
-        
-        if !status.success() {
-            return Err(anyhow!("Failed to create TC class for classid {}", classid));
+    /// Create TC classes for rate limiting (both upload and download)
+    fn create_tc_class(&self, classid: u32, download_limit_kbps: u32, upload_limit_kbps: u32) -> Result<()> {
+        // Create upload (egress) class on main interface
+        if upload_limit_kbps > 0 {
+            let rate = format!("{}kbit", upload_limit_kbps);
+            
+            let status = Command::new("tc")
+                .args(&[
+                    "class", "add", "dev", &self.interface,
+                    "parent", "1:", "classid", &format!("1:{}", classid),
+                    "htb", "rate", &rate,
+                    "ceil", &rate, // Ceiling = no bursting above rate
+                ])
+                .status()
+                .context("Failed to create upload TC class")?;
+            
+            if !status.success() {
+                return Err(anyhow!("Failed to create upload TC class for classid {}", classid));
+            }
+        }
+
+        // Create download (ingress via IFB) class on IFB device
+        if download_limit_kbps > 0 {
+            let rate = format!("{}kbit", download_limit_kbps);
+            
+            let status = Command::new("tc")
+                .args(&[
+                    "class", "add", "dev", &self.ifb_device,
+                    "parent", "2:", "classid", &format!("2:{}", classid),
+                    "htb", "rate", &rate,
+                    "ceil", &rate,
+                ])
+                .status()
+                .context("Failed to create download TC class on IFB")?;
+            
+            if !status.success() {
+                return Err(anyhow!("Failed to create download TC class for classid {}", classid));
+            }
         }
 
         Ok(())
     }
 
-    /// Remove TC class
+    /// Remove TC classes (both upload and download)
     fn remove_tc_class(&self, classid: u32) -> Result<()> {
-        let status = Command::new("tc")
+        // Remove upload class
+        let _ = Command::new("tc")
             .args(&[
                 "class", "del", "dev", &self.interface,
                 "parent", "1:", "classid", &format!("1:{}", classid)
             ])
-            .status()
-            .context("Failed to remove TC class")?;
-        
-        if !status.success() {
-            // Don't fail if class doesn't exist
-            eprintln!("Warning: Failed to remove TC class {}", classid);
-        }
+            .status();
+
+        // Remove download class on IFB
+        let _ = Command::new("tc")
+            .args(&[
+                "class", "del", "dev", &self.ifb_device,
+                "parent", "2:", "classid", &format!("2:{}", classid)
+            ])
+            .status();
 
         Ok(())
     }
@@ -205,6 +417,21 @@ impl ThrottleManager {
     ) -> Result<()> {
         // Setup TC root if not already done
         self.setup_tc_root()?;
+        
+        // Setup IFB if download limit is specified
+        let download_throttle_enabled = if limit.download_limit.is_some() && limit.download_limit.unwrap() > 0 {
+            if !self.ifb_available {
+                eprintln!("Warning: Download throttling requested but IFB module not available.");
+                eprintln!("Only upload throttling will be applied.");
+                eprintln!("To enable download throttling, ensure the 'ifb' kernel module is available.");
+                false
+            } else {
+                self.setup_ifb()?;
+                true
+            }
+        } else {
+            false
+        };
 
         // Check if already throttled
         if self.active_throttles.contains_key(&pid) {
@@ -228,18 +455,23 @@ impl ThrottleManager {
             .context("Failed to move process to cgroup")?;
 
         // Convert bytes/sec to kbps (kilobits per second)
-        let download_kbps = limit.download_limit.map(|b| (b * 8 / 1000) as u32).unwrap_or(0);
+        // Only set download limit if IFB is available
+        let download_kbps = if download_throttle_enabled {
+            limit.download_limit.map(|b| (b * 8 / 1000) as u32).unwrap_or(0)
+        } else {
+            0
+        };
         let upload_kbps = limit.upload_limit.map(|b| (b * 8 / 1000) as u32).unwrap_or(0);
 
         // Create TC class with rate limit
         self.create_tc_class(classid, download_kbps, upload_kbps)
             .context("Failed to create TC class")?;
 
-        // Track active throttle
+        // Track active throttle (store actual applied limits, not requested)
         let throttle = ActiveThrottle {
             pid,
             process_name,
-            download_limit: limit.download_limit,
+            download_limit: if download_throttle_enabled { limit.download_limit } else { None },
             upload_limit: limit.upload_limit,
             classid,
             cgroup_path: cgroup_path.clone(),
@@ -272,6 +504,11 @@ impl ThrottleManager {
         self.active_throttles.get(&pid)
     }
 
+    /// Check if download throttling is available (IFB support)
+    pub fn is_download_throttling_available(&self) -> bool {
+        self.ifb_available
+    }
+
     /// Check if a process is throttled
     pub fn is_throttled(&self, pid: i32) -> bool {
         self.active_throttles.contains_key(&pid)
@@ -292,9 +529,29 @@ impl ThrottleManager {
             }
         }
 
-        // Remove TC qdisc (cleanup)
+        // Remove TC qdisc from main interface (cleanup)
         let _ = Command::new("tc")
             .args(&["qdisc", "del", "dev", &self.interface, "root"])
+            .status();
+
+        // Remove ingress qdisc from main interface
+        let _ = Command::new("tc")
+            .args(&["qdisc", "del", "dev", &self.interface, "ingress"])
+            .status();
+
+        // Remove TC qdisc from IFB device
+        let _ = Command::new("tc")
+            .args(&["qdisc", "del", "dev", &self.ifb_device, "root"])
+            .status();
+
+        // Bring down IFB device
+        let _ = Command::new("ip")
+            .args(&["link", "set", "dev", &self.ifb_device, "down"])
+            .status();
+
+        // Delete IFB device
+        let _ = Command::new("ip")
+            .args(&["link", "del", &self.ifb_device])
             .status();
 
         // Remove base cgroup directory
