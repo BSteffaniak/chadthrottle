@@ -1,5 +1,52 @@
 # ChadThrottle Changelog
 
+## v0.3.0 - Bandwidth Throttling (2025-11-06)
+
+### 🔥 Major Changes
+
+**Added complete per-process bandwidth throttling!**
+
+### Added
+- ✅ **Per-process throttling** using Linux cgroups (net_cls) + TC (HTB qdisc)
+- ✅ **Interactive throttle dialog** - Press 't' to set limits
+- ✅ **Remove throttle** - Press 'r' to remove limits
+- ✅ **Visual indicators** - ⚡ shows throttled processes
+- ✅ **Automatic cleanup** - Removes throttles on exit
+- ✅ **Network interface detection** - Auto-detects active interface
+- ✅ **Throttle persistence** - Maintains throttles until removed
+
+### How It Works
+1. Creates cgroup for target process
+2. Tags all packets with net_cls.classid
+3. Moves process to cgroup
+4. Creates TC HTB class with rate limit
+5. Filters packets by classid for rate limiting
+
+### UI Changes
+- Added throttle dialog with download/upload input fields
+- Tab key switches between fields
+- Enter applies, Esc cancels
+- Shows limits in KB/s
+
+### Technical Implementation
+- Uses `/sys/fs/cgroup/net_cls/chadthrottle/` for cgroups
+- Uses `tc` (traffic control) HTB qdisc for rate limiting
+- Unique classid per process (1:100, 1:101, etc.)
+- Automatic cleanup of cgroups and tc rules on exit
+
+### Known Limitations
+- Currently throttles upload (egress) only
+- Download (ingress) throttling requires IFB device (planned)
+- Throttles are not persisted across restarts
+
+### Requirements
+- Linux kernel 2.6.29+ with cgroups support
+- `tc` (traffic control) - part of iproute2 package
+- Root access (already required for packet capture)
+- net_cls cgroup controller enabled
+
+---
+
 ## v0.2.0 - Packet Capture Update (2025-11-06)
 
 ### 🔥 Major Changes

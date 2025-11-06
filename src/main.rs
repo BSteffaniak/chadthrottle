@@ -23,11 +23,7 @@ use crate::ui::AppState;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Check if trickle is available
-    if !ThrottleManager::check_trickle_available() {
-        eprintln!("Warning: 'trickle' not found. Throttling features will be limited.");
-        eprintln!("Install trickle with: sudo apt install trickle  (or your distro's package manager)");
-    }
+    // Throttling uses cgroups + tc, no external dependencies needed
 
     // Setup terminal
     enable_raw_mode()?;
@@ -39,10 +35,10 @@ async fn main() -> Result<()> {
     // Create app state
     let mut app = AppState::new();
     let mut monitor = NetworkMonitor::new()?;
-    let _throttle_manager = ThrottleManager::new();
+    let mut throttle_manager = ThrottleManager::new()?;
 
     // Run the app
-    let res = run_app(&mut terminal, &mut app, &mut monitor).await;
+    let res = run_app(&mut terminal, &mut app, &mut monitor, &mut throttle_manager).await;
 
     // Restore terminal
     disable_raw_mode()?;
@@ -64,6 +60,7 @@ async fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut AppState,
     monitor: &mut NetworkMonitor,
+    throttle_manager: &mut ThrottleManager,
 ) -> Result<()> {
     let mut update_interval = interval(Duration::from_secs(1));
 
@@ -77,6 +74,53 @@ async fn run_app<B: ratatui::backend::Backend>(
                 // If help is shown, any key closes it
                 if app.show_help {
                     app.show_help = false;
+                    continue;
+                }
+
+                // Handle throttle dialog input
+                if app.show_throttle_dialog {
+                    match key.code {
+                        KeyCode::Esc => {
+                            app.show_throttle_dialog = false;
+                            app.throttle_dialog.reset();
+                        }
+                        KeyCode::Tab => {
+                            app.throttle_dialog.toggle_field();
+                        }
+                        KeyCode::Char(c) if c.is_numeric() => {
+                            app.throttle_dialog.handle_char(c);
+                        }
+                        KeyCode::Backspace => {
+                            app.throttle_dialog.handle_backspace();
+                        }
+                        KeyCode::Enter => {
+                            // Apply throttle
+                            if let Some((download, upload)) = app.throttle_dialog.parse_limits() {
+                                if let Some(pid) = app.throttle_dialog.target_pid {
+                                    let process_name = app.throttle_dialog.target_name.clone().unwrap_or_default();
+                                    let limit = crate::process::ThrottleLimit {
+                                        download_limit: download,
+                                        upload_limit: upload,
+                                    };
+                                    
+                                    match throttle_manager.throttle_process(pid, process_name.clone(), &limit) {
+                                        Ok(_) => {
+                                            app.status_message = format!(
+                                                "Throttle applied to {} (PID {})",
+                                                process_name, pid
+                                            );
+                                        }
+                                        Err(e) => {
+                                            app.status_message = format!("Failed to apply throttle: {}", e);
+                                        }
+                                    }
+                                }
+                            }
+                            app.show_throttle_dialog = false;
+                            app.throttle_dialog.reset();
+                        }
+                        _ => {}
+                    }
                     continue;
                 }
 
@@ -95,24 +139,32 @@ async fn run_app<B: ratatui::backend::Backend>(
                     }
                     KeyCode::Char('t') => {
                         if let Some(process) = app.get_selected_process() {
-                            app.status_message = format!(
-                                "Throttling not yet implemented for PID {} ({})",
-                                process.pid, process.name
-                            );
+                            // Clone the values we need
+                            let pid = process.pid;
+                            let name = process.name.clone();
+                            
+                            // Open throttle dialog
+                            app.throttle_dialog.target_pid = Some(pid);
+                            app.throttle_dialog.target_name = Some(name);
+                            app.show_throttle_dialog = true;
                         } else {
                             app.status_message = "No process selected".to_string();
                         }
                     }
-                    KeyCode::Char('l') => {
-                        app.status_message = 
-                            "Launch with throttle not yet implemented. Use CLI for now.".to_string();
-                    }
                     KeyCode::Char('r') => {
                         if let Some(process) = app.get_selected_process() {
-                            app.status_message = format!(
-                                "Remove throttle not yet implemented for PID {}",
-                                process.pid
-                            );
+                            // Remove throttle
+                            match throttle_manager.remove_throttle(process.pid) {
+                                Ok(_) => {
+                                    app.status_message = format!(
+                                        "Throttle removed from {} (PID {})",
+                                        process.name, process.pid
+                                    );
+                                }
+                                Err(e) => {
+                                    app.status_message = format!("Failed to remove throttle: {}", e);
+                                }
+                            }
                         }
                     }
                     _ => {}
@@ -123,12 +175,21 @@ async fn run_app<B: ratatui::backend::Backend>(
         // Update network stats periodically
         if tokio::time::timeout(Duration::from_millis(1), update_interval.tick()).await.is_ok() {
             match monitor.update() {
-                Ok(process_map) => {
+                Ok(mut process_map) => {
+                    // Update throttle status for each process
+                    for (pid, process_info) in process_map.iter_mut() {
+                        if let Some(throttle) = throttle_manager.get_throttle(*pid) {
+                            process_info.throttle_limit = Some(crate::process::ThrottleLimit {
+                                download_limit: throttle.download_limit,
+                                upload_limit: throttle.upload_limit,
+                            });
+                        }
+                    }
+                    
                     app.update_processes(process_map);
                     // Update status with process count
-                    if !app.status_message.starts_with("Throttling") 
-                        && !app.status_message.starts_with("Launch")
-                        && !app.status_message.starts_with("Remove") {
+                    if !app.status_message.starts_with("Throttle") 
+                        && !app.status_message.starts_with("Failed") {
                         app.status_message = format!(
                             "Monitoring {} process(es) with network activity",
                             app.process_list.len()

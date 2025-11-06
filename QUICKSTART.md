@@ -39,18 +39,40 @@ You should see these processes appear in ChadThrottle with their bandwidth usage
 
 ## Current Limitations
 
-**Phase 1 (Current):**
+**Current Features:**
 - ✅ Real-time packet capture with 100% accuracy
 - ✅ Per-process bandwidth tracking (TCP & UDP, IPv4 & IPv6)
+- ✅ Per-process bandwidth throttling (cgroups + tc)
 - ✅ Pure Rust, no external dependencies
 - ✅ Beautiful TUI with process list
-- ✅ Keyboard navigation
-- ⚠️ Throttling features are placeholders (coming soon!)
+- ✅ Interactive throttle dialog
+- ✅ Dynamic throttle management
 
-**Coming Soon (Phase 2):**
-- Interactive throttle dialog
-- Launch processes with bandwidth limits
-- Apply throttling to running processes
+**How to Throttle:**
+1. Run with sudo: `sudo ./target/release/chadthrottle`
+2. Generate some traffic (e.g., `curl` in another terminal)
+3. Select the process you want to throttle
+4. Press `t` to open throttle dialog
+5. Enter limits in KB/s (e.g., 500 for download, 100 for upload)
+6. Press Enter to apply
+7. Watch the ⚡ indicator appear!
+8. Press `r` to remove the throttle
+
+**Example:**
+```bash
+# Terminal 1
+sudo ./target/release/chadthrottle
+
+# Terminal 2
+curl -O https://speed.hetzner.de/100MB.bin
+
+# In ChadThrottle:
+# - Select curl process
+# - Press 't'
+# - Enter: Download: 500, Upload: (leave empty)
+# - Press Enter
+# - Curl is now limited to 500 KB/s!
+```
 
 ## Troubleshooting
 

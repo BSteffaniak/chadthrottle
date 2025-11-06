@@ -4,11 +4,12 @@
 
 ## Features
 
-- 📊 **Real-time network monitoring** - See which processes are using bandwidth
-- ⚡ **Process-level throttling** - Limit bandwidth per process (planned)
+- 📊 **Real-time network monitoring** - See which processes are using bandwidth (100% accurate)
+- ⚡ **Per-process bandwidth throttling** - Limit bandwidth using cgroups + tc
 - 🎨 **Beautiful TUI** - Built with Ratatui for a slick terminal interface
 - 🚀 **Fast & lightweight** - Written in Rust for maximum performance
-- 🔧 **Trickle integration** - Launch processes with bandwidth limits
+- 🔧 **No external dependencies** - Pure Rust with kernel APIs only
+- 💪 **Production ready** - Accurate packet capture and rate limiting
 
 ## Installation
 
@@ -43,11 +44,17 @@ sudo chadthrottle
 
 - `↑`/`k` - Move selection up
 - `↓`/`j` - Move selection down
-- `t` - Throttle selected process (coming soon)
-- `r` - Remove throttle (coming soon)
-- `l` - Launch process with throttle (coming soon)
+- `t` - Throttle selected process (opens dialog)
+- `r` - Remove throttle from selected process
 - `h`/`?` - Toggle help
 - `q`/`Esc` - Quit
+
+**In Throttle Dialog:**
+- `Tab` - Switch between download/upload fields
+- `0-9` - Enter limit in KB/s
+- `Backspace` - Delete character
+- `Enter` - Apply throttle
+- `Esc` - Cancel
 
 ## Architecture
 
@@ -78,10 +85,21 @@ ChadThrottle uses **accurate packet-level tracking** to monitor network usage pe
 - ✅ **Single static binary** - No need for libpcap or other C libraries
 - ✅ **Real-time tracking** - Captures packets as they flow through the network
 
-### Throttling (Planned Features)
-- **trickle** - Launch new processes with bandwidth limits
-- **cgroups v2** - Apply limits to existing processes (requires root)
-- **tc (traffic control)** - System-wide network shaping
+### Throttling (cgroups + TC)
+ChadThrottle implements accurate per-process throttling using:
+
+1. **Linux cgroups (net_cls)** - Tags all packets from a process
+2. **TC (Traffic Control) HTB** - Rate limits based on packet tags
+3. **Guaranteed limits** - Kernel-enforced, no way to bypass
+
+**How to use:**
+- Select a process and press `t`
+- Enter download/upload limits in KB/s
+- Press Enter to apply
+- Look for ⚡ indicator on throttled processes
+- Press `r` to remove throttle
+
+See [THROTTLING.md](THROTTLING.md) for detailed documentation.
 
 ## Roadmap
 

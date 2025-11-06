@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Clear},
     Frame,
 };
 use crate::process::{ProcessInfo, ProcessMap};
@@ -12,7 +12,81 @@ pub struct AppState {
     pub selected_index: usize,
     pub list_state: ListState,
     pub show_help: bool,
+    pub show_throttle_dialog: bool,
+    pub throttle_dialog: ThrottleDialog,
     pub status_message: String,
+}
+
+pub struct ThrottleDialog {
+    pub download_input: String,
+    pub upload_input: String,
+    pub selected_field: ThrottleField,
+    pub target_pid: Option<i32>,
+    pub target_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ThrottleField {
+    Download,
+    Upload,
+}
+
+impl ThrottleDialog {
+    pub fn new() -> Self {
+        Self {
+            download_input: String::new(),
+            upload_input: String::new(),
+            selected_field: ThrottleField::Download,
+            target_pid: None,
+            target_name: None,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.download_input.clear();
+        self.upload_input.clear();
+        self.selected_field = ThrottleField::Download;
+        self.target_pid = None;
+        self.target_name = None;
+    }
+
+    pub fn handle_char(&mut self, c: char) {
+        match self.selected_field {
+            ThrottleField::Download => self.download_input.push(c),
+            ThrottleField::Upload => self.upload_input.push(c),
+        }
+    }
+
+    pub fn handle_backspace(&mut self) {
+        match self.selected_field {
+            ThrottleField::Download => { self.download_input.pop(); },
+            ThrottleField::Upload => { self.upload_input.pop(); },
+        }
+    }
+
+    pub fn toggle_field(&mut self) {
+        self.selected_field = match self.selected_field {
+            ThrottleField::Download => ThrottleField::Upload,
+            ThrottleField::Upload => ThrottleField::Download,
+        };
+    }
+
+    pub fn parse_limits(&self) -> Option<(Option<u64>, Option<u64>)> {
+        // Parse KB/s to bytes/sec
+        let download = if self.download_input.is_empty() {
+            None
+        } else {
+            self.download_input.parse::<u64>().ok().map(|kb| kb * 1024)
+        };
+
+        let upload = if self.upload_input.is_empty() {
+            None
+        } else {
+            self.upload_input.parse::<u64>().ok().map(|kb| kb * 1024)
+        };
+
+        Some((download, upload))
+    }
 }
 
 impl AppState {
@@ -25,6 +99,8 @@ impl AppState {
             selected_index: 0,
             list_state,
             show_help: false,
+            show_throttle_dialog: false,
+            throttle_dialog: ThrottleDialog::new(),
             status_message: String::from("ChadThrottle started. Press 'h' for help."),
         }
     }
@@ -97,6 +173,11 @@ pub fn draw_ui(f: &mut Frame, app: &mut AppState) {
     // Help overlay
     if app.show_help {
         draw_help_overlay(f, f.area());
+    }
+
+    // Throttle dialog
+    if app.show_throttle_dialog {
+        draw_throttle_dialog(f, f.area(), app);
     }
 }
 
@@ -245,4 +326,64 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+fn draw_throttle_dialog(f: &mut Frame, area: Rect, app: &AppState) {
+    let dialog = &app.throttle_dialog;
+    
+    let title = if let (Some(pid), Some(name)) = (dialog.target_pid, &dialog.target_name) {
+        format!("Throttle: {} (PID {})", name, pid)
+    } else {
+        "Throttle Process".to_string()
+    };
+
+    let download_style = if dialog.selected_field == ThrottleField::Download {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
+
+    let upload_style = if dialog.selected_field == ThrottleField::Upload {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
+
+    let dialog_text = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Download Limit (KB/s): ", download_style),
+            Span::styled(
+                if dialog.download_input.is_empty() { "unlimited" } else { &dialog.download_input },
+                download_style
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Upload Limit (KB/s):   ", upload_style),
+            Span::styled(
+                if dialog.upload_input.is_empty() { "unlimited" } else { &dialog.upload_input },
+                upload_style
+            ),
+        ]),
+        Line::from(""),
+        Line::from(""),
+        Line::from(Span::styled(
+            "[Tab] Switch field  [Enter] Apply  [Esc] Cancel",
+            Style::default().fg(Color::DarkGray)
+        )),
+    ];
+
+    let dialog_widget = Paragraph::new(dialog_text)
+        .style(Style::default().bg(Color::Black).fg(Color::White))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .style(Style::default().fg(Color::Cyan))
+        );
+
+    let dialog_area = centered_rect(60, 30, area);
+    f.render_widget(Clear, dialog_area);
+    f.render_widget(dialog_widget, dialog_area);
 }
