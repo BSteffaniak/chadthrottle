@@ -1,5 +1,8 @@
 // Linux download throttling backends
 
+#[cfg(feature = "throttle-ebpf")]
+pub mod ebpf;
+
 #[cfg(feature = "throttle-ifb-tc")]
 pub mod ifb_tc;
 

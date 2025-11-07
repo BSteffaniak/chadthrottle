@@ -1,37 +1,20 @@
-[package]
-name = "chadthrottle"
-version = "0.6.0"
-edition = "2024"
-authors = ["ChadThrottle Contributors"]
-description = "A TUI network monitor and throttler for Linux - like NetLimiter but chad"
-license = "MIT"
+[workspace]
+resolver = "2"
+members = [
+    "chadthrottle",
+    "chadthrottle-common",
+    "chadthrottle-ebpf",
+]
 
-[features]
-default = ["monitor-pnet", "throttle-tc-htb", "throttle-ifb-tc", "throttle-tc-police", "throttle-nftables"]
+[workspace.dependencies]
+aya = { version = "0.13", features = ["async_tokio"] }
+aya-ebpf = "0.1"
+aya-log-ebpf = "0.1"
+chadthrottle-common = { path = "chadthrottle-common" }
 
-# Monitor backends
-monitor-pnet = ["pnet", "pnet_datalink", "pnet_packet"]
+[profile.dev]
+opt-level = 3
 
-# Throttle backends (Linux)
-throttle-tc-htb = [] # TC HTB upload (always available on Linux)
-throttle-ifb-tc = [] # IFB+TC download (needs IFB module)
-throttle-tc-police = [] # TC Police download (no IFB needed, fallback)
-throttle-nftables = [] # nftables throttling (modern, better than TC)
-
-[dependencies]
-ratatui = "0.28"
-crossterm = "0.28"
-tokio = { version = "1", features = ["full"] }
-pretty_env_logger = "0.5.0"
-sysinfo = "0.31"
-procfs = "0.16"
-nix = { version = "0.29", features = ["process", "signal"] }
-anyhow = "1.0"
-log = { version = "0.4.28", features = ["release_max_level_trace"] }
-clap = { version = "4", features = ["derive"] }
-chrono = "0.4"
-pnet = { version = "0.35.0", optional = true }
-pnet_datalink = { version = "0.35.0", optional = true }
-pnet_packet = { version = "0.35.0", optional = true }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+[profile.release]
+lto = true
+opt-level = 3

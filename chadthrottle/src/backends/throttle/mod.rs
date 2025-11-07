@@ -14,6 +14,9 @@ pub mod linux_tc_utils;
 #[cfg(target_os = "linux")]
 pub mod linux_nft_utils;
 
+#[cfg(all(target_os = "linux", feature = "throttle-ebpf"))]
+pub mod linux_ebpf_utils;
+
 // Re-export manager
 pub use manager::ThrottleManager;
 
@@ -117,6 +120,15 @@ pub struct DownloadBackendInfo {
 pub fn detect_upload_backends() -> Vec<UploadBackendInfo> {
     let mut backends = Vec::new();
 
+    #[cfg(feature = "throttle-ebpf")]
+    {
+        backends.push(UploadBackendInfo {
+            name: "ebpf",
+            priority: BackendPriority::Best,
+            available: upload::linux::ebpf::EbpfUpload::is_available(),
+        });
+    }
+
     #[cfg(feature = "throttle-nftables")]
     {
         backends.push(UploadBackendInfo {
@@ -141,6 +153,15 @@ pub fn detect_upload_backends() -> Vec<UploadBackendInfo> {
 /// Detect all available download backends
 pub fn detect_download_backends() -> Vec<DownloadBackendInfo> {
     let mut backends = Vec::new();
+
+    #[cfg(feature = "throttle-ebpf")]
+    {
+        backends.push(DownloadBackendInfo {
+            name: "ebpf",
+            priority: BackendPriority::Best,
+            available: download::linux::ebpf::EbpfDownload::is_available(),
+        });
+    }
 
     #[cfg(feature = "throttle-nftables")]
     {
@@ -210,6 +231,9 @@ pub fn select_download_backend(
 fn create_upload_backend(name: &str) -> Result<Box<dyn UploadThrottleBackend>> {
     log::debug!("Creating upload backend {name}");
     match name {
+        #[cfg(feature = "throttle-ebpf")]
+        "ebpf" => Ok(Box::new(upload::linux::ebpf::EbpfUpload::new()?)),
+
         #[cfg(feature = "throttle-nftables")]
         "nftables" => Ok(Box::new(upload::linux::nftables::NftablesUpload::new()?)),
 
@@ -223,6 +247,9 @@ fn create_upload_backend(name: &str) -> Result<Box<dyn UploadThrottleBackend>> {
 /// Create a download backend by name
 fn create_download_backend(name: &str) -> Result<Box<dyn DownloadThrottleBackend>> {
     match name {
+        #[cfg(feature = "throttle-ebpf")]
+        "ebpf" => Ok(Box::new(download::linux::ebpf::EbpfDownload::new()?)),
+
         #[cfg(feature = "throttle-nftables")]
         "nftables" => Ok(Box::new(download::linux::nftables::NftablesDownload::new()?)),
 
