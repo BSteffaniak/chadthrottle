@@ -9,7 +9,7 @@ use pnet::packet::ipv6::Ipv6Packet;
 use pnet::packet::tcp::TcpPacket;
 use pnet::packet::udp::UdpPacket;
 use procfs::process::{FDTarget, all_processes};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -310,12 +310,46 @@ impl NetworkMonitor {
             }
         }
 
-        // Phase 2: Atomically replace old maps with new maps
+        // Phase 2: Build list of PIDs with connections and their names
+        // This ensures all processes with active connections will be visible in the UI
+        // even if no packets have been captured yet
+        let pids_with_names: Vec<(i32, String)> = new_connection_map
+            .values()
+            .copied()
+            .collect::<HashSet<i32>>()
+            .into_iter()
+            .map(|pid| {
+                let name = new_socket_map
+                    .values()
+                    .find(|(p, _)| *p == pid)
+                    .map(|(_, n)| n.clone())
+                    .unwrap_or_else(|| format!("PID {}", pid));
+                (pid, name)
+            })
+            .collect();
+
+        // Phase 3: Atomically replace old maps with new maps and initialize process_bandwidth
         // This is the ONLY point where we hold the lock and modify the maps
-        // The critical section is minimal - just pointer swaps
+        // The critical section is minimal - just pointer swaps and initialization
         let mut tracker = self.bandwidth_tracker.lock().unwrap();
         tracker.socket_map = new_socket_map;
         tracker.connection_map = new_connection_map;
+
+        // Initialize process_bandwidth entries for all processes with active connections
+        // This prevents processes from being "invisible" if they have connections
+        // but haven't had packets captured yet (solves the cold start problem)
+        for (pid, name) in pids_with_names {
+            tracker
+                .process_bandwidth
+                .entry(pid)
+                .or_insert(ProcessBandwidth {
+                    name,
+                    rx_bytes: 0,
+                    tx_bytes: 0,
+                    last_rx_bytes: 0,
+                    last_tx_bytes: 0,
+                });
+        }
 
         Ok(())
     }
