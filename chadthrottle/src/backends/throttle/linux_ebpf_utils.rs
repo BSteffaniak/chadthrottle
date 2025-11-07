@@ -110,7 +110,9 @@ pub fn check_ebpf_support() -> bool {
 /// Load eBPF program from embedded bytes
 #[cfg(feature = "throttle-ebpf")]
 pub fn load_ebpf_program(program_bytes: &[u8]) -> Result<Ebpf> {
-    Ebpf::load(program_bytes).context("Failed to load eBPF program")
+    Ebpf::load(program_bytes)
+        .inspect_err(|e| log::error!("Failed to load eBPF program: {e}"))
+        .context("Failed to load eBPF program")
 }
 
 /// Attach a cgroup SKB program
