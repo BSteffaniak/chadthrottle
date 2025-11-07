@@ -20,6 +20,15 @@ pub mod linux_ebpf_utils;
 // Re-export manager
 pub use manager::ThrottleManager;
 
+/// Throttle statistics for a process/cgroup
+#[derive(Debug, Clone, Default)]
+pub struct BackendStats {
+    pub packets_total: u64,
+    pub bytes_total: u64,
+    pub packets_dropped: u64,
+    pub bytes_dropped: u64,
+}
+
 /// Upload (egress) throttling backend trait
 pub trait UploadThrottleBackend: Send + Sync {
     /// Backend name (e.g., "tc_htb", "ebpf_cgroup", "wfp")
@@ -58,6 +67,11 @@ pub trait UploadThrottleBackend: Send + Sync {
 
     /// Cleanup on shutdown
     fn cleanup(&mut self) -> Result<()>;
+
+    /// Get statistics for a throttled process (if supported by backend)
+    fn get_stats(&self, _pid: i32) -> Option<BackendStats> {
+        None // Default implementation returns None for backends that don't support stats
+    }
 }
 
 /// Download (ingress) throttling backend trait
@@ -98,6 +112,11 @@ pub trait DownloadThrottleBackend: Send + Sync {
 
     /// Cleanup on shutdown
     fn cleanup(&mut self) -> Result<()>;
+
+    /// Get statistics for a throttled process (if supported by backend)
+    fn get_stats(&self, _pid: i32) -> Option<BackendStats> {
+        None // Default implementation returns None for backends that don't support stats
+    }
 }
 
 /// Upload backend metadata for selection

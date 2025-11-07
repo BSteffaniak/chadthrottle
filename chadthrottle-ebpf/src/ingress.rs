@@ -3,53 +3,33 @@
 
 use aya_ebpf::{
     bindings::BPF_F_NO_PREALLOC,
+    helpers::{bpf_get_current_cgroup_id, bpf_ktime_get_ns},
     macros::{cgroup_skb, map},
     maps::HashMap,
     programs::SkBuffContext,
 };
 use chadthrottle_common::{CgroupThrottleConfig, ThrottleStats, TokenBucket};
 
+/// Maximum number of throttled cgroups (configurable)
+const MAX_CGROUPS: u32 = 4096;
+
 /// Map: cgroup_id -> TokenBucket
 /// Stores token bucket state for each throttled cgroup
 #[map]
 static CGROUP_BUCKETS: HashMap<u64, TokenBucket> =
-    HashMap::with_max_entries(1024, BPF_F_NO_PREALLOC);
+    HashMap::with_max_entries(MAX_CGROUPS, BPF_F_NO_PREALLOC);
 
 /// Map: cgroup_id -> CgroupThrottleConfig
 /// Stores configuration for each throttled cgroup
 #[map]
 static CGROUP_CONFIGS: HashMap<u64, CgroupThrottleConfig> =
-    HashMap::with_max_entries(1024, BPF_F_NO_PREALLOC);
+    HashMap::with_max_entries(MAX_CGROUPS, BPF_F_NO_PREALLOC);
 
 /// Map: cgroup_id -> ThrottleStats
 /// Stores statistics for each throttled cgroup
 #[map]
 static CGROUP_STATS: HashMap<u64, ThrottleStats> =
-    HashMap::with_max_entries(1024, BPF_F_NO_PREALLOC);
-
-/// Helper function to get current time in nanoseconds
-#[inline(always)]
-unsafe fn bpf_ktime_get_ns() -> u64 {
-    let ns: u64;
-    core::arch::asm!(
-        "call 5", // BPF_FUNC_ktime_get_ns = 5
-        lateout("r0") ns,
-        options(nostack, preserves_flags)
-    );
-    ns
-}
-
-/// Helper function to get current cgroup id
-#[inline(always)]
-unsafe fn bpf_get_current_cgroup_id() -> u64 {
-    let id: u64;
-    core::arch::asm!(
-        "call 80", // BPF_FUNC_get_current_cgroup_id = 80
-        lateout("r0") id,
-        options(nostack, preserves_flags)
-    );
-    id
-}
+    HashMap::with_max_entries(MAX_CGROUPS, BPF_F_NO_PREALLOC);
 
 /// Token bucket algorithm implementation
 /// Returns true if packet should be allowed, false if dropped
@@ -111,8 +91,8 @@ fn try_chadthrottle_ingress(ctx: SkBuffContext) -> Result<i32, i64> {
             // Initialize new bucket
             let now_ns = unsafe { bpf_ktime_get_ns() };
             TokenBucket {
-                capacity: config.rate_bps,
-                tokens: config.rate_bps, // Start with full bucket
+                capacity: config.burst_size,
+                tokens: config.burst_size, // Start with full bucket
                 last_update_ns: now_ns,
                 rate_bps: config.rate_bps,
             }

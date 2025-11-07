@@ -40,8 +40,10 @@ pub struct CgroupThrottleConfig {
     pub pid: u32,
     /// Padding for alignment
     pub _padding: u32,
-    /// Rate limit in bytes per second
+    /// Rate limit in bytes per second (sustained rate)
     pub rate_bps: u64,
+    /// Burst size in bytes (maximum tokens, allows short bursts above rate)
+    pub burst_size: u64,
 }
 
 // SAFETY: CgroupThrottleConfig is a plain old data type with all primitive fields
@@ -55,6 +57,7 @@ impl CgroupThrottleConfig {
             pid: 0,
             _padding: 0,
             rate_bps: 0,
+            burst_size: 0,
         }
     }
 }

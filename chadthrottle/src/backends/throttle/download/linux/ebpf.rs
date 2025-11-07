@@ -24,7 +24,7 @@ use aya::{
 };
 
 #[cfg(feature = "throttle-ebpf")]
-use chadthrottle_common::{CgroupThrottleConfig, TokenBucket};
+use chadthrottle_common::{CgroupThrottleConfig, ThrottleStats, TokenBucket};
 
 #[cfg(feature = "throttle-ebpf")]
 use crate::backends::throttle::DownloadThrottleBackend;
@@ -47,7 +47,11 @@ pub struct EbpfDownload {
     #[cfg(feature = "throttle-ebpf")]
     ebpf: Option<Ebpf>,
     #[cfg(feature = "throttle-ebpf")]
-    attached_cgroups: HashMap<i32, std::path::PathBuf>,
+    /// Maps PID -> cgroup_id for tracking which cgroup each PID belongs to
+    pid_to_cgroup: HashMap<i32, u64>,
+    #[cfg(feature = "throttle-ebpf")]
+    /// Reference count for each cgroup (how many PIDs are using it)
+    cgroup_refcount: HashMap<u64, usize>,
     active_throttles: HashMap<i32, u64>,
 }
 
@@ -63,7 +67,8 @@ impl EbpfDownload {
 
             Ok(Self {
                 ebpf: None,
-                attached_cgroups: HashMap::new(),
+                pid_to_cgroup: HashMap::new(),
+                cgroup_refcount: HashMap::new(),
                 active_throttles: HashMap::new(),
             })
         }
@@ -79,14 +84,32 @@ impl EbpfDownload {
     #[cfg(feature = "throttle-ebpf")]
     fn ensure_loaded(&mut self) -> Result<()> {
         if self.ebpf.is_none() {
-            // This is where we would load the compiled eBPF bytecode
-            // For a production implementation, you'd embed the bytecode like this:
-            // const EBPF_INGRESS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/chadthrottle-ingress"));
-            // let ebpf = load_ebpf_program(EBPF_INGRESS)?;
+            // Try to load the eBPF program from the path set by build.rs
+            #[cfg(all(feature = "throttle-ebpf", env = "EBPF_INGRESS_PATH"))]
+            {
+                let program_path = env!("EBPF_INGRESS_PATH");
+                log::debug!("Loading eBPF ingress program from: {}", program_path);
 
-            return Err(anyhow::anyhow!(
-                "eBPF programs not built. Run: cargo xtask build-ebpf"
-            ));
+                let program_bytes = std::fs::read(program_path).with_context(|| {
+                    format!("Failed to read eBPF program from {}", program_path)
+                })?;
+
+                let ebpf = load_ebpf_program(&program_bytes)?;
+                self.ebpf = Some(ebpf);
+                return Ok(());
+            }
+
+            // Fallback: Try to load from embedded bytecode (if available at compile time)
+            #[cfg(all(feature = "throttle-ebpf", not(env = "EBPF_INGRESS_PATH")))]
+            {
+                return Err(anyhow::anyhow!(
+                    "eBPF ingress program not built.\n\
+                     Install bpf-linker and rust-src, then rebuild:\n\
+                     cargo install bpf-linker\n\
+                     rustup component add rust-src\n\
+                     cargo build --release"
+                ));
+            }
         }
         Ok(())
     }
@@ -159,21 +182,31 @@ impl DownloadThrottleBackend for EbpfDownload {
                 limit_bytes_per_sec
             );
 
-            // Attach eBPF program to cgroup if not already attached
-            if !self.attached_cgroups.contains_key(&pid) {
+            // Track PID to cgroup mapping
+            self.pid_to_cgroup.insert(pid, cgroup_id);
+
+            // Attach eBPF program to cgroup if this is the first PID in this cgroup
+            let refcount = self.cgroup_refcount.entry(cgroup_id).or_insert(0);
+            if *refcount == 0 {
+                // First PID in this cgroup - attach the program
                 if let Some(ref mut ebpf) = self.ebpf {
+                    log::debug!("Attaching eBPF ingress program to cgroup {}", cgroup_id);
                     attach_cgroup_skb(
                         ebpf,
                         "chadthrottle_ingress",
                         &cgroup_path,
                         CgroupSkbAttachType::Ingress,
                     )?;
-                    self.attached_cgroups.insert(pid, cgroup_path);
                 }
             }
+            *refcount += 1;
+            log::debug!("Cgroup {} now has {} PIDs throttled", cgroup_id, refcount);
 
             // Update BPF maps with configuration
             if let Some(ref mut ebpf) = self.ebpf {
+                // Allow bursts up to 2x the sustained rate (configurable)
+                let burst_size = limit_bytes_per_sec * 2;
+
                 // Set configuration
                 let mut config_map: BpfHashMap<_, u64, CgroupThrottleConfig> =
                     get_bpf_map(ebpf, "CGROUP_CONFIGS")?;
@@ -183,6 +216,7 @@ impl DownloadThrottleBackend for EbpfDownload {
                     pid: pid as u32,
                     _padding: 0,
                     rate_bps: limit_bytes_per_sec,
+                    burst_size,
                 };
 
                 config_map.insert(cgroup_id, config, 0)?;
@@ -192,8 +226,8 @@ impl DownloadThrottleBackend for EbpfDownload {
                     get_bpf_map(ebpf, "CGROUP_BUCKETS")?;
 
                 let bucket = TokenBucket {
-                    capacity: limit_bytes_per_sec,
-                    tokens: limit_bytes_per_sec,
+                    capacity: burst_size,
+                    tokens: burst_size,
                     last_update_ns: 0,
                     rate_bps: limit_bytes_per_sec,
                 };
@@ -215,21 +249,41 @@ impl DownloadThrottleBackend for EbpfDownload {
     fn remove_download_throttle(&mut self, pid: i32) -> Result<()> {
         #[cfg(feature = "throttle-ebpf")]
         {
-            if let Some(_cgroup_path) = self.attached_cgroups.remove(&pid) {
-                log::debug!("Removing download throttle for PID {}", pid);
+            // Get the cgroup ID for this PID
+            if let Some(cgroup_id) = self.pid_to_cgroup.remove(&pid) {
+                log::debug!(
+                    "Removing download throttle for PID {} (cgroup {})",
+                    pid,
+                    cgroup_id
+                );
 
-                // Get cgroup ID
-                let cgroup_id = get_cgroup_id(pid)?;
+                // Decrement reference count for this cgroup
+                if let Some(refcount) = self.cgroup_refcount.get_mut(&cgroup_id) {
+                    *refcount -= 1;
+                    log::debug!("Cgroup {} now has {} PIDs throttled", cgroup_id, refcount);
 
-                // Remove from BPF maps
-                if let Some(ref mut ebpf) = self.ebpf {
-                    let mut config_map: BpfHashMap<_, u64, CgroupThrottleConfig> =
-                        get_bpf_map(ebpf, "CGROUP_CONFIGS")?;
-                    config_map.remove(&cgroup_id)?;
+                    // If this was the last PID in the cgroup, clean up
+                    if *refcount == 0 {
+                        log::debug!("Last PID removed from cgroup {}, cleaning up", cgroup_id);
 
-                    let mut bucket_map: BpfHashMap<_, u64, TokenBucket> =
-                        get_bpf_map(ebpf, "CGROUP_BUCKETS")?;
-                    bucket_map.remove(&cgroup_id)?;
+                        // Remove from BPF maps
+                        if let Some(ref mut ebpf) = self.ebpf {
+                            let mut config_map: BpfHashMap<_, u64, CgroupThrottleConfig> =
+                                get_bpf_map(ebpf, "CGROUP_CONFIGS")?;
+                            let _ = config_map.remove(&cgroup_id); // Ignore errors if already removed
+
+                            let mut bucket_map: BpfHashMap<_, u64, TokenBucket> =
+                                get_bpf_map(ebpf, "CGROUP_BUCKETS")?;
+                            let _ = bucket_map.remove(&cgroup_id);
+
+                            let mut stats_map: BpfHashMap<_, u64, ThrottleStats> =
+                                get_bpf_map(ebpf, "CGROUP_STATS")?;
+                            let _ = stats_map.remove(&cgroup_id);
+                        }
+
+                        // Remove reference count entry
+                        self.cgroup_refcount.remove(&cgroup_id);
+                    }
                 }
             }
 
@@ -264,7 +318,8 @@ impl DownloadThrottleBackend for EbpfDownload {
 
             // Drop the eBPF instance (this will detach all programs)
             self.ebpf = None;
-            self.attached_cgroups.clear();
+            self.pid_to_cgroup.clear();
+            self.cgroup_refcount.clear();
 
             Ok(())
         }
@@ -273,5 +328,40 @@ impl DownloadThrottleBackend for EbpfDownload {
         {
             Ok(())
         }
+    }
+
+    fn get_stats(&self, _pid: i32) -> Option<crate::backends::throttle::BackendStats> {
+        // Note: Reading from BPF maps requires mutable access (aya limitation)
+        // Stats are being collected in the eBPF program, but we can't read them
+        // from an immutable context. Use get_stats_mut() if you need statistics.
+        None
+    }
+}
+
+#[cfg(feature = "throttle-ebpf")]
+impl EbpfDownload {
+    /// Get statistics for a throttled process (requires mutable access)
+    /// This is a workaround for aya requiring mut access to read from maps
+    pub fn get_stats_mut(&mut self, pid: i32) -> Option<crate::backends::throttle::BackendStats> {
+        use crate::backends::throttle::BackendStats;
+
+        // Get the cgroup ID for this PID
+        let cgroup_id = *self.pid_to_cgroup.get(&pid)?;
+
+        // Try to read stats from BPF map
+        if let Some(ref mut ebpf) = self.ebpf {
+            let stats_map: BpfHashMap<_, u64, ThrottleStats> =
+                get_bpf_map(ebpf, "CGROUP_STATS").ok()?;
+
+            if let Ok(stats) = unsafe { stats_map.get(&cgroup_id, 0) } {
+                return Some(BackendStats {
+                    packets_total: stats.packets_total,
+                    bytes_total: stats.bytes_total,
+                    packets_dropped: stats.packets_dropped,
+                    bytes_dropped: stats.bytes_dropped,
+                });
+            }
+        }
+        None
     }
 }
