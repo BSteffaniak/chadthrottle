@@ -35,6 +35,19 @@ static CGROUP_STATS: HashMap<u64, ThrottleStats> =
 /// Returns true if packet should be allowed, false if dropped
 #[inline(always)]
 fn token_bucket_allow(bucket: &mut TokenBucket, packet_size: u64, now_ns: u64) -> bool {
+    // Handle first-time initialization when last_update_ns = 0
+    // This avoids clock mismatch between userspace (wall clock) and kernel (monotonic clock)
+    if bucket.last_update_ns == 0 {
+        bucket.last_update_ns = now_ns;
+        // First packet - allow if we have enough tokens (initial burst)
+        if bucket.tokens >= packet_size {
+            bucket.tokens = bucket.tokens.saturating_sub(packet_size);
+            return true;
+        } else {
+            return false;
+        }
+    }
+
     // Calculate time elapsed since last update in nanoseconds
     let elapsed_ns = now_ns.saturating_sub(bucket.last_update_ns);
 
@@ -123,7 +136,9 @@ fn try_chadthrottle_egress(ctx: SkBuffContext) -> Result<i32, i64> {
     let allow = token_bucket_allow(&mut bucket, packet_size, now_ns);
 
     // Update bucket in map
-    CGROUP_BUCKETS.insert(&cgroup_id, &bucket, 0)?;
+    unsafe {
+        CGROUP_BUCKETS.insert(&cgroup_id, &bucket, 0)?;
+    }
 
     // Update statistics
     let mut stats = match unsafe { CGROUP_STATS.get(&cgroup_id) } {
@@ -139,7 +154,9 @@ fn try_chadthrottle_egress(ctx: SkBuffContext) -> Result<i32, i64> {
         stats.bytes_dropped = stats.bytes_dropped.saturating_add(packet_size);
     }
 
-    CGROUP_STATS.insert(&cgroup_id, &stats, 0)?;
+    unsafe {
+        CGROUP_STATS.insert(&cgroup_id, &stats, 0)?;
+    }
 
     // Return verdict: 1 = allow, 0 = drop
     Ok(if allow { 1 } else { 0 })

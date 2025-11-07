@@ -5,6 +5,8 @@ use anyhow::{Context, Result};
 use std::fs;
 #[cfg(feature = "throttle-ebpf")]
 use std::path::{Path, PathBuf};
+#[cfg(feature = "throttle-ebpf")]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "throttle-ebpf")]
 use aya::{
@@ -156,4 +158,14 @@ where
         .ok_or_else(|| anyhow::anyhow!("Map {} not found", map_name))?;
 
     Ok(BpfHashMap::try_from(map)?)
+}
+
+/// Get current time in nanoseconds since UNIX epoch
+/// This is used to initialize the token bucket timestamp to match what the eBPF program expects
+#[cfg(feature = "throttle-ebpf")]
+pub fn get_current_time_ns() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("System time before UNIX epoch")
+        .as_nanos() as u64
 }

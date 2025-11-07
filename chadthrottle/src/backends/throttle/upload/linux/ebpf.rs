@@ -195,17 +195,25 @@ impl UploadThrottleBackend for EbpfUpload {
             if *refcount == 0 {
                 // First PID in this cgroup - attach the program
                 if let Some(ref mut ebpf) = self.ebpf {
-                    log::debug!("Attaching eBPF egress program to cgroup {}", cgroup_id);
+                    log::info!(
+                        "Attaching eBPF egress program to cgroup {} (path: {:?})",
+                        cgroup_id,
+                        cgroup_path
+                    );
                     attach_cgroup_skb(
                         ebpf,
                         "chadthrottle_egress",
                         &cgroup_path,
                         CgroupSkbAttachType::Egress,
                     )?;
+                    log::info!(
+                        "Successfully attached eBPF egress program to cgroup {}",
+                        cgroup_id
+                    );
                 }
             }
             *refcount += 1;
-            log::debug!("Cgroup {} now has {} PIDs throttled", cgroup_id, refcount);
+            log::info!("Cgroup {} now has {} PIDs throttled", cgroup_id, refcount);
 
             // Update BPF maps with configuration
             if let Some(ref mut ebpf) = self.ebpf {
@@ -230,14 +238,25 @@ impl UploadThrottleBackend for EbpfUpload {
                 let mut bucket_map: BpfHashMap<_, u64, TokenBucket> =
                     get_bpf_map(ebpf, "CGROUP_BUCKETS")?;
 
+                // NOTE: Set last_update_ns to 0 to let eBPF program initialize it on first packet
+                // This avoids clock mismatch between userspace (wall clock via SystemTime)
+                // and kernel (monotonic clock via bpf_ktime_get_ns)
                 let bucket = TokenBucket {
                     capacity: burst_size,
                     tokens: burst_size,
-                    last_update_ns: 0,
+                    last_update_ns: 0, // eBPF will initialize on first packet
                     rate_bps: limit_bytes_per_sec,
                 };
 
                 bucket_map.insert(cgroup_id, bucket, 0)?;
+
+                log::debug!(
+                    "Initialized token bucket for cgroup {}: rate={} bytes/sec, burst={} bytes, tokens={}",
+                    cgroup_id,
+                    limit_bytes_per_sec,
+                    burst_size,
+                    bucket.tokens
+                );
             }
 
             self.active_throttles.insert(pid, limit_bytes_per_sec);
