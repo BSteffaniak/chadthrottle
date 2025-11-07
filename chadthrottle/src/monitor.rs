@@ -52,6 +52,10 @@ struct BandwidthTracker {
     process_bandwidth: HashMap<i32, ProcessBandwidth>,
     // PID -> termination time (for showing terminated processes temporarily)
     terminated_processes: HashMap<i32, Instant>,
+    // Packet capture statistics for debugging
+    packets_captured: u64,
+    packets_matched: u64,
+    packets_unmatched: u64,
 }
 
 struct ProcessBandwidth {
@@ -69,21 +73,34 @@ impl NetworkMonitor {
             socket_map: HashMap::new(),
             process_bandwidth: HashMap::new(),
             terminated_processes: HashMap::new(),
+            packets_captured: 0,
+            packets_matched: 0,
+            packets_unmatched: 0,
         }));
 
-        // Start packet capture thread
-        let tracker_clone = Arc::clone(&bandwidth_tracker);
+        // Create monitor instance first (without starting capture thread yet)
+        let mut monitor = Self {
+            bandwidth_tracker,
+            _capture_handle: None,
+            last_update: Instant::now(),
+        };
+
+        // CRITICAL: Populate socket and connection maps BEFORE starting packet capture
+        // This ensures that packets arriving immediately after startup are properly tracked
+        // Without this, all packets in the first second are lost because connection_map is empty
+        monitor.update_socket_map()?;
+
+        // Now start packet capture thread with pre-populated maps
+        let tracker_clone = Arc::clone(&monitor.bandwidth_tracker);
         let capture_handle = thread::spawn(move || {
             if let Err(e) = Self::capture_packets(tracker_clone) {
                 log::error!("Packet capture error: {}", e);
             }
         });
 
-        Ok(Self {
-            bandwidth_tracker,
-            _capture_handle: Some(capture_handle),
-            last_update: Instant::now(),
-        })
+        monitor._capture_handle = Some(capture_handle);
+
+        Ok(monitor)
     }
 
     pub fn update(&mut self) -> Result<ProcessMap> {
@@ -332,6 +349,13 @@ impl NetworkMonitor {
         // This is the ONLY point where we hold the lock and modify the maps
         // The critical section is minimal - just pointer swaps and initialization
         let mut tracker = self.bandwidth_tracker.lock().unwrap();
+
+        log::debug!(
+            "Updating connection maps: {} sockets, {} connections (TCP+UDP)",
+            new_socket_map.len(),
+            new_connection_map.len()
+        );
+
         tracker.socket_map = new_socket_map;
         tracker.connection_map = new_connection_map;
 
@@ -358,10 +382,18 @@ impl NetworkMonitor {
     fn capture_packets(tracker: Arc<Mutex<BandwidthTracker>>) -> Result<()> {
         // Find a suitable network interface
         let interface = Self::find_interface().context("Failed to find network interface")?;
+        log::info!(
+            "Packet capture thread started on interface: {}",
+            interface.name
+        );
+        log::debug!("Interface details: {:?}", interface);
 
         // Create channel for packet capture
         let (_, mut rx) = match datalink::channel(&interface, Default::default()) {
-            Ok(Channel::Ethernet(tx, rx)) => (tx, rx),
+            Ok(Channel::Ethernet(tx, rx)) => {
+                log::info!("Successfully created packet capture channel");
+                (tx, rx)
+            }
             Ok(_) => return Err(anyhow::anyhow!("Unsupported channel type")),
             Err(e) => return Err(anyhow::anyhow!("Failed to create channel: {}", e)),
         };
@@ -386,9 +418,40 @@ impl NetworkMonitor {
     }
 
     fn find_interface() -> Option<NetworkInterface> {
-        datalink::interfaces()
+        let interfaces = datalink::interfaces();
+
+        // First priority: Interface with IPv4 address (most traffic is IPv4)
+        // This prevents selecting IPv6-only interfaces which can't capture IPv4 packets properly
+        if let Some(iface) = interfaces.iter().find(|iface| {
+            iface.is_up() && !iface.is_loopback() && iface.ips.iter().any(|ip| ip.is_ipv4())
+        }) {
+            log::info!(
+                "Selected interface with IPv4: {} ({})",
+                iface.name,
+                iface
+                    .ips
+                    .iter()
+                    .filter(|ip| ip.is_ipv4())
+                    .map(|ip| ip.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            return Some(iface.clone());
+        }
+
+        // Fallback: Any interface with IPs (even IPv6-only)
+        let fallback = interfaces
             .into_iter()
-            .find(|iface| iface.is_up() && !iface.is_loopback() && !iface.ips.is_empty())
+            .find(|iface| iface.is_up() && !iface.is_loopback() && !iface.ips.is_empty());
+
+        if let Some(ref iface) = fallback {
+            log::warn!(
+                "No IPv4 interface found, using IPv6-only interface: {}",
+                iface.name
+            );
+        }
+
+        fallback
     }
 
     fn process_packet(packet: &[u8], tracker: &Arc<Mutex<BandwidthTracker>>) -> Result<()> {
@@ -503,6 +566,7 @@ impl NetworkMonitor {
         tracker: &Arc<Mutex<BandwidthTracker>>,
     ) {
         let mut tracker = tracker.lock().unwrap();
+        tracker.packets_captured += 1;
 
         // Try both directions to find which one matches our connection map
         let key_outbound = ConnectionKey {
@@ -521,29 +585,45 @@ impl NetworkMonitor {
             protocol,
         };
 
-        // Check if this is an outbound packet (src = local)
+        // Check for exact matches first
+        let mut pid_and_direction: Option<(i32, bool)> = None; // (pid, is_outbound)
+
         if let Some(&pid) = tracker.connection_map.get(&key_outbound) {
-            let name = tracker
-                .socket_map
-                .values()
-                .find(|(p, _)| *p == pid)
-                .map(|(_, n)| n.clone())
-                .unwrap_or_else(|| format!("PID {}", pid));
+            pid_and_direction = Some((pid, true));
+        } else if let Some(&pid) = tracker.connection_map.get(&key_inbound) {
+            pid_and_direction = Some((pid, false));
+        } else if protocol == Protocol::Udp {
+            // Try UDP wildcard matching (for unconnected UDP sockets)
+            // Look for UDP socket with matching local addr/port but wildcard remote (0.0.0.0:0)
+            for (key, &pid) in tracker.connection_map.iter() {
+                if key.protocol == Protocol::Udp
+                    && key.local_addr == src_addr
+                    && key.local_port == src_port
+                    && (key.remote_addr.is_unspecified() || key.remote_port == 0)
+                {
+                    pid_and_direction = Some((pid, true));
+                    break;
+                }
+            }
 
-            let bandwidth = tracker
-                .process_bandwidth
-                .entry(pid)
-                .or_insert(ProcessBandwidth {
-                    name,
-                    rx_bytes: 0,
-                    tx_bytes: 0,
-                    last_rx_bytes: 0,
-                    last_tx_bytes: 0,
-                });
-            bandwidth.tx_bytes += packet_len as u64;
+            // If still no match, try inbound direction for UDP wildcard
+            if pid_and_direction.is_none() {
+                for (key, &pid) in tracker.connection_map.iter() {
+                    if key.protocol == Protocol::Udp
+                        && key.local_addr == dst_addr
+                        && key.local_port == dst_port
+                        && (key.remote_addr.is_unspecified() || key.remote_port == 0)
+                    {
+                        pid_and_direction = Some((pid, false));
+                        break;
+                    }
+                }
+            }
         }
-        // Check if this is an inbound packet (dst = local)
-        else if let Some(&pid) = tracker.connection_map.get(&key_inbound) {
+
+        if let Some((pid, is_outbound)) = pid_and_direction {
+            tracker.packets_matched += 1;
+
             let name = tracker
                 .socket_map
                 .values()
@@ -561,7 +641,40 @@ impl NetworkMonitor {
                     last_rx_bytes: 0,
                     last_tx_bytes: 0,
                 });
-            bandwidth.rx_bytes += packet_len as u64;
+
+            if is_outbound {
+                bandwidth.tx_bytes += packet_len as u64;
+            } else {
+                bandwidth.rx_bytes += packet_len as u64;
+            }
+        } else {
+            tracker.packets_unmatched += 1;
+
+            // Log first few unmatched packets for debugging
+            if tracker.packets_unmatched <= 10 {
+                log::debug!(
+                    "Unmatched packet: {}:{} -> {}:{} ({:?}, {} bytes)",
+                    src_addr,
+                    src_port,
+                    dst_addr,
+                    dst_port,
+                    protocol,
+                    packet_len
+                );
+            } else if tracker.packets_unmatched == 11 {
+                log::debug!("Further unmatched packets will not be logged");
+            }
+        }
+
+        // Periodic statistics logging
+        if tracker.packets_captured % 1000 == 0 {
+            log::debug!(
+                "Packet stats: captured={}, matched={}, unmatched={} (match rate: {:.1}%)",
+                tracker.packets_captured,
+                tracker.packets_matched,
+                tracker.packets_unmatched,
+                (tracker.packets_matched as f64 / tracker.packets_captured as f64) * 100.0
+            );
         }
     }
 }
