@@ -1,3 +1,5 @@
+use crate::backends::BackendPriority;
+use crate::backends::throttle::BackendInfo;
 use crate::history::HistoryTracker;
 use crate::process::{ProcessInfo, ProcessMap};
 use ratatui::{
@@ -18,6 +20,7 @@ pub struct AppState {
     pub list_state: ListState,
     pub show_help: bool,
     pub show_throttle_dialog: bool,
+    pub show_backend_info: bool,
     pub throttle_dialog: ThrottleDialog,
     pub status_message: String,
     pub history: HistoryTracker,
@@ -113,6 +116,7 @@ impl AppState {
             show_graph: false,
             show_help: false,
             show_throttle_dialog: false,
+            show_backend_info: false,
             throttle_dialog: ThrottleDialog::new(),
             status_message: String::from("ChadThrottle started. Press 'h' for help."),
         }
@@ -182,6 +186,14 @@ impl AppState {
 }
 
 pub fn draw_ui(f: &mut Frame, app: &mut AppState) {
+    draw_ui_with_backend_info(f, app, None);
+}
+
+pub fn draw_ui_with_backend_info(
+    f: &mut Frame,
+    app: &mut AppState,
+    backend_info: Option<&BackendInfo>,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -213,6 +225,13 @@ pub fn draw_ui(f: &mut Frame, app: &mut AppState) {
     // Bandwidth graph overlay
     if app.show_graph {
         draw_bandwidth_graph(f, f.area(), app);
+    }
+
+    // Backend info modal (highest priority, renders on top)
+    if app.show_backend_info {
+        if let Some(info) = backend_info {
+            draw_backend_info(f, f.area(), info);
+        }
     }
 }
 
@@ -635,4 +654,292 @@ fn draw_bandwidth_graph(f: &mut Frame, area: Rect, app: &AppState) {
         height: 1,
     };
     f.render_widget(instructions, inst_area);
+}
+
+fn draw_backend_info(f: &mut Frame, area: Rect, backend_info: &BackendInfo) {
+    let mut text = vec![Line::from("")];
+
+    // Upload Backends Section
+    text.push(Line::from(Span::styled(
+        "Upload Backends:",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+
+    if backend_info.available_upload.is_empty() {
+        text.push(Line::from(Span::styled(
+            "  ⚪ (none compiled)",
+            Style::default().fg(Color::Gray),
+        )));
+    } else {
+        for (name, priority, available) in &backend_info.available_upload {
+            let is_active = backend_info.active_upload.as_ref() == Some(name);
+            let (symbol, color) = if is_active {
+                ("✅", Color::Green)
+            } else if *available {
+                ("✅", Color::Green)
+            } else {
+                ("❌", Color::Red)
+            };
+
+            let status = if is_active {
+                "[ACTIVE]"
+            } else if *available {
+                "Available"
+            } else {
+                "Unavailable"
+            };
+
+            let priority_str = format!("{:?}", priority);
+
+            text.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(symbol, Style::default().fg(color)),
+                Span::raw(" "),
+                Span::styled(
+                    format!("{:15}", name),
+                    if is_active {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::White)
+                    },
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    format!("{:12}", status),
+                    Style::default().fg(if is_active {
+                        Color::Yellow
+                    } else {
+                        Color::Gray
+                    }),
+                ),
+                Span::raw("  Priority: "),
+                Span::styled(priority_str, Style::default().fg(Color::Cyan)),
+            ]));
+        }
+    }
+
+    text.push(Line::from(""));
+
+    // Download Backends Section
+    text.push(Line::from(Span::styled(
+        "Download Backends:",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+
+    if backend_info.available_download.is_empty() {
+        text.push(Line::from(Span::styled(
+            "  ⚪ (none compiled)",
+            Style::default().fg(Color::Gray),
+        )));
+    } else {
+        for (name, priority, available) in &backend_info.available_download {
+            let is_active = backend_info.active_download.as_ref() == Some(name);
+            let (symbol, color) = if is_active {
+                ("✅", Color::Green)
+            } else if *available {
+                ("✅", Color::Green)
+            } else {
+                ("❌", Color::Red)
+            };
+
+            let status = if is_active {
+                "[ACTIVE]"
+            } else if *available {
+                "Available"
+            } else {
+                "Unavailable"
+            };
+
+            let priority_str = format!("{:?}", priority);
+
+            text.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(symbol, Style::default().fg(color)),
+                Span::raw(" "),
+                Span::styled(
+                    format!("{:15}", name),
+                    if is_active {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::White)
+                    },
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    format!("{:12}", status),
+                    Style::default().fg(if is_active {
+                        Color::Yellow
+                    } else {
+                        Color::Gray
+                    }),
+                ),
+                Span::raw("  Priority: "),
+                Span::styled(priority_str, Style::default().fg(Color::Cyan)),
+            ]));
+        }
+    }
+
+    text.push(Line::from(""));
+
+    // Configuration Section
+    text.push(Line::from(Span::styled(
+        "Configuration:",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+
+    let preferred_upload_display = backend_info
+        .preferred_upload
+        .as_ref()
+        .map(|s| s.as_str())
+        .unwrap_or("Auto");
+    let active_upload_display = backend_info
+        .active_upload
+        .as_ref()
+        .map(|s| format!(" ({} selected)", s))
+        .unwrap_or_else(|| " (none available)".to_string());
+
+    text.push(Line::from(vec![
+        Span::raw("  Preferred Upload:     "),
+        Span::styled(
+            format!("{}{}", preferred_upload_display, active_upload_display),
+            Style::default().fg(Color::White),
+        ),
+    ]));
+
+    let preferred_download_display = backend_info
+        .preferred_download
+        .as_ref()
+        .map(|s| s.as_str())
+        .unwrap_or("Auto");
+    let active_download_display = backend_info
+        .active_download
+        .as_ref()
+        .map(|s| format!(" ({} selected)", s))
+        .unwrap_or_else(|| " (none available)".to_string());
+
+    text.push(Line::from(vec![
+        Span::raw("  Preferred Download:   "),
+        Span::styled(
+            format!("{}{}", preferred_download_display, active_download_display),
+            Style::default().fg(Color::White),
+        ),
+    ]));
+
+    text.push(Line::from(vec![
+        Span::raw("  Config File:          "),
+        Span::styled(
+            "~/.config/chadthrottle/throttles.json",
+            Style::default().fg(Color::Gray),
+        ),
+    ]));
+
+    text.push(Line::from(""));
+
+    // Capabilities Section (only if we have active backends)
+    if backend_info.upload_capabilities.is_some() || backend_info.download_capabilities.is_some() {
+        text.push(Line::from(Span::styled(
+            "Capabilities (Active Backends):",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+
+        // Get capabilities - prefer upload, fall back to download
+        let caps = backend_info
+            .upload_capabilities
+            .as_ref()
+            .or(backend_info.download_capabilities.as_ref());
+
+        if let Some(capabilities) = caps {
+            text.push(Line::from(vec![
+                Span::raw("  IPv4:              "),
+                Span::styled(
+                    if capabilities.ipv4_support {
+                        "✅"
+                    } else {
+                        "❌"
+                    },
+                    Style::default().fg(if capabilities.ipv4_support {
+                        Color::Green
+                    } else {
+                        Color::Red
+                    }),
+                ),
+                Span::raw("   IPv6:            "),
+                Span::styled(
+                    if capabilities.ipv6_support {
+                        "✅"
+                    } else {
+                        "❌"
+                    },
+                    Style::default().fg(if capabilities.ipv6_support {
+                        Color::Green
+                    } else {
+                        Color::Red
+                    }),
+                ),
+            ]));
+
+            text.push(Line::from(vec![
+                Span::raw("  Per-Process:       "),
+                Span::styled(
+                    if capabilities.per_process {
+                        "✅"
+                    } else {
+                        "❌"
+                    },
+                    Style::default().fg(if capabilities.per_process {
+                        Color::Green
+                    } else {
+                        Color::Red
+                    }),
+                ),
+                Span::raw("   Per-Connection:  "),
+                Span::styled(
+                    if capabilities.per_connection {
+                        "✅"
+                    } else {
+                        "❌"
+                    },
+                    Style::default().fg(if capabilities.per_connection {
+                        Color::Green
+                    } else {
+                        Color::Red
+                    }),
+                ),
+            ]));
+        }
+
+        text.push(Line::from(""));
+    }
+
+    // Footer
+    text.push(Line::from(""));
+    text.push(Line::from(Span::styled(
+        "Press 'b' or 'Esc' to close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let backend_widget = Paragraph::new(text)
+        .style(Style::default().bg(Color::Black).fg(Color::White))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("ChadThrottle - Backends")
+                .style(Style::default().fg(Color::Cyan)),
+        );
+
+    let popup_area = centered_rect(70, 80, area);
+    f.render_widget(Clear, popup_area);
+    f.render_widget(backend_widget, popup_area);
 }

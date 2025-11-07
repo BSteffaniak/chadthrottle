@@ -57,6 +57,11 @@ pub fn get_all_keybindings() -> Vec<KeyBinding> {
         },
         // System
         KeyBinding {
+            key: "b",
+            description: "Show backend information",
+            category: KeyCategory::System,
+        },
+        KeyBinding {
             key: "h/?",
             description: "Toggle this help",
             category: KeyCategory::System,
@@ -79,6 +84,7 @@ pub fn get_status_bar_keybindings() -> Vec<(&'static str, &'static str)> {
     vec![
         ("↑↓", "Navigate"),
         ("t", "Throttle"),
+        ("b", "Backends"),
         ("h", "Help"),
         ("q/Ctrl+C", "Quit"),
     ]

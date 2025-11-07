@@ -190,7 +190,14 @@ async fn main() -> Result<()> {
     }
 
     // Run the app
-    let res = run_app(&mut terminal, &mut app, &mut monitor, &mut throttle_manager).await;
+    let res = run_app(
+        &mut terminal,
+        &mut app,
+        &mut monitor,
+        &mut throttle_manager,
+        &config,
+    )
+    .await;
 
     // Save config before exit (unless --no-save specified)
     if !args.no_save {
@@ -236,12 +243,19 @@ async fn run_app<B: ratatui::backend::Backend>(
     app: &mut AppState,
     monitor: &mut NetworkMonitor,
     throttle_manager: &mut ThrottleManager,
+    config: &config::Config,
 ) -> Result<()> {
     let mut update_interval = interval(Duration::from_secs(1));
 
     loop {
+        // Get backend info for UI display
+        let backend_info = throttle_manager.get_backend_info(
+            config.preferred_upload_backend.clone(),
+            config.preferred_download_backend.clone(),
+        );
+
         // Draw UI
-        terminal.draw(|f| ui::draw_ui(f, app))?;
+        terminal.draw(|f| ui::draw_ui_with_backend_info(f, app, Some(&backend_info)))?;
 
         // Handle input with timeout
         if event::poll(Duration::from_millis(100))? {
@@ -254,6 +268,17 @@ async fn run_app<B: ratatui::backend::Backend>(
                 // If help is shown, any key closes it
                 if app.show_help {
                     app.show_help = false;
+                    continue;
+                }
+
+                // If backend info is shown, b/Esc/q closes it
+                if app.show_backend_info {
+                    match key.code {
+                        KeyCode::Char('b') | KeyCode::Char('q') | KeyCode::Esc => {
+                            app.show_backend_info = false;
+                        }
+                        _ => {}
+                    }
                     continue;
                 }
 
@@ -316,6 +341,9 @@ async fn run_app<B: ratatui::backend::Backend>(
                     }
                     KeyCode::Char('h') | KeyCode::Char('?') => {
                         app.show_help = true;
+                    }
+                    KeyCode::Char('b') => {
+                        app.show_backend_info = !app.show_backend_info;
                     }
                     KeyCode::Char('g') => {
                         app.show_graph = !app.show_graph;

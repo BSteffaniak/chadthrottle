@@ -1,6 +1,9 @@
 // ThrottleManager coordinates upload and download throttling backends
 
-use super::{DownloadThrottleBackend, UploadThrottleBackend};
+use super::{
+    BackendInfo, DownloadThrottleBackend, UploadThrottleBackend, detect_download_backends,
+    detect_upload_backends,
+};
 use crate::backends::ActiveThrottle;
 use crate::process::ThrottleLimit;
 use anyhow::Result;
@@ -30,6 +33,30 @@ impl ThrottleManager {
             self.upload_backend.as_ref().map(|b| b.name().to_string()),
             self.download_backend.as_ref().map(|b| b.name().to_string()),
         )
+    }
+
+    /// Get comprehensive backend information for UI display
+    pub fn get_backend_info(
+        &self,
+        preferred_upload: Option<String>,
+        preferred_download: Option<String>,
+    ) -> BackendInfo {
+        BackendInfo {
+            active_upload: self.upload_backend.as_ref().map(|b| b.name().to_string()),
+            active_download: self.download_backend.as_ref().map(|b| b.name().to_string()),
+            available_upload: detect_upload_backends()
+                .into_iter()
+                .map(|b| (b.name.to_string(), b.priority, b.available))
+                .collect(),
+            available_download: detect_download_backends()
+                .into_iter()
+                .map(|b| (b.name.to_string(), b.priority, b.available))
+                .collect(),
+            preferred_upload,
+            preferred_download,
+            upload_capabilities: self.upload_backend.as_ref().map(|b| b.capabilities()),
+            download_capabilities: self.download_backend.as_ref().map(|b| b.capabilities()),
+        }
     }
 
     /// Apply throttle to a process (upload and/or download)

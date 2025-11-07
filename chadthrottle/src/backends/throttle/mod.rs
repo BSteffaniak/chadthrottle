@@ -135,6 +135,19 @@ pub struct DownloadBackendInfo {
     pub available: bool,
 }
 
+/// Complete backend information for UI display
+#[derive(Debug, Clone)]
+pub struct BackendInfo {
+    pub active_upload: Option<String>,
+    pub active_download: Option<String>,
+    pub available_upload: Vec<(String, BackendPriority, bool)>,
+    pub available_download: Vec<(String, BackendPriority, bool)>,
+    pub preferred_upload: Option<String>,
+    pub preferred_download: Option<String>,
+    pub upload_capabilities: Option<BackendCapabilities>,
+    pub download_capabilities: Option<BackendCapabilities>,
+}
+
 /// Detect all available upload backends
 pub fn detect_upload_backends() -> Vec<UploadBackendInfo> {
     let mut backends = Vec::new();
