@@ -20,15 +20,10 @@ fn main() {
             match build_ebpf_programs(&workspace_root, &out_dir) {
                 Ok(_) => {
                     println!("cargo:warning=eBPF programs built successfully!");
-                    // Tell the main crate where to find the eBPF bytecode
-                    println!(
-                        "cargo:rustc-env=EBPF_EGRESS_PATH={}/chadthrottle-egress",
-                        out_dir.display()
-                    );
-                    println!(
-                        "cargo:rustc-env=EBPF_INGRESS_PATH={}/chadthrottle-ingress",
-                        out_dir.display()
-                    );
+                    // Signal that eBPF programs were successfully built
+                    // The actual bytecode will be embedded using include_bytes!
+                    // with concat!(env!("OUT_DIR"), "/chadthrottle-egress")
+                    println!("cargo:rustc-cfg=ebpf_programs_built");
                 }
                 Err(e) => {
                     println!("cargo:warning=Failed to build eBPF programs:");

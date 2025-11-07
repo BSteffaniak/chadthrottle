@@ -84,23 +84,22 @@ impl EbpfDownload {
     #[cfg(feature = "throttle-ebpf")]
     fn ensure_loaded(&mut self) -> Result<()> {
         if self.ebpf.is_none() {
-            // Try to load the eBPF program from the path set by build.rs
-            #[cfg(all(feature = "throttle-ebpf", env = "EBPF_INGRESS_PATH"))]
+            // Load the eBPF program from embedded bytecode
+            #[cfg(ebpf_programs_built)]
             {
-                let program_path = env!("EBPF_INGRESS_PATH");
-                log::debug!("Loading eBPF ingress program from: {}", program_path);
+                log::debug!("Loading embedded eBPF ingress program");
 
-                let program_bytes = std::fs::read(program_path).with_context(|| {
-                    format!("Failed to read eBPF program from {}", program_path)
-                })?;
+                // Embed the bytecode at compile time from OUT_DIR
+                const PROGRAM_BYTES: &[u8] =
+                    include_bytes!(concat!(env!("OUT_DIR"), "/chadthrottle-ingress"));
 
-                let ebpf = load_ebpf_program(&program_bytes)?;
+                let ebpf = load_ebpf_program(PROGRAM_BYTES)?;
                 self.ebpf = Some(ebpf);
                 return Ok(());
             }
 
-            // Fallback: Try to load from embedded bytecode (if available at compile time)
-            #[cfg(all(feature = "throttle-ebpf", not(env = "EBPF_INGRESS_PATH")))]
+            // Fallback: eBPF programs were not built
+            #[cfg(not(ebpf_programs_built))]
             {
                 return Err(anyhow::anyhow!(
                     "eBPF ingress program not built.\n\
