@@ -7,15 +7,31 @@ use std::process::Command;
 pub const CGROUP_BASE: &str = "/sys/fs/cgroup/net_cls/chadthrottle";
 
 /// Detect the primary network interface
+/// Prefers interfaces with IPv4 addresses to match monitor behavior
 pub fn detect_interface() -> Result<String> {
     use pnet::datalink;
 
-    let interface = datalink::interfaces()
+    let interfaces = datalink::interfaces();
+
+    // First priority: Interface with IPv4 address (most traffic is IPv4)
+    // This matches the monitor's interface selection logic
+    if let Some(iface) = interfaces.iter().find(|iface| {
+        iface.is_up() && !iface.is_loopback() && iface.ips.iter().any(|ip| ip.is_ipv4())
+    }) {
+        log::debug!("TC backends using IPv4 interface: {}", iface.name);
+        return Ok(iface.name.clone());
+    }
+
+    // Fallback: Any interface with IPs (even IPv6-only)
+    if let Some(iface) = interfaces
         .into_iter()
         .find(|iface| iface.is_up() && !iface.is_loopback() && !iface.ips.is_empty())
-        .ok_or_else(|| anyhow!("No suitable network interface found"))?;
+    {
+        log::warn!("No IPv4 interface found, using: {}", iface.name);
+        return Ok(iface.name);
+    }
 
-    Ok(interface.name)
+    Err(anyhow!("No suitable network interface found"))
 }
 
 /// Check if TC (traffic control) is available

@@ -128,7 +128,26 @@ impl DownloadThrottleBackend for EbpfDownload {
     fn is_available() -> bool {
         #[cfg(feature = "throttle-ebpf")]
         {
-            check_ebpf_support()
+            // Check basic kernel support (cgroup v2, kernel version)
+            if !check_ebpf_support() {
+                return false;
+            }
+
+            // Check if eBPF programs are actually built and embedded
+            #[cfg(not(ebpf_programs_built))]
+            {
+                log::debug!(
+                    "eBPF download backend unavailable: programs not built.\n\
+                     Build eBPF programs first:\n\
+                     1. Install bpf-linker: cargo install bpf-linker\n\
+                     2. Add rust-src: rustup component add rust-src\n\
+                     3. Build programs: cargo xtask build-ebpf"
+                );
+                return false;
+            }
+
+            // All checks passed
+            true
         }
 
         #[cfg(not(feature = "throttle-ebpf"))]

@@ -1,9 +1,10 @@
 // TC HTB (Hierarchical Token Bucket) upload throttling backend
 
+use crate::backends::cgroup::{CgroupBackend, CgroupBackendType, CgroupHandle};
 use crate::backends::throttle::UploadThrottleBackend;
 use crate::backends::throttle::linux_tc_utils::*;
 use crate::backends::{BackendCapabilities, BackendPriority};
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 
 /// TC HTB upload (egress) throttling backend
@@ -12,11 +13,12 @@ pub struct TcHtbUpload {
     active_throttles: HashMap<i32, ThrottleInfo>,
     next_classid: u32,
     initialized: bool,
+    cgroup_backend: Option<Box<dyn CgroupBackend>>,
 }
 
 struct ThrottleInfo {
     classid: u32,
-    cgroup_path: String,
+    cgroup_handle: CgroupHandle,
     limit_bytes_per_sec: u64,
 }
 
@@ -29,7 +31,14 @@ impl TcHtbUpload {
             active_throttles: HashMap::new(),
             next_classid: 100, // Start at 100 to avoid conflicts
             initialized: false,
+            cgroup_backend: None,
         })
+    }
+
+    fn get_cgroup_backend_mut(&mut self) -> Result<&mut Box<dyn CgroupBackend>> {
+        self.cgroup_backend
+            .as_mut()
+            .ok_or_else(|| anyhow!("Cgroup backend not initialized"))
     }
 }
 
@@ -43,7 +52,19 @@ impl UploadThrottleBackend for TcHtbUpload {
     }
 
     fn is_available() -> bool {
-        check_tc_available() && check_cgroups_available()
+        // Check TC (traffic control)
+        if !check_tc_available() {
+            return false;
+        }
+
+        // Check if any cgroup backend is available (works with v1 or v2)
+        if let Ok(Some(backend)) = crate::backends::cgroup::select_best_backend() {
+            if let Ok(available) = backend.is_available() {
+                return available;
+            }
+        }
+
+        false
     }
 
     fn capabilities(&self) -> BackendCapabilities {
@@ -63,6 +84,12 @@ impl UploadThrottleBackend for TcHtbUpload {
         // Setup TC HTB root on main interface
         setup_tc_htb_root(&self.interface)?;
 
+        // Initialize cgroup backend
+        self.cgroup_backend = crate::backends::cgroup::select_best_backend()?;
+        if self.cgroup_backend.is_none() {
+            return Err(anyhow!("No cgroup backend available for tc_htb"));
+        }
+
         self.initialized = true;
         Ok(())
     }
@@ -80,15 +107,33 @@ impl UploadThrottleBackend for TcHtbUpload {
         let classid = self.next_classid;
         self.next_classid += 1;
 
-        // Create cgroup for process
-        let cgroup_path = create_cgroup(pid)?;
+        // Create cgroup using backend (supports both v1 and v2)
+        let backend = self.get_cgroup_backend_mut()?;
+        let cgroup_handle = backend.create_cgroup(pid, &process_name)?;
 
-        // Set cgroup classid
-        set_cgroup_classid(&cgroup_path, classid)?;
+        // For cgroup v1, use classid from handle
+        // For cgroup v2, TC cgroup filter requires eBPF or falls back to interface-wide
+        if matches!(cgroup_handle.backend_type, CgroupBackendType::V1) {
+            // V1: Use classid from handle (format like "1:X")
+            if let Some(classid_str) = cgroup_handle.identifier.split(':').nth(1) {
+                if let Ok(handle_classid) = classid_str.parse::<u32>() {
+                    let rate_kbps = (limit_bytes_per_sec * 8 / 1000) as u32;
+                    create_tc_class(&self.interface, handle_classid, rate_kbps, "1:")?;
 
-        // Move process to cgroup
-        move_process_to_cgroup(pid, &cgroup_path)?;
+                    self.active_throttles.insert(
+                        pid,
+                        ThrottleInfo {
+                            classid: handle_classid,
+                            cgroup_handle,
+                            limit_bytes_per_sec,
+                        },
+                    );
+                    return Ok(());
+                }
+            }
+        }
 
+        // For v2 or if v1 parsing failed, use our own classid sequence
         // Convert bytes/sec to kbps (kilobits per second)
         let rate_kbps = (limit_bytes_per_sec * 8 / 1000) as u32;
 
@@ -100,7 +145,7 @@ impl UploadThrottleBackend for TcHtbUpload {
             pid,
             ThrottleInfo {
                 classid,
-                cgroup_path,
+                cgroup_handle,
                 limit_bytes_per_sec,
             },
         );
@@ -113,8 +158,10 @@ impl UploadThrottleBackend for TcHtbUpload {
             // Remove TC class
             let _ = remove_tc_class(&self.interface, info.classid, "1:");
 
-            // Remove cgroup
-            let _ = remove_cgroup(&info.cgroup_path);
+            // Remove cgroup using backend
+            if let Ok(backend) = self.get_cgroup_backend_mut() {
+                let _ = backend.remove_cgroup(&info.cgroup_handle);
+            }
         }
 
         Ok(())

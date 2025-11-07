@@ -1,6 +1,7 @@
 // Backend trait definitions and core types
 
 pub mod capability;
+pub mod cgroup;
 pub mod monitor;
 pub mod throttle;
 

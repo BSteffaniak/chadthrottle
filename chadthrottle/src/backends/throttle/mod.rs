@@ -228,17 +228,38 @@ pub fn detect_download_backends() -> Vec<DownloadBackendInfo> {
 /// Auto-select best available upload backend (returns None if unavailable)
 pub fn select_upload_backend(preference: Option<&str>) -> Option<Box<dyn UploadThrottleBackend>> {
     if let Some(name) = preference {
+        log::info!("Using preferred upload backend: {}", name);
         return create_upload_backend(name).ok();
     }
 
     let available = detect_upload_backends();
 
+    // Log all backends and their status
+    log::debug!("Available upload backends:");
+    for backend in &available {
+        log::debug!(
+            "  {} - priority: {:?}, available: {}",
+            backend.name,
+            backend.priority,
+            backend.available
+        );
+    }
+
     // Auto-select best available
-    available
+    let selected = available
         .iter()
         .filter(|b| b.available)
         .max_by_key(|b| b.priority)
-        .and_then(|info| create_upload_backend(info.name).ok())
+        .and_then(|info| {
+            log::info!("Auto-selected upload backend: {}", info.name);
+            create_upload_backend(info.name).ok()
+        });
+
+    if selected.is_none() {
+        log::error!("❌ No upload throttling backend available");
+    }
+
+    selected
 }
 
 /// Auto-select best available download backend (returns None if unavailable)
@@ -248,15 +269,36 @@ pub fn select_download_backend(
     let available = detect_download_backends();
 
     if let Some(name) = preference {
+        log::info!("Using preferred download backend: {}", name);
         return create_download_backend(name).ok();
     }
 
+    // Log all backends and their status
+    log::debug!("Available download backends:");
+    for backend in &available {
+        log::debug!(
+            "  {} - priority: {:?}, available: {}",
+            backend.name,
+            backend.priority,
+            backend.available
+        );
+    }
+
     // Auto-select best available
-    available
+    let selected = available
         .iter()
         .filter(|b| b.available)
         .max_by_key(|b| b.priority)
-        .and_then(|info| create_download_backend(info.name).ok())
+        .and_then(|info| {
+            log::info!("Auto-selected download backend: {}", info.name);
+            create_download_backend(info.name).ok()
+        });
+
+    if selected.is_none() {
+        log::error!("❌ No download throttling backend available");
+    }
+
+    selected
 }
 
 /// Create an upload backend by name

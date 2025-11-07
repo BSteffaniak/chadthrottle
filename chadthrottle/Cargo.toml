@@ -13,11 +13,18 @@ default = [
   "throttle-ifb-tc",
   "throttle-tc-police",
   "throttle-nftables",
-  "throttle-ebpf",
+  # "throttle-ebpf",  # Disabled: Requires building eBPF programs with 'cargo xtask build-ebpf'
+  "cgroup-v1",
+  "cgroup-v2-nftables",
 ]
 
 # Monitor backends
 monitor-pnet = ["pnet", "pnet_datalink", "pnet_packet"]
+
+# Cgroup backends (used by throttle backends for per-process isolation)
+cgroup-v1 = []          # Cgroup v1 net_cls controller (legacy, fallback)
+cgroup-v2-nftables = [] # Cgroup v2 with nftables socket matching (modern)
+cgroup-v2-ebpf = []     # Cgroup v2 with eBPF TC classifier (future)
 
 # Throttle backends (Linux)
 throttle-tc-htb = [] # TC HTB upload (always available on Linux)

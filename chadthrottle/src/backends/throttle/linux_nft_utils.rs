@@ -3,6 +3,8 @@
 use anyhow::{Context, Result, anyhow};
 use std::process::Command;
 
+use crate::backends::cgroup::{CgroupBackendType, CgroupHandle};
+
 const NFT_TABLE: &str = "chadthrottle";
 const NFT_CHAIN_OUTPUT: &str = "output_limit";
 const NFT_CHAIN_INPUT: &str = "input_limit";
@@ -176,12 +178,29 @@ pub fn remove_cgroup_rules(cgroup_path: &str, direction: Direction) -> Result<()
 
 /// Cleanup nftables table
 pub fn cleanup_nft_table() -> Result<()> {
-    // Delete the entire table
-    let _ = Command::new("nft")
+    // Delete the entire table (ignore errors - may already be deleted by other backend)
+    let result = Command::new("nft")
         .args(&["delete", "table", "inet", NFT_TABLE])
-        .status();
+        .output();
 
-    log::info!("Cleaned up nftables table");
+    match result {
+        Ok(output) if output.status.success() => {
+            log::info!("Cleaned up nftables table");
+        }
+        Ok(output) => {
+            // Table already deleted or doesn't exist - this is fine
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("No such file or directory") {
+                log::debug!("nftables table already cleaned up");
+            } else {
+                log::warn!("nftables cleanup warning: {}", stderr.trim());
+            }
+        }
+        Err(e) => {
+            log::debug!("nftables cleanup error (likely already cleaned): {}", e);
+        }
+    }
+
     Ok(())
 }
 
@@ -190,4 +209,121 @@ pub fn cleanup_nft_table() -> Result<()> {
 pub enum Direction {
     Upload,
     Download,
+}
+
+/// Add rate limit rule for a cgroup using CgroupHandle
+pub fn add_cgroup_rate_limit_with_handle(
+    handle: &CgroupHandle,
+    rate_bytes_per_sec: u64,
+    direction: Direction,
+) -> Result<()> {
+    let chain = match direction {
+        Direction::Upload => NFT_CHAIN_OUTPUT,
+        Direction::Download => NFT_CHAIN_INPUT,
+    };
+
+    // Build rule based on cgroup backend type (not string parsing)
+    let rule = match handle.backend_type {
+        CgroupBackendType::V2Nftables | CgroupBackendType::V2Ebpf => {
+            // V2: socket cgroupv2 level 0 "path" limit rate over X bytes/second drop
+            // level 0 = exact cgroup path match (most precise)
+            // "over" keyword is critical - drops packets that EXCEED the rate limit
+            // identifier is the path relative to /sys/fs/cgroup/
+            format!(
+                "socket cgroupv2 level 0 \"{}\" limit rate over {} bytes/second drop",
+                handle.identifier, rate_bytes_per_sec
+            )
+        }
+        CgroupBackendType::V1 => {
+            // V1: meta cgroup classid limit rate over X bytes/second drop
+            // identifier should be like "1:1"
+            format!(
+                "meta cgroup {} limit rate over {} bytes/second drop",
+                handle.identifier, rate_bytes_per_sec
+            )
+        }
+    };
+
+    let status = Command::new("nft")
+        .args(&["add", "rule", "inet", NFT_TABLE, chain, &rule])
+        .status()
+        .context("Failed to add nftables rate limit rule")?;
+
+    if !status.success() {
+        return Err(anyhow!(
+            "Failed to add rate limit rule for cgroup (PID {})",
+            handle.pid
+        ));
+    }
+
+    log::debug!(
+        "Added nftables rate limit: {} bytes/sec for PID {} (backend: {})",
+        rate_bytes_per_sec,
+        handle.pid,
+        handle.backend_type
+    );
+    Ok(())
+}
+
+/// Remove all rules for a cgroup using CgroupHandle
+pub fn remove_cgroup_rules_with_handle(handle: &CgroupHandle, direction: Direction) -> Result<()> {
+    let chain = match direction {
+        Direction::Upload => NFT_CHAIN_OUTPUT,
+        Direction::Download => NFT_CHAIN_INPUT,
+    };
+
+    // List rules and find ones matching our cgroup identifier
+    let output = Command::new("nft")
+        .args(&["--handle", "list", "chain", "inet", NFT_TABLE, chain])
+        .output()
+        .context("Failed to list nftables rules")?;
+
+    let rules_output = String::from_utf8_lossy(&output.stdout);
+
+    // Parse output to find rule handles containing our identifier
+    // Match based on backend type for accurate detection
+    for line in rules_output.lines() {
+        let matches = match handle.backend_type {
+            CgroupBackendType::V2Nftables | CgroupBackendType::V2Ebpf => {
+                // V2: identifier is a path like "chadthrottle/pid_1234"
+                // Line will contain: socket cgroupv2 "chadthrottle/pid_1234"
+                line.contains(&handle.identifier)
+            }
+            CgroupBackendType::V1 => {
+                // V1: identifier is classid like "1:1"
+                // Line will contain: meta cgroup 1:1
+                line.contains(&format!("cgroup {}", handle.identifier))
+            }
+        };
+
+        if matches && line.contains("# handle") {
+            // Extract handle number
+            if let Some(handle_str) = line.split("# handle ").nth(1) {
+                if let Ok(rule_handle) = handle_str.trim().parse::<u32>() {
+                    // Delete rule by handle
+                    let result = Command::new("nft")
+                        .args(&[
+                            "delete",
+                            "rule",
+                            "inet",
+                            NFT_TABLE,
+                            chain,
+                            "handle",
+                            &rule_handle.to_string(),
+                        ])
+                        .status();
+
+                    if result.is_ok() {
+                        log::debug!(
+                            "Removed nftables rule handle {} for PID {}",
+                            rule_handle,
+                            handle.pid
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
 }

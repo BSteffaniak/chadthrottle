@@ -1,5 +1,16 @@
 // IFB + TC HTB download throttling backend
+//
+// REQUIREMENTS:
+// - IFB kernel module (ifb)
+// - TC (traffic control) command
+// - **Cgroup v1 with net_cls controller** (does NOT work with cgroup v2)
+//
+// LIMITATIONS:
+// - TC cgroup filter only works with cgroup v1 net_cls.classid
+// - On cgroup v2 systems, use tc_police backend instead
+// - Future: Could be adapted to work with cgroup v2 via eBPF TC classifier
 
+use crate::backends::cgroup::{CgroupBackend, CgroupBackendType, CgroupHandle};
 use crate::backends::throttle::DownloadThrottleBackend;
 use crate::backends::throttle::linux_tc_utils::*;
 use crate::backends::{BackendCapabilities, BackendPriority};
@@ -14,11 +25,12 @@ pub struct IfbTcDownload {
     active_throttles: HashMap<i32, ThrottleInfo>,
     next_classid: u32,
     initialized: bool,
+    cgroup_backend: Option<Box<dyn CgroupBackend>>,
 }
 
 struct ThrottleInfo {
     classid: u32,
-    cgroup_path: String,
+    cgroup_handle: CgroupHandle,
     limit_bytes_per_sec: u64,
 }
 
@@ -32,7 +44,14 @@ impl IfbTcDownload {
             active_throttles: HashMap::new(),
             next_classid: 100,
             initialized: false,
+            cgroup_backend: None,
         })
+    }
+
+    fn get_cgroup_backend_mut(&mut self) -> Result<&mut Box<dyn CgroupBackend>> {
+        self.cgroup_backend
+            .as_mut()
+            .ok_or_else(|| anyhow!("Cgroup backend not initialized"))
     }
 
     fn setup_ifb(&mut self) -> Result<()> {
@@ -40,30 +59,48 @@ impl IfbTcDownload {
             return Ok(());
         }
 
+        log::info!("Initializing IFB throttling backend...");
+
         // Load IFB module
-        let _ = Command::new("modprobe")
+        log::debug!("Loading IFB kernel module...");
+        let status = Command::new("modprobe")
             .arg("ifb")
             .arg("numifbs=1")
-            .output();
+            .status()
+            .context("Failed to execute modprobe")?;
+
+        if !status.success() {
+            log::warn!("Failed to load IFB module (may already be loaded)");
+        } else {
+            log::debug!("✅ IFB module loaded");
+        }
 
         // Check if IFB device exists
+        log::debug!("Checking if IFB device {} exists...", self.ifb_device);
         let check_ifb = Command::new("ip")
             .args(&["link", "show", &self.ifb_device])
             .output();
 
         if check_ifb.is_err() || !check_ifb.unwrap().status.success() {
             // Create IFB device
+            log::debug!("IFB device not found, creating...");
             let status = Command::new("ip")
                 .args(&["link", "add", &self.ifb_device, "type", "ifb"])
                 .status()
                 .context("Failed to create IFB device")?;
 
             if !status.success() {
-                return Err(anyhow!("Failed to create IFB device"));
+                return Err(anyhow!(
+                    "Failed to create IFB device - check permissions and kernel module"
+                ));
             }
+            log::info!("✅ Created IFB device {}", self.ifb_device);
+        } else {
+            log::debug!("IFB device {} already exists", self.ifb_device);
         }
 
         // Bring up IFB device
+        log::debug!("Bringing up IFB device {}...", self.ifb_device);
         let status = Command::new("ip")
             .args(&["link", "set", "dev", &self.ifb_device, "up"])
             .status()
@@ -72,9 +109,11 @@ impl IfbTcDownload {
         if !status.success() {
             return Err(anyhow!("Failed to bring up IFB device"));
         }
+        log::info!("✅ IFB device {} is UP", self.ifb_device);
 
         // Setup ingress qdisc on main interface
-        let _ = Command::new("tc")
+        log::debug!("Setting up ingress qdisc on {}...", self.interface);
+        let status = Command::new("tc")
             .args(&[
                 "qdisc",
                 "add",
@@ -84,10 +123,22 @@ impl IfbTcDownload {
                 "ffff:",
                 "ingress",
             ])
-            .status();
+            .status()
+            .context("Failed to setup ingress qdisc")?;
+
+        if !status.success() {
+            log::warn!("Ingress qdisc setup failed (may already exist)");
+        } else {
+            log::debug!("✅ Ingress qdisc configured on {}", self.interface);
+        }
 
         // Redirect IPv4 ingress traffic to IFB device
-        let _ = Command::new("tc")
+        log::debug!(
+            "Redirecting IPv4 ingress traffic from {} to {}...",
+            self.interface,
+            self.ifb_device
+        );
+        let status = Command::new("tc")
             .args(&[
                 "filter",
                 "add",
@@ -109,10 +160,23 @@ impl IfbTcDownload {
                 "dev",
                 &self.ifb_device,
             ])
-            .status();
+            .status()
+            .context("Failed to setup IPv4 redirect filter")?;
+
+        if !status.success() {
+            return Err(anyhow!(
+                "Failed to setup IPv4 traffic redirect - IFB device may not be working"
+            ));
+        }
+        log::debug!("✅ IPv4 traffic redirect configured");
 
         // Redirect IPv6 ingress traffic to IFB device
-        let _ = Command::new("tc")
+        log::debug!(
+            "Redirecting IPv6 ingress traffic from {} to {}...",
+            self.interface,
+            self.ifb_device
+        );
+        let status = Command::new("tc")
             .args(&[
                 "filter",
                 "add",
@@ -134,9 +198,18 @@ impl IfbTcDownload {
                 "dev",
                 &self.ifb_device,
             ])
-            .status();
+            .status()
+            .context("Failed to setup IPv6 redirect filter")?;
+
+        if !status.success() {
+            return Err(anyhow!(
+                "Failed to setup IPv6 traffic redirect - IFB device may not be working"
+            ));
+        }
+        log::debug!("✅ IPv6 traffic redirect configured");
 
         // Setup HTB qdisc on IFB device
+        log::debug!("Setting up HTB qdisc on {}...", self.ifb_device);
         let status = Command::new("tc")
             .args(&[
                 "qdisc",
@@ -156,9 +229,11 @@ impl IfbTcDownload {
         if !status.success() {
             return Err(anyhow!("Failed to setup IFB HTB qdisc"));
         }
+        log::debug!("✅ HTB qdisc configured on {}", self.ifb_device);
 
         // Add IPv4 cgroup filter on IFB device
-        let _ = Command::new("tc")
+        log::debug!("Adding IPv4 cgroup filter to {}...", self.ifb_device);
+        let status = Command::new("tc")
             .args(&[
                 "filter",
                 "add",
@@ -174,10 +249,18 @@ impl IfbTcDownload {
                 "1:",
                 "cgroup",
             ])
-            .status();
+            .status()
+            .context("Failed to add IPv4 cgroup filter")?;
+
+        if !status.success() {
+            log::warn!("IPv4 cgroup filter setup failed (may already exist)");
+        } else {
+            log::debug!("✅ IPv4 cgroup filter configured");
+        }
 
         // Add IPv6 cgroup filter on IFB device
-        let _ = Command::new("tc")
+        log::debug!("Adding IPv6 cgroup filter to {}...", self.ifb_device);
+        let status = Command::new("tc")
             .args(&[
                 "filter",
                 "add",
@@ -193,9 +276,24 @@ impl IfbTcDownload {
                 "2:",
                 "cgroup",
             ])
-            .status();
+            .status()
+            .context("Failed to add IPv6 cgroup filter")?;
+
+        if !status.success() {
+            log::warn!("IPv6 cgroup filter setup failed (may already exist)");
+        } else {
+            log::debug!("✅ IPv6 cgroup filter configured");
+        }
+
+        // Initialize cgroup backend
+        log::debug!("Initializing cgroup backend for ifb_tc...");
+        self.cgroup_backend = crate::backends::cgroup::select_best_backend()?;
+        if self.cgroup_backend.is_none() {
+            return Err(anyhow!("No cgroup backend available for ifb_tc"));
+        }
 
         self.initialized = true;
+        log::info!("✅ IFB throttling backend initialized successfully");
         Ok(())
     }
 }
@@ -210,7 +308,31 @@ impl DownloadThrottleBackend for IfbTcDownload {
     }
 
     fn is_available() -> bool {
-        check_ifb_availability() && check_tc_available() && check_cgroups_available()
+        // Check IFB module
+        if !check_ifb_availability() {
+            log::debug!("ifb_tc unavailable: IFB kernel module not found");
+            return false;
+        }
+
+        // Check TC (traffic control)
+        if !check_tc_available() {
+            log::debug!("ifb_tc unavailable: TC (traffic control) not available");
+            return false;
+        }
+
+        // CRITICAL: ifb_tc REQUIRES cgroup v1 with net_cls controller
+        // TC cgroup filter does NOT work with cgroup v2 (would need eBPF classifier)
+        if !crate::backends::cgroup::is_cgroup_v1_available() {
+            log::debug!(
+                "ifb_tc unavailable: requires cgroup v1 net_cls controller.\n\
+                 TC cgroup filter does not work with cgroup v2.\n\
+                 Use tc_police for download throttling on cgroup v2 systems."
+            );
+            return false;
+        }
+
+        log::debug!("ifb_tc available: all requirements met (IFB, TC, cgroup v1)");
+        true
     }
 
     fn capabilities(&self) -> BackendCapabilities {
@@ -239,19 +361,40 @@ impl DownloadThrottleBackend for IfbTcDownload {
         let classid = self.next_classid;
         self.next_classid += 1;
 
-        // Create cgroup for process (shared with upload if using TcHtbUpload)
-        let cgroup_path = create_cgroup(pid)?;
+        // Create cgroup using backend (supports both v1 and v2)
+        let backend = self.get_cgroup_backend_mut()?;
+        let cgroup_handle = backend.create_cgroup(pid, &process_name)?;
 
-        // Set cgroup classid
-        set_cgroup_classid(&cgroup_path, classid)?;
+        // For cgroup v1, set the classid in net_cls.classid
+        // For cgroup v2, classid matching won't work directly, but we still create classes
+        // Note: TC cgroup filter with v2 requires eBPF or falls back to interface-wide
+        if matches!(cgroup_handle.backend_type, CgroupBackendType::V1) {
+            // V1: Use classid from handle (format like "1:X")
+            // Extract classid number from "1:X" format
+            if let Some(classid_str) = cgroup_handle.identifier.split(':').nth(1) {
+                if let Ok(handle_classid) = classid_str.parse::<u32>() {
+                    // Use the classid from the cgroup handle for v1
+                    // Note: For v1, create_cgroup already sets net_cls.classid
+                    // We use this classid for TC class creation
+                    let rate_kbps = (limit_bytes_per_sec * 8 / 1000) as u32;
+                    create_tc_class(&self.ifb_device, handle_classid, rate_kbps, "2:")?;
 
-        // Move process to cgroup
-        move_process_to_cgroup(pid, &cgroup_path)?;
+                    self.active_throttles.insert(
+                        pid,
+                        ThrottleInfo {
+                            classid: handle_classid,
+                            cgroup_handle,
+                            limit_bytes_per_sec,
+                        },
+                    );
+                    return Ok(());
+                }
+            }
+        }
 
-        // Convert bytes/sec to kbps
-        let rate_kbps = (limit_bytes_per_sec * 8 / 1000) as u32;
-
+        // For v2 or if v1 parsing failed, use our own classid sequence
         // Create TC class on IFB device
+        let rate_kbps = (limit_bytes_per_sec * 8 / 1000) as u32;
         create_tc_class(&self.ifb_device, classid, rate_kbps, "2:")?;
 
         // Track throttle
@@ -259,7 +402,7 @@ impl DownloadThrottleBackend for IfbTcDownload {
             pid,
             ThrottleInfo {
                 classid,
-                cgroup_path,
+                cgroup_handle,
                 limit_bytes_per_sec,
             },
         );
@@ -272,8 +415,10 @@ impl DownloadThrottleBackend for IfbTcDownload {
             // Remove TC class on IFB
             let _ = remove_tc_class(&self.ifb_device, info.classid, "2:");
 
-            // Remove cgroup (only if no upload throttle using it)
-            let _ = remove_cgroup(&info.cgroup_path);
+            // Remove cgroup using backend
+            if let Ok(backend) = self.get_cgroup_backend_mut() {
+                let _ = backend.remove_cgroup(&info.cgroup_handle);
+            }
         }
 
         Ok(())
@@ -293,31 +438,46 @@ impl DownloadThrottleBackend for IfbTcDownload {
     }
 
     fn cleanup(&mut self) -> Result<()> {
+        log::debug!("Cleaning up IFB throttling backend");
+
         // Remove all throttles
         let pids: Vec<i32> = self.active_throttles.keys().copied().collect();
         for pid in pids {
             let _ = self.remove_download_throttle(pid);
         }
 
-        // Remove TC qdisc from IFB
-        let _ = Command::new("tc")
-            .args(&["qdisc", "del", "dev", &self.ifb_device, "root"])
-            .status();
+        // Check if IFB device still exists before cleanup
+        let check_ifb = Command::new("ip")
+            .args(&["link", "show", &self.ifb_device])
+            .output();
 
-        // Remove ingress qdisc from main interface
-        let _ = Command::new("tc")
-            .args(&["qdisc", "del", "dev", &self.interface, "ingress"])
-            .status();
+        if check_ifb.is_ok() && check_ifb.unwrap().status.success() {
+            log::debug!("IFB device {} exists, cleaning up...", self.ifb_device);
 
-        // Bring down IFB device
-        let _ = Command::new("ip")
-            .args(&["link", "set", "dev", &self.ifb_device, "down"])
-            .status();
+            // Remove TC qdisc from IFB
+            let _ = Command::new("tc")
+                .args(&["qdisc", "del", "dev", &self.ifb_device, "root"])
+                .status();
 
-        // Delete IFB device
-        let _ = Command::new("ip")
-            .args(&["link", "del", &self.ifb_device])
-            .status();
+            // Remove ingress qdisc from main interface
+            let _ = Command::new("tc")
+                .args(&["qdisc", "del", "dev", &self.interface, "ingress"])
+                .status();
+
+            // Bring down IFB device
+            let _ = Command::new("ip")
+                .args(&["link", "set", "dev", &self.ifb_device, "down"])
+                .status();
+
+            // Delete IFB device
+            let _ = Command::new("ip")
+                .args(&["link", "del", &self.ifb_device])
+                .status();
+
+            log::debug!("IFB device cleanup complete");
+        } else {
+            log::debug!("IFB device {} not found, skipping cleanup", self.ifb_device);
+        }
 
         Ok(())
     }

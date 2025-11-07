@@ -1,8 +1,8 @@
 // nftables Upload Throttling Backend
 
+use crate::backends::cgroup::{CgroupBackend, CgroupHandle};
 use crate::backends::throttle::UploadThrottleBackend;
 use crate::backends::throttle::linux_nft_utils::*;
-use crate::backends::throttle::linux_tc_utils::*;
 use crate::backends::{BackendCapabilities, BackendPriority};
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
@@ -11,10 +11,11 @@ use std::collections::HashMap;
 pub struct NftablesUpload {
     active_throttles: HashMap<i32, ThrottleInfo>,
     initialized: bool,
+    cgroup_backend: Option<Box<dyn CgroupBackend>>,
 }
 
 struct ThrottleInfo {
-    cgroup_path: String,
+    cgroup_handle: CgroupHandle,
     limit_bytes_per_sec: u64,
 }
 
@@ -23,15 +24,35 @@ impl NftablesUpload {
         Ok(Self {
             active_throttles: HashMap::new(),
             initialized: false,
+            cgroup_backend: None,
         })
     }
 
     fn ensure_initialized(&mut self) -> Result<()> {
         if !self.initialized {
             init_nft_table()?;
+
+            // Select best available cgroup backend
+            self.cgroup_backend = crate::backends::cgroup::select_best_backend()?;
+            if self.cgroup_backend.is_none() {
+                return Err(anyhow!("No cgroup backend available"));
+            }
+
             self.initialized = true;
         }
         Ok(())
+    }
+
+    fn get_cgroup_backend(&self) -> Result<&Box<dyn CgroupBackend>> {
+        self.cgroup_backend
+            .as_ref()
+            .ok_or_else(|| anyhow!("Cgroup backend not initialized"))
+    }
+
+    fn get_cgroup_backend_mut(&mut self) -> Result<&mut Box<dyn CgroupBackend>> {
+        self.cgroup_backend
+            .as_mut()
+            .ok_or_else(|| anyhow!("Cgroup backend not initialized"))
     }
 }
 
@@ -45,7 +66,19 @@ impl UploadThrottleBackend for NftablesUpload {
     }
 
     fn is_available() -> bool {
-        check_nft_available() && check_cgroups_available()
+        // Check nftables
+        if !check_nft_available() {
+            return false;
+        }
+
+        // Check if any cgroup backend is available
+        if let Ok(Some(backend)) = crate::backends::cgroup::select_best_backend() {
+            if let Ok(available) = backend.is_available() {
+                return available;
+            }
+        }
+
+        false
     }
 
     fn capabilities(&self) -> BackendCapabilities {
@@ -64,25 +97,23 @@ impl UploadThrottleBackend for NftablesUpload {
     fn throttle_upload(
         &mut self,
         pid: i32,
-        _process_name: String,
+        process_name: String,
         limit_bytes_per_sec: u64,
     ) -> Result<()> {
         self.ensure_initialized()?;
 
-        // Create cgroup for process
-        let cgroup_path = create_cgroup(pid)?;
+        // Create cgroup for process using backend
+        let backend = self.get_cgroup_backend_mut()?;
+        let cgroup_handle = backend.create_cgroup(pid, &process_name)?;
 
-        // Move process to cgroup
-        move_process_to_cgroup(pid, &cgroup_path)?;
-
-        // Add nftables rate limit rule
-        add_cgroup_rate_limit(&cgroup_path, limit_bytes_per_sec, Direction::Upload)?;
+        // Add nftables rate limit rule using backend's filter expression
+        add_cgroup_rate_limit_with_handle(&cgroup_handle, limit_bytes_per_sec, Direction::Upload)?;
 
         // Track throttle
         self.active_throttles.insert(
             pid,
             ThrottleInfo {
-                cgroup_path,
+                cgroup_handle,
                 limit_bytes_per_sec,
             },
         );
@@ -93,10 +124,12 @@ impl UploadThrottleBackend for NftablesUpload {
     fn remove_upload_throttle(&mut self, pid: i32) -> Result<()> {
         if let Some(info) = self.active_throttles.remove(&pid) {
             // Remove nftables rules for this cgroup
-            let _ = remove_cgroup_rules(&info.cgroup_path, Direction::Upload);
+            let _ = remove_cgroup_rules_with_handle(&info.cgroup_handle, Direction::Upload);
 
-            // Remove cgroup
-            let _ = remove_cgroup(&info.cgroup_path);
+            // Remove cgroup using backend
+            if let Ok(backend) = self.get_cgroup_backend_mut() {
+                let _ = backend.remove_cgroup(&info.cgroup_handle);
+            }
         }
 
         Ok(())
