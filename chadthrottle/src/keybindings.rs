@@ -55,6 +55,11 @@ pub fn get_all_keybindings() -> Vec<KeyBinding> {
             description: "Toggle bandwidth graph",
             category: KeyCategory::Actions,
         },
+        KeyBinding {
+            key: "f",
+            description: "Freeze/unfreeze sort order",
+            category: KeyCategory::Actions,
+        },
         // System
         KeyBinding {
             key: "b",
@@ -84,6 +89,7 @@ pub fn get_status_bar_keybindings() -> Vec<(&'static str, &'static str)> {
     vec![
         ("↑↓", "Navigate"),
         ("t", "Throttle"),
+        ("f", "Freeze"),
         ("b", "Backends"),
         ("h", "Help"),
         ("q/Ctrl+C", "Quit"),

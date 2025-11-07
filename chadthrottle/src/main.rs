@@ -345,6 +345,15 @@ async fn run_app<B: ratatui::backend::Backend>(
                     KeyCode::Char('b') => {
                         app.show_backend_info = !app.show_backend_info;
                     }
+                    KeyCode::Char('f') => {
+                        app.toggle_sort_freeze();
+                        app.status_message = if app.sort_frozen {
+                            "Sort order frozen ❄️ - Stats continue updating, order preserved"
+                                .to_string()
+                        } else {
+                            "Sort order unfrozen - Dynamic sorting re-enabled".to_string()
+                        };
+                    }
                     KeyCode::Char('g') => {
                         app.show_graph = !app.show_graph;
                     }

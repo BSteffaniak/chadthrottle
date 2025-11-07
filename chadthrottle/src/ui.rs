@@ -13,6 +13,7 @@ use ratatui::{
         Paragraph,
     },
 };
+use std::collections::HashMap;
 
 pub struct AppState {
     pub process_list: Vec<ProcessInfo>,
@@ -25,6 +26,8 @@ pub struct AppState {
     pub status_message: String,
     pub history: HistoryTracker,
     pub show_graph: bool,
+    pub sort_frozen: bool,
+    frozen_order: HashMap<i32, usize>, // PID -> position index
 }
 
 pub struct ThrottleDialog {
@@ -119,64 +122,95 @@ impl AppState {
             show_backend_info: false,
             throttle_dialog: ThrottleDialog::new(),
             status_message: String::from("ChadThrottle started. Press 'h' for help."),
+            sort_frozen: false,
+            frozen_order: HashMap::new(),
         }
     }
 
     pub fn update_processes(&mut self, process_map: ProcessMap) {
         let mut processes: Vec<ProcessInfo> = process_map.into_values().collect();
 
-        // Deterministic multi-level sort to prevent UI jumping
-        // Priority: terminated status -> DL rate -> total DL -> UL rate -> total UL -> throttle status -> name -> PID
-        processes.sort_by(|a, b| {
-            use std::cmp::Ordering;
+        if self.sort_frozen {
+            // FREEZE MODE: Sort by frozen position, new processes go to bottom
+            let next_position = self.frozen_order.values().max().copied().unwrap_or(0) + 1;
 
-            // 1. Terminated processes always go to bottom
-            match (a.is_terminated, b.is_terminated) {
-                (true, false) => return Ordering::Greater, // a terminated, b active -> a goes after b
-                (false, true) => return Ordering::Less, // a active, b terminated -> a goes before b
-                _ => {} // Both same state, continue to next criteria
+            processes.sort_by(|a, b| {
+                let a_pos = self
+                    .frozen_order
+                    .get(&a.pid)
+                    .copied()
+                    .unwrap_or(next_position);
+                let b_pos = self
+                    .frozen_order
+                    .get(&b.pid)
+                    .copied()
+                    .unwrap_or(next_position);
+                a_pos.cmp(&b_pos)
+            });
+
+            // Add any new processes to frozen_order map at the end
+            let current_max = self.frozen_order.values().max().copied().unwrap_or(0);
+            let mut next_pos = current_max + 1;
+            for process in &processes {
+                if !self.frozen_order.contains_key(&process.pid) {
+                    self.frozen_order.insert(process.pid, next_pos);
+                    next_pos += 1;
+                }
             }
+        } else {
+            // NORMAL MODE: Deterministic multi-level sort to prevent UI jumping
+            // Priority: terminated status -> DL rate -> total DL -> UL rate -> total UL -> throttle status -> name -> PID
+            processes.sort_by(|a, b| {
+                use std::cmp::Ordering;
 
-            // 2. Download rate (descending - higher rates first)
-            match b.download_rate.cmp(&a.download_rate) {
-                Ordering::Equal => {} // Continue to next criteria
-                other => return other,
-            }
+                // 1. Terminated processes always go to bottom
+                match (a.is_terminated, b.is_terminated) {
+                    (true, false) => return Ordering::Greater, // a terminated, b active -> a goes after b
+                    (false, true) => return Ordering::Less, // a active, b terminated -> a goes before b
+                    _ => {} // Both same state, continue to next criteria
+                }
 
-            // 3. Total download (descending - higher totals first)
-            match b.total_download.cmp(&a.total_download) {
-                Ordering::Equal => {}
-                other => return other,
-            }
+                // 2. Download rate (descending - higher rates first)
+                match b.download_rate.cmp(&a.download_rate) {
+                    Ordering::Equal => {} // Continue to next criteria
+                    other => return other,
+                }
 
-            // 4. Upload rate (descending - higher rates first)
-            match b.upload_rate.cmp(&a.upload_rate) {
-                Ordering::Equal => {}
-                other => return other,
-            }
+                // 3. Total download (descending - higher totals first)
+                match b.total_download.cmp(&a.total_download) {
+                    Ordering::Equal => {}
+                    other => return other,
+                }
 
-            // 5. Total upload (descending - higher totals first)
-            match b.total_upload.cmp(&a.total_upload) {
-                Ordering::Equal => {}
-                other => return other,
-            }
+                // 4. Upload rate (descending - higher rates first)
+                match b.upload_rate.cmp(&a.upload_rate) {
+                    Ordering::Equal => {}
+                    other => return other,
+                }
 
-            // 6. Throttle status (throttled processes first for visibility)
-            match (a.is_throttled(), b.is_throttled()) {
-                (true, false) => return Ordering::Less, // a throttled, b not -> a goes first
-                (false, true) => return Ordering::Greater, // a not throttled, b is -> b goes first
-                _ => {}                                 // Both same throttle state, continue
-            }
+                // 5. Total upload (descending - higher totals first)
+                match b.total_upload.cmp(&a.total_upload) {
+                    Ordering::Equal => {}
+                    other => return other,
+                }
 
-            // 7. Process name (alphabetical)
-            match a.name.cmp(&b.name) {
-                Ordering::Equal => {}
-                other => return other,
-            }
+                // 6. Throttle status (throttled processes first for visibility)
+                match (a.is_throttled(), b.is_throttled()) {
+                    (true, false) => return Ordering::Less, // a throttled, b not -> a goes first
+                    (false, true) => return Ordering::Greater, // a not throttled, b is -> b goes first
+                    _ => {}                                    // Both same throttle state, continue
+                }
 
-            // 8. PID (ascending - smaller PIDs first for determinism)
-            a.pid.cmp(&b.pid)
-        });
+                // 7. Process name (alphabetical)
+                match a.name.cmp(&b.name) {
+                    Ordering::Equal => {}
+                    other => return other,
+                }
+
+                // 8. PID (ascending - smaller PIDs first for determinism)
+                a.pid.cmp(&b.pid)
+            });
+        }
 
         self.process_list = processes;
 
@@ -221,6 +255,22 @@ impl AppState {
     pub fn get_selected_process(&self) -> Option<&ProcessInfo> {
         self.selected_index
             .and_then(|idx| self.process_list.get(idx))
+    }
+
+    /// Toggle sort freeze mode
+    pub fn toggle_sort_freeze(&mut self) {
+        self.sort_frozen = !self.sort_frozen;
+
+        if self.sort_frozen {
+            // Entering freeze mode - capture current order
+            self.frozen_order.clear();
+            for (index, process) in self.process_list.iter().enumerate() {
+                self.frozen_order.insert(process.pid, index);
+            }
+        } else {
+            // Exiting freeze mode - clear frozen order
+            self.frozen_order.clear();
+        }
     }
 }
 
@@ -413,9 +463,13 @@ fn draw_process_list(f: &mut Frame, area: Rect, app: &mut AppState) {
     };
 
     // Render the border and title separately
-    let border = Block::default()
-        .borders(Borders::ALL)
-        .title("Network Activity");
+    let title = if app.sort_frozen {
+        "Network Activity [FROZEN ❄️]"
+    } else {
+        "Network Activity"
+    };
+
+    let border = Block::default().borders(Borders::ALL).title(title);
     f.render_widget(border, area);
 
     // Render header
