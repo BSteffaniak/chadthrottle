@@ -41,7 +41,7 @@ Edit `/etc/nixos/configuration.nix`:
 
   # Load IFB kernel module at boot
   boot.kernelModules = [ "ifb" ];
-  
+
   # Optional: Set number of IFB devices
   boot.extraModprobeConfig = ''
     options ifb numifbs=1
@@ -50,6 +50,7 @@ Edit `/etc/nixos/configuration.nix`:
 ```
 
 Then rebuild:
+
 ```bash
 sudo nixos-rebuild switch
 ```
@@ -63,6 +64,7 @@ sudo modprobe ifb numifbs=1
 **Option 3: Enable in kernel config (for custom kernel)**
 
 If building a custom kernel:
+
 ```nix
 boot.kernelPatches = [
   {
@@ -154,12 +156,13 @@ sudo /home/braden/ChadThrottle/target/release/chadthrottle
 **Solutions:**
 
 1. **Check if kernel has IFB compiled:**
+
    ```bash
    zgrep IFB /proc/config.gz
    # or
    grep IFB /boot/config-$(uname -r)
    ```
-   
+
    Should show: `CONFIG_IFB=m` (module) or `CONFIG_IFB=y` (built-in)
 
 2. **If `CONFIG_IFB=m`:** Module exists but needs loading (see platform instructions above)
@@ -173,6 +176,7 @@ sudo /home/braden/ChadThrottle/target/release/chadthrottle
 The kernel you're running doesn't have IFB compiled. You need to:
 
 1. **Use a kernel that includes IFB:**
+
    ```nix
    boot.kernelPackages = pkgs.linuxPackages_latest;
    ```
@@ -193,6 +197,7 @@ The kernel you're running doesn't have IFB compiled. You need to:
 ### "Operation not permitted" when creating IFB
 
 You need root privileges:
+
 ```bash
 sudo modprobe ifb
 sudo chadthrottle  # Run ChadThrottle with sudo
@@ -207,6 +212,7 @@ ChadThrottle will still work, but with limitations:
 - ❌ **Download throttling unavailable** - Only upload can be limited
 
 When you try to set a download limit without IFB:
+
 ```
 Warning: Download throttling requested but IFB module not available.
 Only upload throttling will be applied.
@@ -216,6 +222,7 @@ To enable download throttling, ensure the 'ifb' kernel module is available.
 ## Alternative: eBPF-based Download Throttling (Future)
 
 ChadThrottle may add eBPF-based download throttling in the future, which wouldn't require IFB. This would use:
+
 - XDP (eXpress Data Path) for ingress rate limiting
 - More complex but available on all recent kernels
 

@@ -9,12 +9,14 @@ ChadThrottle v0.5.0 addresses **all critical issues** found in the v0.4.0 downlo
 ### 1. ✅ IFB Availability Detection
 
 **Problem (v0.4.0):**
+
 - Code assumed IFB module was always available
 - Failed silently if IFB missing
 - User got generic "Failed to apply throttle" error
 - No way to know why download throttling didn't work
 
 **Solution (v0.5.0):**
+
 - `check_ifb_availability()` runs on startup
 - Tests if IFB module can be loaded and used
 - Stores result in `ThrottleManager.ifb_available`
@@ -23,11 +25,13 @@ ChadThrottle v0.5.0 addresses **all critical issues** found in the v0.4.0 downlo
 ### 2. ✅ Graceful Degradation
 
 **Problem (v0.4.0):**
+
 - If IFB unavailable, entire throttle operation failed
 - Upload throttling didn't work even though it could
 - User couldn't throttle anything without IFB
 
 **Solution (v0.5.0):**
+
 - Upload throttling works independently of IFB
 - If download limit requested but IFB unavailable:
   - Shows clear warning message to stderr
@@ -38,12 +42,14 @@ ChadThrottle v0.5.0 addresses **all critical issues** found in the v0.4.0 downlo
 ### 3. ✅ IPv6 Support
 
 **Problem (v0.4.0):**
+
 - Only IPv4 TC filters installed (`protocol ip`)
 - IPv6 traffic completely bypassed throttling
 - No IPv6 ingress redirect to IFB
 - Silent failure for IPv6-only applications
 
 **Solution (v0.5.0):**
+
 - Dual TC filters for IPv4 and IPv6:
   - Main interface: `protocol ip` + `protocol ipv6`
   - IFB device: `protocol ip` + `protocol ipv6`
@@ -54,11 +60,13 @@ ChadThrottle v0.5.0 addresses **all critical issues** found in the v0.4.0 downlo
 ### 4. ✅ Better Error Messages
 
 **Problem (v0.4.0):**
+
 - Generic error messages
 - No indication of what failed
 - No guidance on how to fix
 
 **Solution (v0.5.0):**
+
 ```
 Warning: Download throttling requested but IFB module not available.
 Only upload throttling will be applied.
@@ -66,6 +74,7 @@ To enable download throttling, ensure the 'ifb' kernel module is available.
 ```
 
 Clear, actionable error messages that tell user exactly:
+
 - What went wrong
 - What will happen instead
 - How to fix it
@@ -73,11 +82,13 @@ Clear, actionable error messages that tell user exactly:
 ### 5. ✅ Comprehensive Documentation
 
 **Problem (v0.4.0):**
+
 - No setup instructions for IFB
 - No platform-specific guidance
 - Users left to figure it out
 
 **Solution (v0.5.0):**
+
 - **[IFB_SETUP.md](IFB_SETUP.md)** - Complete setup guide:
   - What IFB is and why it's needed
   - How to check if available
@@ -95,13 +106,13 @@ Clear, actionable error messages that tell user exactly:
 fn check_ifb_availability() -> bool {
     // 1. Try to load module
     modprobe ifb numifbs=1
-    
+
     // 2. Test device creation
     ip link add name ifb_test type ifb
-    
+
     // 3. Clean up test device
     ip link del ifb_test
-    
+
     // Returns true only if all succeed
 }
 ```
@@ -150,15 +161,15 @@ tc filter add dev ifb0 parent 2: protocol ipv6 prio 1 handle 2: cgroup
 
 ## Capability Matrix
 
-| Feature | No IFB | With IFB |
-|---------|--------|----------|
-| Network Monitoring | ✅ | ✅ |
-| IPv4 Monitoring | ✅ | ✅ |
-| IPv6 Monitoring | ✅ | ✅ |
-| Upload Throttling (IPv4) | ✅ | ✅ |
-| Upload Throttling (IPv6) | ✅ | ✅ |
-| Download Throttling (IPv4) | ❌ | ✅ |
-| Download Throttling (IPv6) | ❌ | ✅ |
+| Feature                    | No IFB | With IFB |
+| -------------------------- | ------ | -------- |
+| Network Monitoring         | ✅     | ✅       |
+| IPv4 Monitoring            | ✅     | ✅       |
+| IPv6 Monitoring            | ✅     | ✅       |
+| Upload Throttling (IPv4)   | ✅     | ✅       |
+| Upload Throttling (IPv6)   | ✅     | ✅       |
+| Download Throttling (IPv4) | ❌     | ✅       |
+| Download Throttling (IPv6) | ❌     | ✅       |
 
 ## User Experience Improvements
 
@@ -229,13 +240,13 @@ curl -6 https://ipv6.google.com
 
 ## Platform Status
 
-| Platform | IFB Availability | Notes |
-|----------|------------------|-------|
-| NixOS | ⚠️ Usually needs config | See [IFB_SETUP.md](IFB_SETUP.md) |
-| Ubuntu/Debian | ✅ Usually available | `linux-modules-extra` package |
-| Fedora/RHEL | ✅ Usually available | Built-in or easy to load |
-| Arch Linux | ✅ Usually available | Built-in kernel module |
-| Alpine Linux | ⚠️ May need config | Depends on kernel build |
+| Platform      | IFB Availability        | Notes                            |
+| ------------- | ----------------------- | -------------------------------- |
+| NixOS         | ⚠️ Usually needs config | See [IFB_SETUP.md](IFB_SETUP.md) |
+| Ubuntu/Debian | ✅ Usually available    | `linux-modules-extra` package    |
+| Fedora/RHEL   | ✅ Usually available    | Built-in or easy to load         |
+| Arch Linux    | ✅ Usually available    | Built-in kernel module           |
+| Alpine Linux  | ⚠️ May need config      | Depends on kernel build          |
 
 ## Performance Impact
 

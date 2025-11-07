@@ -28,15 +28,15 @@ sudo ./target/release/chadthrottle --restore
 
 ## Keyboard Controls
 
-| Key | Action |
-|-----|--------|
-| `↑/k` | Move selection up |
-| `↓/j` | Move selection down |
-| `t` | Throttle selected process |
-| `r` | Remove throttle from process |
-| `g` | Toggle bandwidth graph |
-| `h/?` | Show help |
-| `q/Esc` | Quit |
+| Key     | Action                       |
+| ------- | ---------------------------- |
+| `↑/k`   | Move selection up            |
+| `↓/j`   | Move selection down          |
+| `t`     | Throttle selected process    |
+| `r`     | Remove throttle from process |
+| `g`     | Toggle bandwidth graph       |
+| `h/?`   | Show help                    |
+| `q/Esc` | Quit                         |
 
 ## Throttling a Process
 
@@ -66,29 +66,35 @@ sudo ./target/release/chadthrottle --restore
 ## Available Backends
 
 ### Upload (Egress)
+
 - **nftables** (Better) - nftables, requires: nftables + cgroups (RECOMMENDED)
 - **tc_htb** (Good) - TC HTB, requires: TC + cgroups
 
 ### Download (Ingress)
+
 - **nftables** (Better) - nftables, requires: nftables + cgroups (RECOMMENDED, no IFB needed!)
 - **ifb_tc** (Good) - IFB+TC HTB, requires: TC + cgroups + IFB module
 - **tc_police** (Fallback) - TC Police, requires: TC only (no per-process filtering)
 
 ### Future
+
 - **ebpf_cgroup** (Best) - eBPF cgroup (planned)
 
 ## Troubleshooting
 
 ### "No backends available"
+
 - Install `tc` (traffic control): `sudo apt install iproute2`
 - Enable cgroups (required for tc_htb and ifb_tc)
 - Use tc_police as fallback (works without cgroups, but global limit only)
 
 ### "Download throttling: Not available"
+
 - If IFB unavailable, tc_police will be auto-selected
 - tc_police applies global rate limit (not per-process)
 
 ### Permission Denied
+
 - Must run with sudo: `sudo ./chadthrottle`
 - Needs root for TC/cgroup operations
 
@@ -102,7 +108,7 @@ sudo ./target/release/chadthrottle --restore
 ✅ Config persistence  
 ✅ Bandwidth history (60s)  
 ✅ Real-time graphs  
-✅ Beautiful TUI  
+✅ Beautiful TUI
 
 ## System Requirements
 
@@ -115,6 +121,7 @@ sudo ./target/release/chadthrottle --restore
 ## Examples
 
 ### Limit Firefox to 1MB/s download, 512KB/s upload
+
 1. Run: `sudo ./chadthrottle`
 2. Find Firefox in list
 3. Press `t`
@@ -123,11 +130,13 @@ sudo ./target/release/chadthrottle --restore
 6. Press Enter
 
 ### Check bandwidth usage over time
+
 1. Select process
 2. Press `g` to view graph
 3. See peak and average rates in title
 
 ### Persist throttles across restarts
+
 1. Throttle processes as usual
 2. Exit (`q`)
 3. Throttles auto-saved

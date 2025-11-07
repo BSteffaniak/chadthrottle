@@ -7,11 +7,13 @@ ChadThrottle now supports **nftables** as a throttling backend! nftables is the 
 ## What Was Implemented
 
 ### Files Created
+
 1. `src/backends/throttle/linux_nft_utils.rs` - nftables utility functions
 2. `src/backends/throttle/upload/linux/nftables.rs` - Upload throttling backend
 3. `src/backends/throttle/download/linux/nftables.rs` - Download throttling backend
 
 ### Backend Priority
+
 - **Priority:** `Better` (3/4)
 - **Better than:** TC HTB, IFB+TC, TC Police
 - **Not as good as:** eBPF (when implemented)
@@ -19,12 +21,14 @@ ChadThrottle now supports **nftables** as a throttling backend! nftables is the 
 ## Features
 
 ### Upload Throttling (`nftables_upload`)
+
 - Uses nftables output hook for egress traffic
 - Per-process filtering via cgroup matching
 - Native IPv4/IPv6 support
 - No qdisc manipulation needed
 
 ### Download Throttling (`nftables_download`)
+
 - Uses nftables input hook for ingress traffic
 - Per-process filtering via cgroup matching
 - **No IFB module required!** (major advantage over IFB+TC)
@@ -33,6 +37,7 @@ ChadThrottle now supports **nftables** as a throttling backend! nftables is the 
 ## Requirements
 
 ### System Requirements
+
 - Linux kernel 4.10+ (for cgroup v2 matching)
 - nftables package installed
 - cgroups v2 enabled
@@ -41,21 +46,25 @@ ChadThrottle now supports **nftables** as a throttling backend! nftables is the 
 ### Install nftables
 
 **Debian/Ubuntu:**
+
 ```bash
 sudo apt install nftables
 ```
 
 **Arch:**
+
 ```bash
 sudo pacman -S nftables
 ```
 
 **Fedora/RHEL:**
+
 ```bash
 sudo dnf install nftables
 ```
 
 **NixOS:**
+
 ```nix
 environment.systemPackages = [ pkgs.nftables ];
 ```
@@ -85,15 +94,15 @@ environment.systemPackages = [ pkgs.nftables ];
 
 ### vs Other Backends
 
-| Feature | nftables | TC HTB | IFB+TC | TC Police | eBPF (future) |
-|---------|----------|--------|--------|-----------|---------------|
-| **Priority** | Better (3) | Good (2) | Good (2) | Fallback (1) | Best (4) |
-| **Per-Process** | ✅ Yes | ✅ Yes | ✅ Yes | ❌ No | ✅ Yes |
-| **Download** | ✅ Yes | ❌ No | ✅ Yes | ⚠️ Global | ✅ Yes |
-| **IFB Required** | ❌ No | N/A | ✅ Yes | ❌ No | ❌ No |
-| **IPv6** | ✅ Yes | ✅ Yes | ✅ Yes | ⚠️ Limited | ✅ Yes |
-| **Performance** | ⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐ | ⭐⭐⭐⭐⭐ |
-| **Setup** | Simple | Moderate | Complex | Simple | Moderate |
+| Feature          | nftables   | TC HTB   | IFB+TC   | TC Police    | eBPF (future) |
+| ---------------- | ---------- | -------- | -------- | ------------ | ------------- |
+| **Priority**     | Better (3) | Good (2) | Good (2) | Fallback (1) | Best (4)      |
+| **Per-Process**  | ✅ Yes     | ✅ Yes   | ✅ Yes   | ❌ No        | ✅ Yes        |
+| **Download**     | ✅ Yes     | ❌ No    | ✅ Yes   | ⚠️ Global    | ✅ Yes        |
+| **IFB Required** | ❌ No      | N/A      | ✅ Yes   | ❌ No        | ❌ No         |
+| **IPv6**         | ✅ Yes     | ✅ Yes   | ✅ Yes   | ⚠️ Limited   | ✅ Yes        |
+| **Performance**  | ⭐⭐⭐⭐   | ⭐⭐⭐   | ⭐⭐⭐   | ⭐⭐         | ⭐⭐⭐⭐⭐    |
+| **Setup**        | Simple     | Moderate | Complex  | Simple       | Moderate      |
 
 ## Backend Selection
 
@@ -113,10 +122,12 @@ sudo ./chadthrottle --upload-backend nftables --download-backend nftables
 ### Selection Priority
 
 **Upload:**
+
 1. `nftables` (Better) - if nftables + cgroups available
 2. `tc_htb` (Good) - if TC + cgroups available
 
 **Download:**
+
 1. `nftables` (Better) - if nftables + cgroups available
 2. `ifb_tc` (Good) - if TC + cgroups + IFB available
 3. `tc_police` (Fallback) - if TC available (global limit only)
@@ -145,11 +156,13 @@ cargo build --no-default-features --features monitor-pnet,throttle-tc-htb,thrott
 ### "nftables unavailable"
 
 **Check if nftables is installed:**
+
 ```bash
 nft --version
 ```
 
 **Install if missing:**
+
 ```bash
 # Debian/Ubuntu
 sudo apt install nftables
@@ -161,12 +174,14 @@ sudo pacman -S nftables
 ### "cgroups unavailable"
 
 **Check if cgroups v2 is mounted:**
+
 ```bash
 mount | grep cgroup
 ls /sys/fs/cgroup/net_cls
 ```
 
 **Enable cgroups if needed:**
+
 ```bash
 # Add to kernel boot parameters
 cgroup_enable=memory cgroup_memory=1
@@ -175,6 +190,7 @@ cgroup_enable=memory cgroup_memory=1
 ### Permission Errors
 
 nftables requires root access:
+
 ```bash
 # Must run with sudo
 sudo ./chadthrottle
@@ -185,12 +201,14 @@ sudo ./chadthrottle
 ### Benchmarks (Estimated)
 
 **CPU Overhead:**
+
 - nftables: ~2-3%
 - TC HTB: ~5-7%
 - TC Police: ~3-4%
 - eBPF (future): ~1%
 
 **Latency Impact:**
+
 - nftables: +1-2ms
 - TC HTB: +2-4ms
 - IFB+TC: +3-5ms
@@ -199,6 +217,7 @@ sudo ./chadthrottle
 ### Best Use Cases
 
 **nftables is ideal for:**
+
 - Systems without IFB module
 - Modern Linux distributions (kernel 4.10+)
 - IPv6 networks
@@ -206,6 +225,7 @@ sudo ./chadthrottle
 - Systems where eBPF isn't available
 
 **Use TC instead if:**
+
 - Older kernels (<4.10)
 - nftables not available
 - Already using TC for other purposes
@@ -247,6 +267,7 @@ sudo nft --handle list table inet chadthrottle
 ### Rate Limiting Algorithm
 
 nftables uses a **token bucket** algorithm:
+
 - Tokens generated at configured rate
 - Each packet consumes tokens
 - Packets dropped when bucket empty
@@ -255,6 +276,7 @@ nftables uses a **token bucket** algorithm:
 ### Socket Cgroup Matching
 
 Uses nftables `socket cgroupv2` matcher:
+
 ```nft
 socket cgroupv2 level 1 "/path/to/cgroup" limit rate X bytes/second
 ```

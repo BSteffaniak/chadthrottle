@@ -19,11 +19,13 @@
 ### Prerequisites
 
 **Required:**
+
 - Linux kernel 2.6.29+ with cgroups support
 - `tc` (traffic control) - usually part of `iproute2` package
 - Root access for packet capture and traffic control
 
 **Optional (for download throttling):**
+
 - `ifb` kernel module - See [IFB_SETUP.md](IFB_SETUP.md) for installation
 - Without IFB: Upload throttling still works
 
@@ -55,6 +57,7 @@ sudo chadthrottle
 - `q`/`Esc` - Quit
 
 **In Throttle Dialog:**
+
 - `Tab` - Switch between download/upload fields
 - `0-9` - Enter limit in KB/s
 - `Backspace` - Delete character
@@ -77,6 +80,7 @@ ChadThrottle
 ## How It Works
 
 ### Monitoring (Packet Capture with pnet)
+
 ChadThrottle uses **accurate packet-level tracking** to monitor network usage per process:
 
 1. **Raw Packet Capture**: Uses `pnet` library to capture packets directly from network interfaces via `AF_PACKET` sockets (Linux kernel API)
@@ -85,12 +89,14 @@ ChadThrottle uses **accurate packet-level tracking** to monitor network usage pe
 4. **Accurate Byte Counting**: Tracks every packet's size and attributes it to the correct process
 
 **Key advantages:**
+
 - ✅ **100% accurate** - Counts every byte sent and received
 - ✅ **No external dependencies** - Pure Rust using kernel APIs directly
 - ✅ **Single static binary** - No need for libpcap or other C libraries
 - ✅ **Real-time tracking** - Captures packets as they flow through the network
 
 ### Throttling (cgroups + TC + IFB)
+
 ChadThrottle implements accurate **bidirectional** per-process throttling using:
 
 1. **Linux cgroups (net_cls)** - Tags all packets from a process
@@ -100,6 +106,7 @@ ChadThrottle implements accurate **bidirectional** per-process throttling using:
 5. **Guaranteed limits** - Kernel-enforced, no way to bypass
 
 **How to use:**
+
 - Select a process and press `t`
 - Enter download/upload limits in KB/s (leave empty for unlimited)
 - Press Enter to apply
@@ -107,12 +114,14 @@ ChadThrottle implements accurate **bidirectional** per-process throttling using:
 - Press `r` to remove throttle
 
 **Throttling capabilities:**
+
 - ✅ **Upload throttling** - Always works (TC HTB on main interface)
 - ✅ **Download throttling** - Requires IFB module (TC HTB on IFB device)
 - ✅ **IPv4 + IPv6** - Both protocols fully supported
 - 🛡️ **Graceful fallback** - Upload-only if IFB unavailable
 
 **Note:** If IFB module is not available, ChadThrottle will:
+
 - Show a warning when you try to set download limits
 - Apply upload throttling only
 - Continue working normally for monitoring and upload limits

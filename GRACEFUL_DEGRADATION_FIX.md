@@ -3,11 +3,13 @@
 ## Problem
 
 The application was **crashing** when no upload throttling backend was available:
+
 ```
 Error: No upload throttling backend available
 ```
 
 This happened because:
+
 1. `select_upload_backend()` returned `Result` and used `?` operator in main
 2. If TC/cgroups unavailable, it would return `Err`
 3. Program would crash before even starting
@@ -15,6 +17,7 @@ This happened because:
 ## Root Cause
 
 The architecture required upload backend to always exist, but that's not realistic:
+
 - TC might not be installed
 - cgroups might not be available
 - User might not have permissions
@@ -26,11 +29,13 @@ The architecture required upload backend to always exist, but that's not realist
 ### 1. Changed `select_upload_backend` to return `Option`
 
 **Before:**
+
 ```rust
 pub fn select_upload_backend(preference: Option<&str>) -> Result<Box<dyn UploadThrottleBackend>>
 ```
 
 **After:**
+
 ```rust
 pub fn select_upload_backend(preference: Option<&str>) -> Option<Box<dyn UploadThrottleBackend>>
 ```
@@ -40,6 +45,7 @@ Returns `None` if no backends available instead of crashing.
 ### 2. Updated `ThrottleManager` to accept `Option` for upload
 
 **Before:**
+
 ```rust
 pub struct ThrottleManager {
     upload_backend: Box<dyn UploadThrottleBackend>,  // Required!
@@ -48,6 +54,7 @@ pub struct ThrottleManager {
 ```
 
 **After:**
+
 ```rust
 pub struct ThrottleManager {
     upload_backend: Option<Box<dyn UploadThrottleBackend>>,  // Optional!
@@ -62,7 +69,7 @@ Both backends are now optional.
 ```rust
 pub fn throttle_process(&mut self, pid: i32, name: String, limit: &ThrottleLimit) -> Result<()> {
     let mut applied_any = false;
-    
+
     // Try upload if requested AND backend available
     if let Some(upload_limit) = limit.upload_limit {
         if let Some(ref mut backend) = self.upload_backend {
@@ -73,7 +80,7 @@ pub fn throttle_process(&mut self, pid: i32, name: String, limit: &ThrottleLimit
             eprintln!("    Install 'tc' (traffic control) and enable cgroups.");
         }
     }
-    
+
     // Try download if requested AND backend available
     if let Some(download_limit) = limit.download_limit {
         if let Some(ref mut backend) = self.download_backend {
@@ -84,12 +91,12 @@ pub fn throttle_process(&mut self, pid: i32, name: String, limit: &ThrottleLimit
             eprintln!("    Enable 'ifb' kernel module (see IFB_SETUP.md).");
         }
     }
-    
+
     // Only error if user requested throttling but NOTHING worked
     if !applied_any && (limit.upload_limit.is_some() || limit.download_limit.is_some()) {
         return Err(anyhow!("No throttling backends available"));
     }
-    
+
     Ok(())
 }
 ```
@@ -135,12 +142,14 @@ let mut throttle_manager = ThrottleManager::new(upload_backend, download_backend
 ### Behavior with No Backends
 
 **Before (v0.6.0):**
+
 ```
 Error: No upload throttling backend available
 [Program exits]
 ```
 
 **After (v0.6.1):**
+
 ```
 🔥 ChadThrottle v0.6.0 - Backend Status:
 
@@ -158,6 +167,7 @@ Error: No upload throttling backend available
 ### Behavior with Partial Backends
 
 **Upload available, download not:**
+
 ```
 🔥 ChadThrottle v0.6.0 - Backend Status:
 
@@ -171,6 +181,7 @@ Error: No upload throttling backend available
 ### When User Tries to Throttle
 
 **No backends available:**
+
 ```
 [User presses 't' and tries to set limits]
 ⚠️  Upload throttling requested but no backend available
@@ -181,6 +192,7 @@ Error: No throttling backends available
 ```
 
 **Only upload available:**
+
 ```
 [User presses 't' and tries to set download + upload limits]
 ⚠️  Download throttling requested but no backend available

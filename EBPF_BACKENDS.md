@@ -14,16 +14,19 @@ The following stub files are ready for future implementation:
 ## Benefits of eBPF Backends
 
 ### Performance
+
 - **Lower Overhead**: eBPF programs run in kernel space with minimal overhead
 - **No qdisc Manipulation**: Direct cgroup attachment, no TC qdisc setup needed
 - **Better Scalability**: Handles high-throughput scenarios more efficiently
 
 ### Simplicity
+
 - **No IFB Module**: Download throttling works without the IFB kernel module!
 - **Native Integration**: Direct cgroup integration, no intermediate devices
 - **Cleaner Setup**: Fewer moving parts, less can go wrong
 
 ### Priority
+
 - **Priority Level**: `Best` (4) - Highest priority backend
 - **Auto-Selected**: Will be automatically chosen when available
 
@@ -61,11 +64,13 @@ chadthrottle-ebpf/
 The eBPF programs will implement:
 
 **Token Bucket Algorithm:**
+
 - Per-cgroup token bucket for rate limiting
 - Refill tokens at configured rate
 - Drop/delay packets when bucket empty
 
 **BPF Maps:**
+
 - `rate_limits`: Per-cgroup rate limit configuration
 - `token_buckets`: Per-cgroup token bucket state
 - `stats`: Per-cgroup statistics (packets, bytes, drops)
@@ -73,16 +78,19 @@ The eBPF programs will implement:
 ### 4. Kernel Requirements
 
 **Minimum Kernel Version:**
+
 - Linux 4.10+ for `BPF_PROG_TYPE_CGROUP_SKB`
 - Linux 4.15+ for better eBPF features
 
 **Required Features:**
+
 - `CONFIG_BPF=y`
 - `CONFIG_BPF_SYSCALL=y`
 - `CONFIG_CGROUP_BPF=y`
 - cgroup2 filesystem mounted
 
 **Capabilities:**
+
 - `CAP_SYS_ADMIN` (root or specific capability)
 - `CAP_BPF` (kernel 5.8+, optional)
 
@@ -91,6 +99,7 @@ The eBPF programs will implement:
 ### Phase 1: Upload Throttling (BPF_CGROUP_INET_EGRESS)
 
 1. **Create eBPF Program**
+
    ```rust
    // chadthrottle-ebpf/src/egress.rs
    #[cgroup_skb(egress)]
@@ -115,6 +124,7 @@ The eBPF programs will implement:
 ### Phase 2: Download Throttling (BPF_CGROUP_INET_INGRESS)
 
 1. **Create eBPF Program**
+
    ```rust
    // chadthrottle-ebpf/src/ingress.rs
    #[cgroup_skb(ingress)]
@@ -136,13 +146,13 @@ The eBPF programs will implement:
 
 ### Comparison: TC vs eBPF
 
-| Metric | TC HTB | eBPF Cgroup |
-|--------|--------|-------------|
-| **CPU Overhead** | ~5-10% | ~1-2% |
-| **Latency** | +2-5ms | <1ms |
-| **Setup Time** | ~100ms | ~10ms |
-| **Dependencies** | tc, cgroups, (IFB for download) | Just cgroups |
-| **Kernel Version** | Any | 4.10+ |
+| Metric             | TC HTB                          | eBPF Cgroup  |
+| ------------------ | ------------------------------- | ------------ |
+| **CPU Overhead**   | ~5-10%                          | ~1-2%        |
+| **Latency**        | +2-5ms                          | <1ms         |
+| **Setup Time**     | ~100ms                          | ~10ms        |
+| **Dependencies**   | tc, cgroups, (IFB for download) | Just cgroups |
+| **Kernel Version** | Any                             | 4.10+        |
 
 ## Testing Plan
 
@@ -173,11 +183,13 @@ The eBPF programs will implement:
 ```
 
 **Benefits:**
+
 - Lowest possible latency
 - Processes packets before network stack
 - Best for 10Gbit+ networks
 
 **Drawbacks:**
+
 - Can't filter by process (only by IP/port)
 - Requires more complex setup
 - Not all NICs support XDP
@@ -192,7 +204,8 @@ The eBPF programs will implement:
 ## Status
 
 **Current:** Stub files created, ready for implementation
-**Next Steps:** 
+**Next Steps:**
+
 1. Add `aya` dependency
 2. Create eBPF program crate
 3. Implement token bucket algorithm

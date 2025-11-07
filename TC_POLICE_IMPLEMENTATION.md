@@ -7,14 +7,17 @@ Implemented a new download throttling backend using TC (Traffic Control) Police 
 ## What Was Added
 
 ### 1. New Backend: `TcPoliceDownload`
+
 **File:** `src/backends/throttle/download/linux/tc_police.rs`
 
 A fallback download throttling implementation that:
+
 - Uses TC's `police` action directly on the ingress qdisc
 - Does NOT require the IFB kernel module
 - Works on systems where IFB is unavailable or cannot be loaded
 
 **Key Characteristics:**
+
 - Priority: `Fallback` (lower than IFB+TC which is `Good`)
 - IPv4 Support: ✅ Yes
 - IPv6 Support: ❌ Limited (police action has limited IPv6 support)
@@ -27,13 +30,16 @@ The TC Police backend cannot filter traffic by process/PID because it doesn't us
 ### 2. Updated Files
 
 **`Cargo.toml`:**
+
 - Added `throttle-tc-police` feature flag
 - Enabled by default alongside other throttle backends
 
 **`src/backends/throttle/download/linux/mod.rs`:**
+
 - Added conditional compilation for `tc_police` module
 
 **`src/backends/throttle/mod.rs`:**
+
 - Updated `detect_download_backends()` to include TC Police
 - Updated `create_download_backend()` to instantiate TC Police backend
 - TC Police is automatically selected when IFB is unavailable
@@ -56,10 +62,12 @@ Download backends are now selected in this order:
 ## How It Works
 
 ### Setup Process
+
 1. Creates an ingress qdisc on the network interface
 2. No IFB device creation needed
 
 ### Throttling Process
+
 1. When throttling is requested for a process:
    - Adds a TC filter with police action on the ingress qdisc
    - Sets rate limit in bits/sec
@@ -67,6 +75,7 @@ Download backends are now selected in this order:
    - Drops packets exceeding the rate limit
 
 ### Cleanup Process
+
 1. Removes TC filters from ingress qdisc
 2. Removes ingress qdisc from interface
 
@@ -85,13 +94,16 @@ let download_backend = select_download_backend(Some("tc_police"));
 ## Testing
 
 ### Build Verification
+
 ```bash
 cargo build
 # Should compile successfully with no errors
 ```
 
 ### Runtime Detection
+
 When you run ChadThrottle, it will show which backend is selected:
+
 ```
 🔥 ChadThrottle v0.6.0 - Backend Status:
 
@@ -99,6 +111,7 @@ When you run ChadThrottle, it will show which backend is selected:
 ```
 
 Or if IFB is available:
+
 ```
   ✅ Download throttling: ifb_tc_download (available)
 ```
@@ -123,6 +136,7 @@ Potential enhancements for TC Police backend:
 ## Status
 
 ✅ **COMPLETE** - TC Police backend is fully implemented and integrated
+
 - Compiles successfully
 - Feature flag added
 - Backend selection logic updated

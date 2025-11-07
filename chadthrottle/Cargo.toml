@@ -7,7 +7,14 @@ description = "A TUI network monitor and throttler for Linux - like NetLimiter b
 license = "MIT"
 
 [features]
-default = ["monitor-pnet", "throttle-tc-htb", "throttle-ifb-tc", "throttle-tc-police", "throttle-nftables", "throttle-ebpf"]
+default = [
+  "monitor-pnet",
+  "throttle-tc-htb",
+  "throttle-ifb-tc",
+  "throttle-tc-police",
+  "throttle-nftables",
+  "throttle-ebpf",
+]
 
 # Monitor backends
 monitor-pnet = ["pnet", "pnet_datalink", "pnet_packet"]
@@ -17,7 +24,11 @@ throttle-tc-htb = [] # TC HTB upload (always available on Linux)
 throttle-ifb-tc = [] # IFB+TC download (needs IFB module)
 throttle-tc-police = [] # TC Police download (no IFB needed, fallback)
 throttle-nftables = [] # nftables throttling (modern, better than TC)
-throttle-ebpf = ["dep:aya", "dep:chadthrottle-common", "chadthrottle-common/userspace"] # eBPF cgroup throttling (best performance)
+throttle-ebpf = [
+  "dep:aya",
+  "dep:chadthrottle-common",
+  "chadthrottle-common/userspace",
+] # eBPF cgroup throttling (best performance)
 
 [dependencies]
 ratatui = "0.28"

@@ -29,7 +29,7 @@ ChadThrottle now includes a full eBPF-based throttling backend implementation th
 
 4. **Userspace Backends**
    - `EbpfUpload` - Upload throttling backend
-   - `EbpfDownload` - Download throttling backend  
+   - `EbpfDownload` - Download throttling backend
    - Both integrate with existing backend trait system
 
 5. **Utility Functions** (linux_ebpf_utils.rs)
@@ -50,10 +50,10 @@ fn token_bucket_allow(bucket: &mut TokenBucket, packet_size: u64, now_ns: u64) -
     let elapsed_ns = now_ns.saturating_sub(bucket.last_update_ns);
     let elapsed_us = elapsed_ns / 1000;
     let tokens_to_add = (elapsed_us * bucket.rate_bps) / 1_000_000;
-    
+
     bucket.tokens = min(bucket.tokens + tokens_to_add, bucket.capacity);
     bucket.last_update_ns = now_ns;
-    
+
     // Allow if we have enough tokens
     if bucket.tokens >= packet_size {
         bucket.tokens -= packet_size;
@@ -96,11 +96,13 @@ Three hash maps shared between userspace and eBPF:
 To complete the implementation, you need to:
 
 1. **Install bpf-linker**:
+
    ```bash
    cargo install bpf-linker
    ```
 
 2. **Build eBPF programs**:
+
    ```bash
    cd chadthrottle-ebpf
    cargo build --release --target bpfel-unknown-none
@@ -108,10 +110,11 @@ To complete the implementation, you need to:
 
 3. **Embed bytecode** in main crate:
    Update `src/backends/throttle/upload/linux/ebpf.rs` and download version:
+
    ```rust
    const EBPF_EGRESS: &[u8] = include_bytes!("../../../../../target/bpfel-unknown-none/release/chadthrottle-egress");
    const EBPF_INGRESS: &[u8] = include_bytes!("../../../../../target/bpfel-unknown-none/release/chadthrottle-ingress");
-   
+
    fn ensure_loaded(&mut self) -> Result<()> {
        if self.ebpf.is_none() {
            let ebpf = load_ebpf_program(EBPF_EGRESS)?; // or EBPF_INGRESS for download
@@ -136,6 +139,7 @@ To complete the implementation, you need to:
 - **LLVM**: For eBPF compilation (usually installed with Rust)
 
 Install build tools:
+
 ```bash
 rustup component add rust-src
 cargo install bpf-linker
@@ -145,12 +149,12 @@ cargo install bpf-linker
 
 Compared to other backends:
 
-| Backend | CPU Overhead | Latency | Dependencies |
-|---------|--------------|---------|--------------|
-| **eBPF** | **~1%** | **+0.5ms** | kernel 4.10+, cgroupv2 |
-| nftables | ~2-3% | +1-2ms | nftables, cgroupv2 |
-| TC HTB/IFB | ~5-7% | +2-4ms | tc, cgroups (IFB for download) |
-| TC Police | ~4-6% | +3-5ms | tc only |
+| Backend    | CPU Overhead | Latency    | Dependencies                   |
+| ---------- | ------------ | ---------- | ------------------------------ |
+| **eBPF**   | **~1%**      | **+0.5ms** | kernel 4.10+, cgroupv2         |
+| nftables   | ~2-3%        | +1-2ms     | nftables, cgroupv2             |
+| TC HTB/IFB | ~5-7%        | +2-4ms     | tc, cgroups (IFB for download) |
+| TC Police  | ~4-6%        | +3-5ms     | tc only                        |
 
 ### Why eBPF is Faster
 
@@ -211,6 +215,7 @@ With eBPF implemented, the auto-selection priority is:
 ```
 
 Expected output (once eBPF programs are built):
+
 ```
 Upload Backends:
   ebpf        [priority: Best] ✅ available
@@ -250,6 +255,7 @@ To make eBPF backends fully functional:
 ### "eBPF programs not built"
 
 This is expected! The eBPF programs need to be compiled separately:
+
 ```bash
 cargo install bpf-linker
 cd chadthrottle-ebpf
@@ -259,6 +265,7 @@ cargo build --release --target bpfel-unknown-none
 ### "eBPF not supported on this system"
 
 Check:
+
 - Kernel version: `uname -r` (need 4.10+)
 - cgroupv2: `mount | grep cgroup2`
 - BPF support: `zgrep CONFIG_BPF_SYSCALL /proc/config.gz`
@@ -266,6 +273,7 @@ Check:
 ### Permission denied
 
 eBPF requires CAP_SYS_ADMIN (root):
+
 ```bash
 sudo ./chadthrottle
 ```

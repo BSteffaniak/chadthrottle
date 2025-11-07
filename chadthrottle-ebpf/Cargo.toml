@@ -1,11 +1,11 @@
 [package]
 name = "chadthrottle-ebpf"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
-aya-ebpf = { workspace = true }
-chadthrottle-common = { workspace = true }
+aya-ebpf = "0.1"
+chadthrottle-common = { path = "../chadthrottle-common", default-features = false }
 
 [[bin]]
 name = "chadthrottle-egress"

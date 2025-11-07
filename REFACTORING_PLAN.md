@@ -5,6 +5,7 @@
 This document tracks the ongoing refactoring to a trait-based backend system.
 
 ## Phase 1: Foundation (CURRENT)
+
 - [x] Create directory structure
 - [x] Define core traits (MonitorBackend, UploadThrottleBackend, DownloadThrottleBackend)
 - [x] Create shared TC/cgroup utilities
@@ -17,6 +18,7 @@ This document tracks the ongoing refactoring to a trait-based backend system.
 - [ ] Test basic functionality
 
 ## Phase 2: Additional Backends (FUTURE)
+
 - [ ] eBPF cgroup upload backend
 - [ ] eBPF cgroup download backend
 - [ ] eBPF XDP download backend
@@ -24,6 +26,7 @@ This document tracks the ongoing refactoring to a trait-based backend system.
 - [ ] nftables backends
 
 ## Phase 3: Cross-Platform (FUTURE)
+
 - [ ] Windows WFP backends
 - [ ] macOS PF backends
 - [ ] BSD PF backends
@@ -88,4 +91,3 @@ throttle-ifb-tc = []     # IFB+TC download (needs IFB module)
 4. Test download throttling (if IFB available)
 5. Test backend selection
 6. Test CLI arguments for backend choice
-

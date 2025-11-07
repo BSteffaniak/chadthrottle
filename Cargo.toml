@@ -1,10 +1,9 @@
 [workspace]
 resolver = "2"
-members = [
-    "chadthrottle",
-    "chadthrottle-common",
-    "chadthrottle-ebpf",
-]
+members = ["chadthrottle", "chadthrottle-common", "xtask"]
+# chadthrottle-ebpf is excluded from workspace because it targets bpfel-unknown-none
+# and should only be built via xtask
+exclude = ["chadthrottle-ebpf"]
 
 [workspace.dependencies]
 aya = { version = "0.13", features = ["async_tokio"] }

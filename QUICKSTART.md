@@ -14,6 +14,7 @@ sudo ./target/release/chadthrottle
 ## What You'll See
 
 The TUI will display:
+
 - **PID** - Process ID
 - **Process** - Process name
 - **Download** - Current download rate (with colors)
@@ -40,6 +41,7 @@ You should see these processes appear in ChadThrottle with their bandwidth usage
 ## Current Limitations
 
 **Current Features:**
+
 - ✅ Real-time packet capture with 100% accuracy
 - ✅ Per-process bandwidth tracking (TCP & UDP, IPv4 & IPv6)
 - ✅ **Upload throttling** (always works)
@@ -53,6 +55,7 @@ You should see these processes appear in ChadThrottle with their bandwidth usage
 - ✅ Dynamic throttle management
 
 **How to Throttle:**
+
 1. Run with sudo: `sudo ./target/release/chadthrottle`
 2. Generate some traffic (e.g., `curl` in another terminal)
 3. Select the process you want to throttle
@@ -63,6 +66,7 @@ You should see these processes appear in ChadThrottle with their bandwidth usage
 8. Press `r` to remove the throttle
 
 **Example:**
+
 ```bash
 # Terminal 1
 sudo ./target/release/chadthrottle
@@ -81,9 +85,11 @@ curl -O https://speed.hetzner.de/100MB.bin
 ## Troubleshooting
 
 ### "Permission denied" errors
+
 Run with sudo: `sudo ./target/release/chadthrottle`
 
 ### No processes showing up
+
 Make sure there's active network traffic. Try running `curl` or `wget` in another terminal.
 
 **Note:** ChadThrottle now uses packet capture for 100% accurate bandwidth tracking! Every byte is counted as it flows through your network interface.
@@ -97,6 +103,7 @@ Make sure there's active network traffic. Try running `curl` or `wget` in anothe
 **Fix:** See [IFB_SETUP.md](IFB_SETUP.md) for setup instructions
 
 **Quick test:**
+
 ```bash
 sudo modprobe ifb numifbs=1
 ip link show type ifb  # Should show ifb0

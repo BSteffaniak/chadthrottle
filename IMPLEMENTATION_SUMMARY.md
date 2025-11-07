@@ -9,7 +9,9 @@ ChadThrottle now has **full per-process bandwidth throttling** implemented using
 ## What Was Implemented
 
 ### 1. Throttle Manager (`src/throttle.rs`)
+
 **Complete cgroups + TC implementation:**
+
 - ✅ Network interface detection (matches packet capture interface)
 - ✅ TC HTB qdisc setup/cleanup
 - ✅ Cgroup creation in `/sys/fs/cgroup/net_cls/chadthrottle/`
@@ -20,13 +22,16 @@ ChadThrottle now has **full per-process bandwidth throttling** implemented using
 - ✅ Automatic cleanup on exit (Drop trait)
 
 **Key Methods:**
+
 - `throttle_process()` - Apply throttle to a PID
 - `remove_throttle()` - Remove throttle from a PID
 - `get_throttle()` - Check throttle status
 - `cleanup()` - Remove all throttles
 
 ### 2. Throttle Dialog UI (`src/ui.rs`)
+
 **Interactive dialog for setting limits:**
+
 - ✅ Download limit input field
 - ✅ Upload limit input field
 - ✅ Field switching with Tab
@@ -37,6 +42,7 @@ ChadThrottle now has **full per-process bandwidth throttling** implemented using
 - ✅ Instructions at bottom
 
 **ThrottleDialog struct:**
+
 ```rust
 pub struct ThrottleDialog {
     download_input: String,
@@ -48,7 +54,9 @@ pub struct ThrottleDialog {
 ```
 
 ### 3. Main Event Loop Integration (`src/main.rs`)
+
 **Keyboard shortcuts:**
+
 - `t` - Open throttle dialog for selected process
 - `r` - Remove throttle from selected process
 - `Tab` - Switch fields in dialog
@@ -58,12 +66,15 @@ pub struct ThrottleDialog {
 - `Esc` - Cancel dialog
 
 **Process tracking:**
+
 - Updates throttle status in process list every second
 - Shows ⚡ indicator for throttled processes
 - Syncs with ThrottleManager on each update
 
 ### 4. Documentation
+
 **Created/Updated:**
+
 - ✅ `THROTTLING.md` - Complete throttling guide
 - ✅ `README.md` - Updated features and usage
 - ✅ `QUICKSTART.md` - Added throttling examples
@@ -75,6 +86,7 @@ pub struct ThrottleDialog {
 ## How To Use
 
 ### Basic Usage
+
 ```bash
 # 1. Start ChadThrottle (requires sudo)
 sudo ./target/release/chadthrottle
@@ -93,6 +105,7 @@ curl -O https://speed.hetzner.de/100MB.bin
 ```
 
 ### Visual Indicators
+
 - ⚡ appears next to throttled processes
 - Status bar shows "Throttle applied to..." messages
 - Dialog shows current process being throttled
@@ -132,6 +145,7 @@ Process packets now rate-limited by kernel!
 ### Components
 
 **1. Cgroup (net_cls):**
+
 ```
 /sys/fs/cgroup/net_cls/chadthrottle/pid_1234/
 ├── net_cls.classid  (contains 0x00010064)
@@ -139,6 +153,7 @@ Process packets now rate-limited by kernel!
 ```
 
 **2. TC HTB:**
+
 ```
 eth0: qdisc htb 1:
   └─ class 1:100 rate 500kbit
@@ -146,6 +161,7 @@ eth0: qdisc htb 1:
 ```
 
 **3. TC Filter:**
+
 ```
 filter parent 1: protocol ip prio 1 cgroup
   → Matches packets by net_cls.classid
@@ -159,6 +175,7 @@ filter parent 1: protocol ip prio 1 cgroup
 ### Why This Approach?
 
 **Advantages:**
+
 1. **Per-process** - True per-process throttling, not port-based
 2. **Follows connections** - New connections inherit throttle
 3. **All protocols** - Works for TCP, UDP, any protocol
@@ -167,6 +184,7 @@ filter parent 1: protocol ip prio 1 cgroup
 6. **Efficient** - Minimal overhead (<0.1% CPU)
 
 **Versus Alternatives:**
+
 - **vs Port-based**: Throttles the process, not just specific ports
 - **vs trickle**: Works on existing processes, not just new launches
 - **vs eBPF**: Simpler to implement, easier to debug
@@ -175,12 +193,14 @@ filter parent 1: protocol ip prio 1 cgroup
 ### Rate Limiting Accuracy
 
 **HTB (Hierarchical Token Bucket):**
+
 - Guaranteed rate limit
 - No bursting above limit
 - Within 5% of specified rate
 - Smoothed traffic flow
 
 **Measurement:**
+
 ```bash
 # Before throttle
 curl -O https://speed.hetzner.de/100MB.bin
@@ -195,6 +215,7 @@ curl -O https://speed.hetzner.de/100MB.bin
 ## File Changes Summary
 
 ### Modified Files
+
 1. **src/throttle.rs** - Complete rewrite (336 lines)
    - Replaced trickle stub with cgroups + tc implementation
    - Added ThrottleManager with full lifecycle management
@@ -214,6 +235,7 @@ curl -O https://speed.hetzner.de/100MB.bin
 6. **CHANGELOG.md** - Version 0.3.0 entry
 
 ### New Files
+
 1. **THROTTLING.md** - Complete throttling documentation
 2. **IMPLEMENTATION_SUMMARY.md** - This file
 
@@ -241,6 +263,7 @@ curl -O https://speed.hetzner.de/100MB.bin
 ### Test Scenarios
 
 **Scenario 1: Throttle curl**
+
 ```bash
 sudo ./target/release/chadthrottle
 # In another terminal:
@@ -249,12 +272,14 @@ curl -O https://speed.hetzner.de/100MB.bin
 ```
 
 **Scenario 2: Remove throttle**
+
 ```bash
 # With curl running and throttled
 # Press 'r' → Should speed back up
 ```
 
 **Scenario 3: Multiple throttles**
+
 ```bash
 # Start multiple curl processes
 # Throttle each to different limits
@@ -303,12 +328,14 @@ curl -O https://speed.hetzner.de/100MB.bin
 ## Future Enhancements
 
 ### v0.4.0 (Planned)
+
 - [ ] Download (ingress) throttling via IFB
 - [ ] Throttle profiles/presets
 - [ ] Save/restore configuration
 - [ ] Per-connection throttling
 
 ### v0.5.0 (Future)
+
 - [ ] Bandwidth usage graphs
 - [ ] Domain-based rules
 - [ ] Time-based schedules
@@ -319,12 +346,14 @@ curl -O https://speed.hetzner.de/100MB.bin
 ## Performance
 
 **Benchmarks:**
+
 - CPU overhead: <0.1% for 10-20 throttled processes
 - Memory: +1 MB per throttled process
 - Latency impact: <1ms
 - Max throttled processes: 1000+ (theoretical)
 
 **Scalability:**
+
 - TC HTB scales to thousands of classes
 - Cgroups have minimal overhead
 - Should handle hundreds of simultaneous throttles
@@ -342,6 +371,7 @@ ChadThrottle v0.3.0 successfully implements:
 ✅ Production ready
 
 **Next steps:**
+
 - Test with real-world usage
 - Add download throttling (IFB)
 - Implement profiles and persistence

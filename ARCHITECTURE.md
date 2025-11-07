@@ -58,9 +58,11 @@ pub trait MonitorBackend: Send + Sync {
 ```
 
 **Implementations:**
+
 - `PnetMonitor` - Packet capture using pnet library (Linux/BSD)
 
 **Future:**
+
 - `EbpfMonitor` - eBPF socket filter (Linux, best)
 - `WfpMonitor` - Windows Filtering Platform (Windows)
 - `PfMonitor` - PacketFilter (macOS/BSD)
@@ -84,9 +86,11 @@ pub trait UploadThrottleBackend: Send + Sync {
 ```
 
 **Implementations:**
+
 - `TcHtbUpload` - TC HTB on main interface (Linux, always available)
 
 **Future:**
+
 - `EbpfCgroupUpload` - eBPF BPF_CGROUP_INET_EGRESS (Linux, best)
 - `NftablesUpload` - nftables output chain (Linux)
 - `WfpUpload` - WFP outbound layer (Windows)
@@ -111,9 +115,11 @@ pub trait DownloadThrottleBackend: Send + Sync {
 ```
 
 **Implementations:**
+
 - `IfbTcDownload` - IFB redirect + TC HTB (Linux, needs IFB module)
 
 **Future:**
+
 - `EbpfCgroupDownload` - eBPF BPF_CGROUP_INET_INGRESS (Linux, best)
 - `EbpfXdpDownload` - eBPF XDP early drop (Linux, good)
 - `TcPoliceDownload` - TC ingress police, no IFB (Linux, fallback)
@@ -147,6 +153,7 @@ pub struct ThrottleManager {
 ```
 
 **Key features:**
+
 - Upload backend is always required
 - Download backend is optional (graceful degradation)
 - Backends can be different (e.g., TC upload + eBPF download)
@@ -165,6 +172,7 @@ let manager = ThrottleManager::new(upload, download);
 ```
 
 **Selection algorithm:**
+
 1. Query all compiled backends via feature flags
 2. Check `is_available()` for each
 3. Sort by priority
@@ -193,7 +201,7 @@ monitor-pnet = ["pnet", "pnet_datalink", "pnet_packet"]
 throttle-tc-htb = []           # TC HTB (always works on Linux)
 throttle-ebpf-cgroup = ["aya"] # eBPF cgroup (best, future)
 
-# Download throttle backends  
+# Download throttle backends
 throttle-ifb-tc = []           # IFB+TC (needs IFB module)
 throttle-ebpf-xdp = ["aya"]    # eBPF XDP (best, future)
 ```
@@ -207,6 +215,7 @@ throttle-ebpf-xdp = ["aya"]    # eBPF XDP (best, future)
 **Method:** Raw packet capture using pnet library
 
 **How it works:**
+
 1. Opens raw socket on network interface
 2. Captures Ethernet frames
 3. Parses IP/TCP/UDP headers
@@ -214,6 +223,7 @@ throttle-ebpf-xdp = ["aya"]    # eBPF XDP (best, future)
 5. Tracks bandwidth per process
 
 **Capabilities:**
+
 - ✅ IPv4 + IPv6 support
 - ✅ Per-process tracking
 - ✅ 100% accurate byte counting
@@ -228,6 +238,7 @@ throttle-ebpf-xdp = ["aya"]    # eBPF XDP (best, future)
 **Method:** Linux TC (traffic control) + cgroups
 
 **How it works:**
+
 1. Create cgroup for process (`/sys/fs/cgroup/net_cls/chadthrottle/pid_X`)
 2. Set cgroup classid (packet tagging)
 3. Move process to cgroup
@@ -236,6 +247,7 @@ throttle-ebpf-xdp = ["aya"]    # eBPF XDP (best, future)
 6. TC cgroup filter matches packets by classid
 
 **Capabilities:**
+
 - ✅ IPv4 + IPv6 support
 - ✅ Per-process throttling
 - ✅ Guaranteed rate limits
@@ -252,6 +264,7 @@ throttle-ebpf-xdp = ["aya"]    # eBPF XDP (best, future)
 **Method:** IFB (Intermediate Functional Block) redirect + TC
 
 **How it works:**
+
 1. Load IFB kernel module
 2. Create IFB virtual device (ifb0)
 3. Setup ingress qdisc on main interface
@@ -260,6 +273,7 @@ throttle-ebpf-xdp = ["aya"]    # eBPF XDP (best, future)
 6. Use same cgroup classid as upload
 
 **Capabilities:**
+
 - ✅ IPv4 + IPv6 support
 - ✅ Per-process throttling
 - ✅ Guaranteed rate limits
@@ -313,7 +327,7 @@ aya = { version = "0.12", optional = true }
 
 pub fn detect_upload_backends() -> Vec<UploadBackendInfo> {
     let mut backends = Vec::new();
-    
+
     #[cfg(feature = "throttle-ebpf-cgroup")]
     {
         backends.push(UploadBackendInfo {
@@ -322,7 +336,7 @@ pub fn detect_upload_backends() -> Vec<UploadBackendInfo> {
             available: EbpfCgroupUpload::is_available(),
         });
     }
-    
+
     // ... other backends ...
     backends
 }
@@ -335,7 +349,7 @@ fn create_upload_backend(name: &str) -> Result<Box<dyn UploadThrottleBackend>> {
     match name {
         #[cfg(feature = "throttle-ebpf-cgroup")]
         "ebpf_cgroup" => Ok(Box::new(EbpfCgroupUpload::new()?)),
-        
+
         // ... other backends ...
         _ => Err(anyhow!("Unknown upload backend: {}", name)),
     }
@@ -382,12 +396,14 @@ Easy to add new backends as technologies evolve (io_uring, etc.).
 ## Migration from v0.5.0
 
 **v0.5.0 (monolithic):**
+
 ```rust
 let mut throttle = ThrottleManager::new()?;
 throttle.throttle_process(pid, name, &limit)?;
 ```
 
 **v0.6.0 (trait-based):**
+
 ```rust
 let upload = select_upload_backend(None)?;
 let download = select_download_backend(None);
@@ -396,6 +412,7 @@ throttle.throttle_process(pid, name, &limit)?;
 ```
 
 **API is similar, but now with:**
+
 - Backend selection
 - Better error messages
 - Capability reporting
@@ -404,21 +421,25 @@ throttle.throttle_process(pid, name, &limit)?;
 ## Roadmap
 
 ### v0.7.0: eBPF Backends
+
 - EbpfCgroupUpload (BPF_CGROUP_INET_EGRESS)
 - EbpfCgroupDownload (BPF_CGROUP_INET_INGRESS)
 - EbpfXdpDownload (XDP rate limiting)
 
 ### v0.8.0: Additional Linux Backends
+
 - TcPoliceDownload (no IFB needed)
 - NftablesUpload/Download
 - IptablesUpload/Download (fallback)
 
 ### v0.9.0: macOS Support
+
 - PfMonitor (PacketFilter monitoring)
 - PfUpload/PfDownload (dummynet)
 - NetworkLinkThrottle (Network Link Conditioner API)
 
 ### v1.0.0: Windows Support
+
 - WfpMonitor (Windows Filtering Platform)
 - WfpUpload/WfpDownload
 - Feature parity with NetLimiter!

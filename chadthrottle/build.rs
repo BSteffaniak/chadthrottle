@@ -1,9 +1,8 @@
 use std::env;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 
 fn main() {
-    // Only build eBPF if the feature is enabled
+    // Only check for eBPF if the feature is enabled
     if env::var("CARGO_FEATURE_THROTTLE_EBPF").is_ok() {
         println!("cargo:rerun-if-changed=../chadthrottle-ebpf/src");
 
@@ -13,118 +12,42 @@ fn main() {
             .unwrap()
             .to_path_buf();
 
-        // Try to build eBPF programs if bpf-linker is available
-        if check_bpf_linker_installed() {
-            println!("cargo:warning=bpf-linker found, attempting to build eBPF programs");
+        // Check if eBPF programs were already built by xtask
+        let target_dir = workspace_root.join("target/bpfel-unknown-none/release");
+        let egress_exists = target_dir.join("chadthrottle-egress").exists();
+        let ingress_exists = target_dir.join("chadthrottle-ingress").exists();
 
-            match build_ebpf_programs(&workspace_root, &out_dir) {
-                Ok(_) => {
-                    println!("cargo:warning=eBPF programs built successfully!");
-                    // Signal that eBPF programs were successfully built
-                    // The actual bytecode will be embedded using include_bytes!
-                    // with concat!(env!("OUT_DIR"), "/chadthrottle-egress")
-                    println!("cargo:rustc-cfg=ebpf_programs_built");
-                }
-                Err(e) => {
-                    println!("cargo:warning=Failed to build eBPF programs:");
-                    for line in e.lines() {
-                        println!("cargo:warning=  {}", line);
-                    }
-                    println!("cargo:warning=");
-                    println!("cargo:warning=eBPF backends will not be functional");
-                    print_ebpf_build_instructions();
-                }
+        if egress_exists && ingress_exists {
+            // Copy pre-built programs to out_dir
+            if let Err(e) = std::fs::copy(
+                target_dir.join("chadthrottle-egress"),
+                out_dir.join("chadthrottle-egress"),
+            ) {
+                println!("cargo:warning=Failed to copy egress program: {}", e);
+            } else if let Err(e) = std::fs::copy(
+                target_dir.join("chadthrottle-ingress"),
+                out_dir.join("chadthrottle-ingress"),
+            ) {
+                println!("cargo:warning=Failed to copy ingress program: {}", e);
+            } else {
+                // Successfully copied pre-built programs
+                println!("cargo:rustc-cfg=ebpf_programs_built");
+                return;
             }
-        } else {
-            println!("cargo:warning=bpf-linker not found - eBPF programs will not be built");
-            print_ebpf_build_instructions();
         }
+
+        // eBPF programs not found - print instructions
+        println!("cargo:warning=");
+        println!("cargo:warning=eBPF programs not found!");
+        println!("cargo:warning=");
+        println!("cargo:warning=eBPF programs must be built using xtask:");
+        println!("cargo:warning=  cargo xtask build-ebpf");
+        println!("cargo:warning=");
+        println!("cargo:warning=Or build everything at once:");
+        println!("cargo:warning=  cargo xtask build          # Debug build");
+        println!("cargo:warning=  cargo xtask build-release  # Release build");
+        println!("cargo:warning=");
+        println!("cargo:warning=eBPF backends will not be functional until you run xtask.");
+        println!("cargo:warning=");
     }
-}
-
-fn check_bpf_linker_installed() -> bool {
-    Command::new("bpf-linker").arg("--version").output().is_ok()
-}
-
-fn build_ebpf_programs(workspace_root: &Path, out_dir: &Path) -> Result<(), String> {
-    let ebpf_dir = workspace_root.join("chadthrottle-ebpf");
-
-    // Build egress program
-    let output = Command::new("cargo")
-        .current_dir(&ebpf_dir)
-        .args(&[
-            "build",
-            "--release",
-            "--target=bpfel-unknown-none",
-            "-Z",
-            "build-std=core",
-            "--bin",
-            "chadthrottle-egress",
-        ])
-        .env("RUSTFLAGS", "-C link-arg=--disable-memory-sanitizer")
-        .output()
-        .map_err(|e| format!("Failed to execute cargo: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(format!(
-            "Failed to build egress program:\n\nSTDOUT:\n{}\n\nSTDERR:\n{}",
-            stdout, stderr
-        ));
-    }
-
-    // Build ingress program
-    let output = Command::new("cargo")
-        .current_dir(&ebpf_dir)
-        .args(&[
-            "build",
-            "--release",
-            "--target=bpfel-unknown-none",
-            "-Z",
-            "build-std=core",
-            "--bin",
-            "chadthrottle-ingress",
-        ])
-        .env("RUSTFLAGS", "-C link-arg=--disable-memory-sanitizer")
-        .output()
-        .map_err(|e| format!("Failed to execute cargo: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(format!(
-            "Failed to build ingress program:\n\nSTDOUT:\n{}\n\nSTDERR:\n{}",
-            stdout, stderr
-        ));
-    }
-
-    // Copy built programs to out_dir
-    let target_dir = workspace_root.join("target/bpfel-unknown-none/release");
-    std::fs::copy(
-        target_dir.join("chadthrottle-egress"),
-        out_dir.join("chadthrottle-egress"),
-    )
-    .map_err(|e| format!("Failed to copy egress program: {}", e))?;
-
-    std::fs::copy(
-        target_dir.join("chadthrottle-ingress"),
-        out_dir.join("chadthrottle-ingress"),
-    )
-    .map_err(|e| format!("Failed to copy ingress program: {}", e))?;
-
-    Ok(())
-}
-
-fn print_ebpf_build_instructions() {
-    println!("cargo:warning=");
-    println!("cargo:warning=To enable eBPF backends:");
-    println!("cargo:warning=1. Install bpf-linker: cargo install bpf-linker");
-    println!("cargo:warning=2. Install rust-src: rustup component add rust-src");
-    println!("cargo:warning=3. Rebuild: cargo build --release");
-    println!("cargo:warning=");
-    println!("cargo:warning=Or build eBPF programs manually:");
-    println!("cargo:warning=  cd chadthrottle-ebpf");
-    println!("cargo:warning=  cargo build --release --target bpfel-unknown-none -Z build-std=core");
-    println!("cargo:warning=");
 }

@@ -38,11 +38,28 @@ fn token_bucket_allow(bucket: &mut TokenBucket, packet_size: u64, now_ns: u64) -
     // Calculate time elapsed since last update in nanoseconds
     let elapsed_ns = now_ns.saturating_sub(bucket.last_update_ns);
 
-    // Convert elapsed time to seconds (with nanosecond precision)
-    // tokens_to_add = (elapsed_ns * rate_bps) / 1_000_000_000
-    // To avoid overflow, we calculate: (elapsed_ns / 1000) * rate_bps / 1_000_000
-    let elapsed_us = elapsed_ns / 1000;
-    let tokens_to_add = (elapsed_us * bucket.rate_bps) / 1_000_000;
+    // Calculate tokens to add: (elapsed_ns * rate_bps) / 1_000_000_000
+    // eBPF doesn't support 128-bit math, so we must be very careful
+    // We'll do the calculation in a way that avoids large intermediate values
+
+    // Convert elapsed time to seconds (as a small fraction)
+    // elapsed_ns / 1_000_000_000 would give us seconds, but we need to keep precision
+    // So we'll work with elapsed_ns / 1000 (microseconds) and rate_bps / 1000 (KB/s)
+
+    let elapsed_us = elapsed_ns / 1000; // microseconds elapsed
+
+    // Now calculate: (elapsed_us * rate_bps) / 1_000_000
+    // But even this can overflow for large values
+    // So we'll divide first if possible
+    let tokens_to_add = if elapsed_us < 1_000_000 {
+        // Short time period - safe to multiply first
+        let product = elapsed_us.wrapping_mul(bucket.rate_bps);
+        product / 1_000_000
+    } else {
+        // Long time period - divide elapsed_us first
+        let seconds = elapsed_us / 1_000_000;
+        seconds.wrapping_mul(bucket.rate_bps)
+    };
 
     // Add new tokens, capped at capacity
     bucket.tokens = bucket.tokens.saturating_add(tokens_to_add);
@@ -106,9 +123,7 @@ fn try_chadthrottle_egress(ctx: SkBuffContext) -> Result<i32, i64> {
     let allow = token_bucket_allow(&mut bucket, packet_size, now_ns);
 
     // Update bucket in map
-    unsafe {
-        CGROUP_BUCKETS.insert(&cgroup_id, &bucket, 0)?;
-    }
+    CGROUP_BUCKETS.insert(&cgroup_id, &bucket, 0)?;
 
     // Update statistics
     let mut stats = match unsafe { CGROUP_STATS.get(&cgroup_id) } {
@@ -124,9 +139,7 @@ fn try_chadthrottle_egress(ctx: SkBuffContext) -> Result<i32, i64> {
         stats.bytes_dropped = stats.bytes_dropped.saturating_add(packet_size);
     }
 
-    unsafe {
-        CGROUP_STATS.insert(&cgroup_id, &stats, 0)?;
-    }
+    CGROUP_STATS.insert(&cgroup_id, &stats, 0)?;
 
     // Return verdict: 1 = allow, 0 = drop
     Ok(if allow { 1 } else { 0 })

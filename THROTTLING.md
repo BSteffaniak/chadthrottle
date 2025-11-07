@@ -5,6 +5,7 @@
 ChadThrottle implements **bidirectional per-process bandwidth throttling** using Linux cgroups, traffic control (tc), and IFB devices. This allows you to limit both upload AND download bandwidth of individual processes with high accuracy.
 
 **Key Features:**
+
 - ✅ Upload throttling (always available)
 - ✅ Download throttling (requires IFB kernel module)
 - ✅ IPv4 + IPv6 support (dual-stack)
@@ -80,22 +81,26 @@ User selects process → Press 't' → Set limits → Apply
 ### Technical Details
 
 **Cgroups net_cls Controller:**
+
 - Tags all network packets from a process with a "classid"
 - Classid format: `0x0001XXXX` (major:minor = 1:XXXX)
 - ALL packets from the process inherit this tag
 
 **TC (Traffic Control) HTB:**
+
 - Hierarchical Token Bucket qdisc
 - Provides guaranteed rate limiting
 - Prevents bursting above limit
 
 **IFB (Intermediate Functional Block) Device:**
+
 - Virtual network device for ingress shaping
 - Redirects incoming packets to appear as outgoing on IFB
 - Allows applying egress rules to download traffic
 - Created dynamically when download throttling is used
 
 **Why This Works:**
+
 - ✅ Follows process even if it opens new connections
 - ✅ Works for all protocols (TCP, UDP, etc.)
 - ✅ Works for all ports
@@ -108,6 +113,7 @@ User selects process → Press 't' → Set limits → Apply
 ### Basic Usage
 
 1. **Start ChadThrottle** (requires sudo):
+
    ```bash
    sudo /home/braden/ChadThrottle/target/release/chadthrottle
    ```
@@ -135,6 +141,7 @@ User selects process → Press 't' → Set limits → Apply
 ### Example
 
 **Throttle curl to 500 KB/s download:**
+
 ```
 1. Start: sudo ./target/release/chadthrottle
 2. In another terminal: curl -O https://speed.hetzner.de/100MB.bin
@@ -149,12 +156,14 @@ User selects process → Press 't' → Set limits → Apply
 ### System Requirements
 
 **Always Required:**
+
 - ✅ Linux kernel 2.6.29+ (cgroups support)
 - ✅ `tc` (traffic control) - usually part of `iproute2` package
 - ✅ Root access (for cgroups and tc operations)
 - ✅ net_cls cgroup controller enabled
 
 **Required for Download Throttling:**
+
 - ✅ `ifb` (Intermediate Functional Block) kernel module
 - See [IFB_SETUP.md](IFB_SETUP.md) for installation instructions
 
@@ -214,6 +223,7 @@ ip link show
 ### Manual Throttle Verification
 
 Check if throttle is active:
+
 ```bash
 # List active throttles
 ls /sys/fs/cgroup/net_cls/chadthrottle/
@@ -231,6 +241,7 @@ sudo tc filter show dev eth0
 ### Manual Cleanup
 
 If ChadThrottle crashes or throttles remain:
+
 ```bash
 # Remove all ChadThrottle cgroups
 sudo rm -rf /sys/fs/cgroup/net_cls/chadthrottle/
@@ -250,6 +261,7 @@ sudo tc qdisc del dev eth0 root
 **Fix:** See [IFB_SETUP.md](IFB_SETUP.md) for detailed setup instructions
 
 **Quick check:**
+
 ```bash
 # Try to load IFB
 sudo modprobe ifb numifbs=1
@@ -261,30 +273,36 @@ ip link show type ifb
 **Workaround:** Upload throttling will still work. Download throttling requires IFB.
 
 ### "Failed to create cgroup"
+
 - **Cause:** net_cls controller not available
 - **Fix:** Check kernel config, recompile with `CONFIG_NET_CLS_CGROUP=y`
 
 ### "Failed to setup TC root qdisc"
+
 - **Cause:** Don't have root access or tc not installed
 - **Fix:** Run with sudo, install iproute2
 
 ### Throttle not working
+
 1. Check if process is actually using network
 2. Verify ⚡ indicator is shown
 3. Check TC classes: `sudo tc class show dev eth0`
 4. Check if process moved to cgroup: `cat /sys/fs/cgroup/net_cls/chadthrottle/pid_*/cgroup.procs`
 
 ### Only upload throttling works (download not throttled)
+
 - **Cause:** IFB module not available
 - **Fix:** See [IFB_SETUP.md](IFB_SETUP.md) to enable IFB
 - **Note:** This is expected behavior - upload throttling works without IFB
 
 ### Process won't throttle
+
 - Some processes use multiple child processes
 - Try throttling the parent process
 - Check if process has special network capabilities
 
 ### IPv6 traffic not throttled
+
 - Ensure both IPv4 and IPv6 filters are installed
 - Check with: `sudo tc filter show dev eth0`
 - Should see filters for both `protocol ip` and `protocol ipv6`
@@ -292,11 +310,13 @@ ip link show type ifb
 ## Performance Impact
 
 **Overhead:**
+
 - Minimal CPU usage (<0.1%)
 - No measurable latency impact
 - Scales to hundreds of throttled processes
 
 **Accuracy:**
+
 - Within 5% of specified limit
 - HTB provides guaranteed maximum rate
 - No bursting above limit
