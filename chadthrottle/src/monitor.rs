@@ -214,10 +214,14 @@ impl NetworkMonitor {
     }
 
     /// Update socket inode -> PID mapping
+    /// Uses a two-phase update to avoid race conditions:
+    /// 1. Build new maps while old maps are still valid for packet capture
+    /// 2. Atomically swap old maps with new maps
     fn update_socket_map(&self) -> Result<()> {
-        let mut tracker = self.bandwidth_tracker.lock().unwrap();
-        tracker.socket_map.clear();
-        tracker.connection_map.clear();
+        // Phase 1: Build new maps WITHOUT holding the lock
+        // This allows packet capture to continue using old maps
+        let mut new_socket_map = HashMap::new();
+        let mut new_connection_map = HashMap::new();
 
         // Build socket inode -> PID map
         let all_procs = all_processes()?;
@@ -237,7 +241,7 @@ impl NetworkMonitor {
                     for fd_result in fds {
                         if let Ok(fd_info) = fd_result {
                             if let FDTarget::Socket(inode) = fd_info.target {
-                                tracker.socket_map.insert(inode, (pid, name.clone()));
+                                new_socket_map.insert(inode, (pid, name.clone()));
                             }
                         }
                     }
@@ -248,7 +252,7 @@ impl NetworkMonitor {
         // Map connections to PIDs via socket inodes
         if let Ok(tcp_entries) = procfs::net::tcp() {
             for entry in tcp_entries {
-                if let Some(&(pid, _)) = tracker.socket_map.get(&entry.inode) {
+                if let Some(&(pid, _)) = new_socket_map.get(&entry.inode) {
                     let key = ConnectionKey {
                         local_addr: entry.local_address.ip(),
                         local_port: entry.local_address.port(),
@@ -256,14 +260,14 @@ impl NetworkMonitor {
                         remote_port: entry.remote_address.port(),
                         protocol: Protocol::Tcp,
                     };
-                    tracker.connection_map.insert(key, pid);
+                    new_connection_map.insert(key, pid);
                 }
             }
         }
 
         if let Ok(tcp6_entries) = procfs::net::tcp6() {
             for entry in tcp6_entries {
-                if let Some(&(pid, _)) = tracker.socket_map.get(&entry.inode) {
+                if let Some(&(pid, _)) = new_socket_map.get(&entry.inode) {
                     let key = ConnectionKey {
                         local_addr: entry.local_address.ip(),
                         local_port: entry.local_address.port(),
@@ -271,14 +275,14 @@ impl NetworkMonitor {
                         remote_port: entry.remote_address.port(),
                         protocol: Protocol::Tcp,
                     };
-                    tracker.connection_map.insert(key, pid);
+                    new_connection_map.insert(key, pid);
                 }
             }
         }
 
         if let Ok(udp_entries) = procfs::net::udp() {
             for entry in udp_entries {
-                if let Some(&(pid, _)) = tracker.socket_map.get(&entry.inode) {
+                if let Some(&(pid, _)) = new_socket_map.get(&entry.inode) {
                     let key = ConnectionKey {
                         local_addr: entry.local_address.ip(),
                         local_port: entry.local_address.port(),
@@ -286,14 +290,14 @@ impl NetworkMonitor {
                         remote_port: entry.remote_address.port(),
                         protocol: Protocol::Udp,
                     };
-                    tracker.connection_map.insert(key, pid);
+                    new_connection_map.insert(key, pid);
                 }
             }
         }
 
         if let Ok(udp6_entries) = procfs::net::udp6() {
             for entry in udp6_entries {
-                if let Some(&(pid, _)) = tracker.socket_map.get(&entry.inode) {
+                if let Some(&(pid, _)) = new_socket_map.get(&entry.inode) {
                     let key = ConnectionKey {
                         local_addr: entry.local_address.ip(),
                         local_port: entry.local_address.port(),
@@ -301,10 +305,17 @@ impl NetworkMonitor {
                         remote_port: entry.remote_address.port(),
                         protocol: Protocol::Udp,
                     };
-                    tracker.connection_map.insert(key, pid);
+                    new_connection_map.insert(key, pid);
                 }
             }
         }
+
+        // Phase 2: Atomically replace old maps with new maps
+        // This is the ONLY point where we hold the lock and modify the maps
+        // The critical section is minimal - just pointer swaps
+        let mut tracker = self.bandwidth_tracker.lock().unwrap();
+        tracker.socket_map = new_socket_map;
+        tracker.connection_map = new_connection_map;
 
         Ok(())
     }
