@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use aya::{
     Ebpf,
     maps::HashMap as BpfHashMap,
-    programs::{CgroupSkb, CgroupSkbAttachType},
+    programs::{CgroupAttachMode, CgroupSkb, CgroupSkbAttachType},
 };
 #[cfg(feature = "throttle-ebpf")]
 use chadthrottle_common::{CgroupThrottleConfig, ThrottleStats, TokenBucket};
@@ -123,8 +123,6 @@ pub fn attach_cgroup_skb(
     cgroup_path: &Path,
     attach_type: CgroupSkbAttachType,
 ) -> Result<()> {
-    use aya::programs::CgroupAttachMode;
-
     let program: &mut CgroupSkb = ebpf
         .program_mut(program_name)
         .ok_or_else(|| anyhow::anyhow!("Program {} not found", program_name))?

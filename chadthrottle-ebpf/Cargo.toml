@@ -3,6 +3,10 @@ name = "chadthrottle-ebpf"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+# This crate is a standalone workspace member (excluded from parent)
+# but inherits dependencies from the parent workspace
+
 [dependencies]
 aya-ebpf = "0.1"
 chadthrottle-common = { path = "../chadthrottle-common", default-features = false }
@@ -14,20 +18,3 @@ path = "src/egress.rs"
 [[bin]]
 name = "chadthrottle-ingress"
 path = "src/ingress.rs"
-
-[profile.dev]
-opt-level = 3
-debug = false
-debug-assertions = false
-overflow-checks = false
-lto = false
-panic = "abort"
-incremental = false
-codegen-units = 1
-
-[profile.release]
-lto = true
-opt-level = 3
-debug = false
-panic = "abort"
-codegen-units = 1

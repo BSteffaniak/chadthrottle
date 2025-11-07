@@ -94,8 +94,10 @@ impl EbpfUpload {
                 log::debug!("Loading embedded eBPF egress program");
 
                 // Embed the bytecode at compile time from OUT_DIR
+                // IMPORTANT: Use include_bytes_aligned! for proper 32-byte alignment
+                // required by the eBPF ELF parser
                 const PROGRAM_BYTES: &[u8] =
-                    include_bytes!(concat!(env!("OUT_DIR"), "/chadthrottle-egress"));
+                    aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/chadthrottle-egress"));
 
                 let ebpf = load_ebpf_program(PROGRAM_BYTES)?;
                 self.ebpf = Some(ebpf);

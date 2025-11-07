@@ -1,15 +1,16 @@
 [workspace]
 resolver = "2"
 members = ["chadthrottle", "chadthrottle-common", "xtask"]
-# chadthrottle-ebpf is excluded from workspace because it targets bpfel-unknown-none
-# and should only be built via xtask
+# chadthrottle-ebpf must be excluded because it targets bpfel-unknown-none (no_std)
+# and cannot be built with the workspace's default target
+# It shares workspace dependencies via its own Cargo.toml
 exclude = ["chadthrottle-ebpf"]
 
 [workspace.dependencies]
 aya = { version = "0.13", features = ["async_tokio"] }
 aya-ebpf = "0.1"
 aya-log-ebpf = "0.1"
-chadthrottle-common = { path = "chadthrottle-common" }
+chadthrottle-common = { path = "chadthrottle-common", default-features = false }
 
 [profile.dev]
 opt-level = 3
