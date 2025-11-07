@@ -31,7 +31,11 @@ fn main() {
                     );
                 }
                 Err(e) => {
-                    println!("cargo:warning=Failed to build eBPF programs: {}", e);
+                    println!("cargo:warning=Failed to build eBPF programs:");
+                    for line in e.lines() {
+                        println!("cargo:warning=  {}", line);
+                    }
+                    println!("cargo:warning=");
                     println!("cargo:warning=eBPF backends will not be functional");
                     print_ebpf_build_instructions();
                 }
@@ -51,7 +55,7 @@ fn build_ebpf_programs(workspace_root: &Path, out_dir: &Path) -> Result<(), Stri
     let ebpf_dir = workspace_root.join("chadthrottle-ebpf");
 
     // Build egress program
-    let status = Command::new("cargo")
+    let output = Command::new("cargo")
         .current_dir(&ebpf_dir)
         .args(&[
             "build",
@@ -63,15 +67,20 @@ fn build_ebpf_programs(workspace_root: &Path, out_dir: &Path) -> Result<(), Stri
             "chadthrottle-egress",
         ])
         .env("RUSTFLAGS", "-C link-arg=--disable-memory-sanitizer")
-        .status()
+        .output()
         .map_err(|e| format!("Failed to execute cargo: {}", e))?;
 
-    if !status.success() {
-        return Err("Failed to build egress program".to_string());
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!(
+            "Failed to build egress program:\n\nSTDOUT:\n{}\n\nSTDERR:\n{}",
+            stdout, stderr
+        ));
     }
 
     // Build ingress program
-    let status = Command::new("cargo")
+    let output = Command::new("cargo")
         .current_dir(&ebpf_dir)
         .args(&[
             "build",
@@ -83,11 +92,16 @@ fn build_ebpf_programs(workspace_root: &Path, out_dir: &Path) -> Result<(), Stri
             "chadthrottle-ingress",
         ])
         .env("RUSTFLAGS", "-C link-arg=--disable-memory-sanitizer")
-        .status()
+        .output()
         .map_err(|e| format!("Failed to execute cargo: {}", e))?;
 
-    if !status.success() {
-        return Err("Failed to build ingress program".to_string());
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!(
+            "Failed to build ingress program:\n\nSTDOUT:\n{}\n\nSTDERR:\n{}",
+            stdout, stderr
+        ));
     }
 
     // Copy built programs to out_dir
