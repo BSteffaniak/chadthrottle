@@ -125,18 +125,57 @@ impl AppState {
     pub fn update_processes(&mut self, process_map: ProcessMap) {
         let mut processes: Vec<ProcessInfo> = process_map.into_values().collect();
 
-        // Sort: terminated processes go to bottom, then by total bandwidth
+        // Deterministic multi-level sort to prevent UI jumping
+        // Priority: terminated status -> DL rate -> total DL -> UL rate -> total UL -> throttle status -> name -> PID
         processes.sort_by(|a, b| {
+            use std::cmp::Ordering;
+
+            // 1. Terminated processes always go to bottom
             match (a.is_terminated, b.is_terminated) {
-                (true, false) => std::cmp::Ordering::Greater, // a terminated, b active -> a goes after b
-                (false, true) => std::cmp::Ordering::Less, // a active, b terminated -> a goes before b
-                _ => {
-                    // Both have same termination state, sort by bandwidth
-                    let a_total = a.download_rate + a.upload_rate;
-                    let b_total = b.download_rate + b.upload_rate;
-                    b_total.cmp(&a_total)
-                }
+                (true, false) => return Ordering::Greater, // a terminated, b active -> a goes after b
+                (false, true) => return Ordering::Less, // a active, b terminated -> a goes before b
+                _ => {} // Both same state, continue to next criteria
             }
+
+            // 2. Download rate (descending - higher rates first)
+            match b.download_rate.cmp(&a.download_rate) {
+                Ordering::Equal => {} // Continue to next criteria
+                other => return other,
+            }
+
+            // 3. Total download (descending - higher totals first)
+            match b.total_download.cmp(&a.total_download) {
+                Ordering::Equal => {}
+                other => return other,
+            }
+
+            // 4. Upload rate (descending - higher rates first)
+            match b.upload_rate.cmp(&a.upload_rate) {
+                Ordering::Equal => {}
+                other => return other,
+            }
+
+            // 5. Total upload (descending - higher totals first)
+            match b.total_upload.cmp(&a.total_upload) {
+                Ordering::Equal => {}
+                other => return other,
+            }
+
+            // 6. Throttle status (throttled processes first for visibility)
+            match (a.is_throttled(), b.is_throttled()) {
+                (true, false) => return Ordering::Less, // a throttled, b not -> a goes first
+                (false, true) => return Ordering::Greater, // a not throttled, b is -> b goes first
+                _ => {}                                 // Both same throttle state, continue
+            }
+
+            // 7. Process name (alphabetical)
+            match a.name.cmp(&b.name) {
+                Ordering::Equal => {}
+                other => return other,
+            }
+
+            // 8. PID (ascending - smaller PIDs first for determinism)
+            a.pid.cmp(&b.pid)
         });
 
         self.process_list = processes;
