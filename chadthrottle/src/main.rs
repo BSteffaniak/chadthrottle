@@ -45,9 +45,9 @@ struct Args {
     #[arg(long)]
     list_backends: bool,
 
-    /// Auto-restore saved throttles on startup
+    /// Don't restore saved throttles on startup (default: restore is enabled)
     #[arg(long)]
-    restore: bool,
+    no_restore: bool,
 
     /// Don't save throttles on exit
     #[arg(long)]
@@ -168,7 +168,7 @@ async fn main() -> Result<()> {
 
     // Load and optionally restore saved config
     let mut config = config::Config::load().unwrap_or_default();
-    if args.restore {
+    if !args.no_restore {
         log::info!("Restoring saved throttles...");
         for (pid, saved_throttle) in config.get_throttles() {
             let limit = ThrottleLimit {
@@ -187,6 +187,8 @@ async fn main() -> Result<()> {
                 );
             }
         }
+    } else {
+        log::info!("Skipping throttle restoration (--no-restore flag)");
     }
 
     // Run the app
@@ -321,6 +323,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                                             );
                                         }
                                         Err(e) => {
+                                            log::warn!("Failed to apply throttle: {e}");
                                             app.status_message =
                                                 format!("Failed to apply throttle: {}", e);
                                         }
