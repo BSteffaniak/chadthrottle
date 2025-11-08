@@ -416,7 +416,7 @@ async fn main() -> Result<()> {
         &mut app,
         &mut monitor,
         &mut throttle_manager,
-        &config,
+        &mut config,
     )
     .await;
 
@@ -464,7 +464,7 @@ async fn run_app<B: ratatui::backend::Backend>(
     app: &mut AppState,
     monitor: &mut NetworkMonitor,
     throttle_manager: &mut ThrottleManager,
-    config: &config::Config,
+    config: &mut config::Config,
 ) -> Result<()> {
     let mut update_interval = interval(Duration::from_secs(1));
     let mut bandwidth_log_counter = 0u32; // Log bandwidth every N updates
@@ -493,9 +493,80 @@ async fn run_app<B: ratatui::backend::Backend>(
                     continue;
                 }
 
-                // If backend info is shown, b/Esc/q closes it
+                // If backend selector is shown, handle navigation
+                if app.show_backend_selector {
+                    match key.code {
+                        KeyCode::Esc => {
+                            app.show_backend_selector = false;
+                        }
+                        KeyCode::Tab => {
+                            app.backend_selector.toggle_mode();
+                            // Repopulate with backends for new mode
+                            let backend_info = throttle_manager.get_backend_info(
+                                config.preferred_upload_backend.clone(),
+                                config.preferred_download_backend.clone(),
+                            );
+                            app.backend_selector.populate(&backend_info);
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            app.backend_selector.select_previous();
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            app.backend_selector.select_next();
+                        }
+                        KeyCode::Enter => {
+                            // Apply backend selection
+                            if let Some(backend_name) = app.backend_selector.get_selected() {
+                                let result = match app.backend_selector.mode {
+                                    ui::BackendSelectorMode::Upload => throttle_manager
+                                        .set_default_upload_backend(&backend_name)
+                                        .and_then(|_| {
+                                            config.preferred_upload_backend =
+                                                Some(backend_name.clone());
+                                            config.save()
+                                        }),
+                                    ui::BackendSelectorMode::Download => throttle_manager
+                                        .set_default_download_backend(&backend_name)
+                                        .and_then(|_| {
+                                            config.preferred_download_backend =
+                                                Some(backend_name.clone());
+                                            config.save()
+                                        }),
+                                };
+
+                                match result {
+                                    Ok(_) => {
+                                        app.status_message = format!(
+                                            "✅ New throttles will use '{}' backend",
+                                            backend_name
+                                        );
+                                    }
+                                    Err(e) => {
+                                        app.status_message =
+                                            format!("Failed to set backend: {}", e);
+                                    }
+                                }
+                            }
+                            app.show_backend_selector = false;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                // If backend info is shown, Enter switches to selector, Esc/q closes it
                 if app.show_backend_info {
                     match key.code {
+                        KeyCode::Enter => {
+                            // Switch to backend selector
+                            app.show_backend_info = false;
+                            app.show_backend_selector = true;
+                            let backend_info = throttle_manager.get_backend_info(
+                                config.preferred_upload_backend.clone(),
+                                config.preferred_download_backend.clone(),
+                            );
+                            app.backend_selector.populate(&backend_info);
+                        }
                         KeyCode::Char('b') | KeyCode::Char('q') | KeyCode::Esc => {
                             app.show_backend_info = false;
                         }

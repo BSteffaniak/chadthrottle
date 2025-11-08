@@ -1,44 +1,166 @@
 // ThrottleManager coordinates upload and download throttling backends
 
 use super::{
-    BackendInfo, DownloadThrottleBackend, UploadThrottleBackend, detect_download_backends,
-    detect_upload_backends,
+    BackendInfo, DownloadThrottleBackend, UploadThrottleBackend, create_download_backend,
+    create_upload_backend, detect_download_backends, detect_upload_backends,
 };
 use crate::backends::ActiveThrottle;
 use crate::process::ThrottleLimit;
 use anyhow::Result;
 use std::collections::HashMap;
 
-/// Manages throttling by coordinating separate upload and download backends
+/// Manages throttling by coordinating multiple concurrent backends
+///
+/// Each throttle "remembers" which backend it was created with, allowing
+/// multiple backends to coexist. New backend selection only affects future
+/// throttles, not existing ones.
 pub struct ThrottleManager {
-    upload_backend: Option<Box<dyn UploadThrottleBackend>>,
-    download_backend: Option<Box<dyn DownloadThrottleBackend>>,
+    // Pool of initialized backends (lazy-loaded on first use)
+    upload_backends: HashMap<String, Box<dyn UploadThrottleBackend>>,
+    download_backends: HashMap<String, Box<dyn DownloadThrottleBackend>>,
+
+    // Track which backend each PID uses
+    upload_backend_map: HashMap<i32, String>, // pid -> backend_name
+    download_backend_map: HashMap<i32, String>, // pid -> backend_name
+
+    // Track process names for each PID
+    process_names: HashMap<i32, String>,
+
+    // Default backend for NEW throttles
+    default_upload: Option<String>,
+    default_download: Option<String>,
 }
 
 impl ThrottleManager {
-    /// Create a new ThrottleManager with the given backends
+    /// Create a new ThrottleManager with initial default backends
     pub fn new(
         upload_backend: Option<Box<dyn UploadThrottleBackend>>,
         download_backend: Option<Box<dyn DownloadThrottleBackend>>,
     ) -> Self {
+        let mut upload_backends = HashMap::new();
+        let mut download_backends = HashMap::new();
+
+        let default_upload = if let Some(backend) = upload_backend {
+            let name = backend.name().to_string();
+            upload_backends.insert(name.clone(), backend);
+            Some(name)
+        } else {
+            None
+        };
+
+        let default_download = if let Some(backend) = download_backend {
+            let name = backend.name().to_string();
+            download_backends.insert(name.clone(), backend);
+            Some(name)
+        } else {
+            None
+        };
+
         Self {
-            upload_backend,
-            download_backend,
+            upload_backends,
+            download_backends,
+            upload_backend_map: HashMap::new(),
+            download_backend_map: HashMap::new(),
+            process_names: HashMap::new(),
+            default_upload,
+            default_download,
         }
     }
 
-    /// Get names of active backends
+    /// Get names of default backends for new throttles
     pub fn backend_names(&self) -> (Option<String>, Option<String>) {
-        (
-            self.upload_backend.as_ref().map(|b| b.name().to_string()),
-            self.download_backend.as_ref().map(|b| b.name().to_string()),
-        )
+        (self.default_upload.clone(), self.default_download.clone())
+    }
+
+    /// Set default upload backend for new throttles
+    pub fn set_default_upload_backend(&mut self, name: &str) -> Result<()> {
+        // Validate backend is available
+        let available = detect_upload_backends();
+        if !available.iter().any(|b| b.name == name && b.available) {
+            return Err(anyhow::anyhow!("Backend '{}' is not available", name));
+        }
+
+        self.default_upload = Some(name.to_string());
+        log::info!("Default upload backend set to: {}", name);
+        Ok(())
+    }
+
+    /// Set default download backend for new throttles
+    pub fn set_default_download_backend(&mut self, name: &str) -> Result<()> {
+        // Validate backend is available
+        let available = detect_download_backends();
+        if !available.iter().any(|b| b.name == name && b.available) {
+            return Err(anyhow::anyhow!("Backend '{}' is not available", name));
+        }
+
+        self.default_download = Some(name.to_string());
+        log::info!("Default download backend set to: {}", name);
+        Ok(())
+    }
+
+    /// Get or create upload backend (lazy initialization)
+    fn get_or_create_upload_backend(
+        &mut self,
+        name: &str,
+    ) -> Result<&mut Box<dyn UploadThrottleBackend>> {
+        if !self.upload_backends.contains_key(name) {
+            log::info!("Initializing upload backend: {}", name);
+            let mut backend = create_upload_backend(name)?;
+            backend.init()?;
+            self.upload_backends.insert(name.to_string(), backend);
+        }
+        Ok(self.upload_backends.get_mut(name).unwrap())
+    }
+
+    /// Get or create download backend (lazy initialization)
+    fn get_or_create_download_backend(
+        &mut self,
+        name: &str,
+    ) -> Result<&mut Box<dyn DownloadThrottleBackend>> {
+        if !self.download_backends.contains_key(name) {
+            log::info!("Initializing download backend: {}", name);
+            let mut backend = create_download_backend(name)?;
+            backend.init()?;
+            self.download_backends.insert(name.to_string(), backend);
+        }
+        Ok(self.download_backends.get_mut(name).unwrap())
+    }
+
+    /// Get statistics about active backends and their throttle counts
+    pub fn get_active_backend_stats(&self) -> HashMap<String, usize> {
+        let mut stats = HashMap::new();
+        for backend_name in self.upload_backend_map.values() {
+            *stats.entry(backend_name.clone()).or_insert(0) += 1;
+        }
+        for backend_name in self.download_backend_map.values() {
+            *stats.entry(backend_name.clone()).or_insert(0) += 1;
+        }
+        stats
+    }
+
+    /// Get list of PIDs using a specific backend
+    pub fn get_pids_for_backend(&self, backend_name: &str) -> Vec<i32> {
+        let mut pids = Vec::new();
+        for (pid, name) in &self.upload_backend_map {
+            if name == backend_name {
+                pids.push(*pid);
+            }
+        }
+        for (pid, name) in &self.download_backend_map {
+            if name == backend_name && !pids.contains(pid) {
+                pids.push(*pid);
+            }
+        }
+        pids
     }
 
     /// Log eBPF throttle stats for a PID (if using eBPF backend)
     pub fn log_ebpf_stats(&mut self, pid: i32) -> Result<()> {
-        if let Some(backend) = self.download_backend.as_mut() {
-            backend.log_diagnostics(pid)?;
+        // Check if this PID is using an eBPF backend for download
+        if let Some(backend_name) = self.download_backend_map.get(&pid) {
+            if let Some(backend) = self.download_backends.get_mut(backend_name) {
+                backend.log_diagnostics(pid)?;
+            }
         }
         Ok(())
     }
@@ -49,9 +171,22 @@ impl ThrottleManager {
         preferred_upload: Option<String>,
         preferred_download: Option<String>,
     ) -> BackendInfo {
+        // Get capabilities from default backends if available
+        let upload_capabilities = self
+            .default_upload
+            .as_ref()
+            .and_then(|name| self.upload_backends.get(name))
+            .map(|b| b.capabilities());
+
+        let download_capabilities = self
+            .default_download
+            .as_ref()
+            .and_then(|name| self.download_backends.get(name))
+            .map(|b| b.capabilities());
+
         BackendInfo {
-            active_upload: self.upload_backend.as_ref().map(|b| b.name().to_string()),
-            active_download: self.download_backend.as_ref().map(|b| b.name().to_string()),
+            active_upload: self.default_upload.clone(),
+            active_download: self.default_download.clone(),
             available_upload: detect_upload_backends()
                 .into_iter()
                 .map(|b| (b.name.to_string(), b.priority, b.available))
@@ -62,12 +197,13 @@ impl ThrottleManager {
                 .collect(),
             preferred_upload,
             preferred_download,
-            upload_capabilities: self.upload_backend.as_ref().map(|b| b.capabilities()),
-            download_capabilities: self.download_backend.as_ref().map(|b| b.capabilities()),
+            upload_capabilities,
+            download_capabilities,
+            backend_stats: self.get_active_backend_stats(),
         }
     }
 
-    /// Apply throttle to a process (upload and/or download)
+    /// Apply throttle to a process using current default backends
     pub fn throttle_process(
         &mut self,
         pid: i32,
@@ -76,28 +212,42 @@ impl ThrottleManager {
     ) -> Result<()> {
         let mut applied_any = false;
 
-        // Apply upload throttle if specified AND backend available
+        // Store process name for tracking
+        self.process_names.insert(pid, process_name.clone());
+
+        // Apply upload throttle if specified AND default backend set
         if let Some(upload_limit) = limit.upload_limit {
-            if let Some(ref mut backend) = self.upload_backend {
+            if let Some(backend_name) = &self.default_upload.clone() {
+                let backend = self.get_or_create_upload_backend(backend_name)?;
                 backend.throttle_upload(pid, process_name.clone(), upload_limit)?;
+                self.upload_backend_map.insert(pid, backend_name.clone());
                 applied_any = true;
-            } else {
-                log::error!("⚠️  Upload throttling requested but no backend available");
-                log::error!(
-                    "    Install 'tc' (traffic control) and enable cgroups to use upload throttling."
+                log::info!(
+                    "Applied upload throttle to PID {} using {} backend",
+                    pid,
+                    backend_name
                 );
+            } else {
+                log::error!("⚠️  Upload throttling requested but no default backend set");
+                log::error!("    Use the 'b' menu to select an upload backend.");
             }
         }
 
-        // Apply download throttle if specified AND backend available
+        // Apply download throttle if specified AND default backend set
         if let Some(download_limit) = limit.download_limit {
-            if let Some(ref mut backend) = self.download_backend {
-                backend.throttle_download(pid, process_name, download_limit)?;
+            if let Some(backend_name) = &self.default_download.clone() {
+                let backend = self.get_or_create_download_backend(backend_name)?;
+                backend.throttle_download(pid, process_name.clone(), download_limit)?;
+                self.download_backend_map.insert(pid, backend_name.clone());
                 applied_any = true;
+                log::info!(
+                    "Applied download throttle to PID {} using {} backend",
+                    pid,
+                    backend_name
+                );
             } else {
-                log::error!("⚠️  Download throttling requested but no backend available");
-                log::error!("    Enable the 'ifb' kernel module to use download throttling.");
-                log::error!("    See IFB_SETUP.md for instructions.");
+                log::error!("⚠️  Download throttling requested but no default backend set");
+                log::error!("    Use the 'b' menu to select a download backend.");
             }
         }
 
@@ -109,15 +259,60 @@ impl ThrottleManager {
     }
 
     /// Remove all throttles from a process
+    /// Routes to the correct backend that created the throttle
     pub fn remove_throttle(&mut self, pid: i32) -> Result<()> {
-        // Remove upload throttle if backend available
-        if let Some(ref mut backend) = self.upload_backend {
-            backend.remove_upload_throttle(pid)?;
+        let mut errors = Vec::new();
+
+        // Remove upload throttle if it exists
+        if let Some(backend_name) = self.upload_backend_map.remove(&pid) {
+            if let Some(backend) = self.upload_backends.get_mut(&backend_name) {
+                if let Err(e) = backend.remove_upload_throttle(pid) {
+                    log::warn!(
+                        "Failed to remove upload throttle for PID {} from {} backend: {}",
+                        pid,
+                        backend_name,
+                        e
+                    );
+                    errors.push(e);
+                } else {
+                    log::info!(
+                        "Removed upload throttle for PID {} from {} backend",
+                        pid,
+                        backend_name
+                    );
+                }
+            }
         }
 
-        // Remove download throttle if backend available
-        if let Some(ref mut backend) = self.download_backend {
-            backend.remove_download_throttle(pid)?;
+        // Remove download throttle if it exists
+        if let Some(backend_name) = self.download_backend_map.remove(&pid) {
+            if let Some(backend) = self.download_backends.get_mut(&backend_name) {
+                if let Err(e) = backend.remove_download_throttle(pid) {
+                    log::warn!(
+                        "Failed to remove download throttle for PID {} from {} backend: {}",
+                        pid,
+                        backend_name,
+                        e
+                    );
+                    errors.push(e);
+                } else {
+                    log::info!(
+                        "Removed download throttle for PID {} from {} backend",
+                        pid,
+                        backend_name
+                    );
+                }
+            }
+        }
+
+        // Clean up process name
+        self.process_names.remove(&pid);
+
+        if !errors.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Failed to remove some throttles: {:?}",
+                errors
+            ));
         }
 
         Ok(())
@@ -126,18 +321,21 @@ impl ThrottleManager {
     /// Get throttle information for a process
     pub fn get_throttle(&self, pid: i32) -> Option<ActiveThrottle> {
         let upload_limit = self
-            .upload_backend
-            .as_ref()
+            .upload_backend_map
+            .get(&pid)
+            .and_then(|backend_name| self.upload_backends.get(backend_name))
             .and_then(|b| b.get_upload_throttle(pid));
+
         let download_limit = self
-            .download_backend
-            .as_ref()
+            .download_backend_map
+            .get(&pid)
+            .and_then(|backend_name| self.download_backends.get(backend_name))
             .and_then(|b| b.get_download_throttle(pid));
 
         if upload_limit.is_some() || download_limit.is_some() {
             Some(ActiveThrottle {
                 pid,
-                process_name: String::new(), // Would need to track this separately
+                process_name: self.process_names.get(&pid).cloned().unwrap_or_default(),
                 upload_limit,
                 download_limit,
             })
@@ -148,19 +346,20 @@ impl ThrottleManager {
 
     /// Check if download throttling is available
     pub fn is_download_throttling_available(&self) -> bool {
-        self.download_backend.is_some()
+        self.default_download.is_some()
     }
 
-    /// Get all active throttles (merged from upload and download backends)
+    /// Get all active throttles (merged from all backends)
     pub fn get_all_throttles(&self) -> HashMap<i32, ActiveThrottle> {
         let mut throttles: HashMap<i32, ActiveThrottle> = HashMap::new();
 
-        // Collect upload throttles
-        if let Some(ref backend) = self.upload_backend {
+        // Collect upload throttles from all backends
+        for (backend_name, backend) in &self.upload_backends {
             for (pid, upload_limit) in backend.get_all_throttles() {
+                let process_name = self.process_names.get(&pid).cloned().unwrap_or_default();
                 throttles.entry(pid).or_insert_with(|| ActiveThrottle {
                     pid,
-                    process_name: String::new(),
+                    process_name,
                     upload_limit: Some(upload_limit),
                     download_limit: None,
                 });
@@ -170,12 +369,13 @@ impl ThrottleManager {
             }
         }
 
-        // Collect download throttles
-        if let Some(ref backend) = self.download_backend {
+        // Collect download throttles from all backends
+        for (backend_name, backend) in &self.download_backends {
             for (pid, download_limit) in backend.get_all_throttles() {
+                let process_name = self.process_names.get(&pid).cloned().unwrap_or_default();
                 throttles.entry(pid).or_insert_with(|| ActiveThrottle {
                     pid,
-                    process_name: String::new(),
+                    process_name,
                     upload_limit: None,
                     download_limit: Some(download_limit),
                 });
@@ -188,14 +388,31 @@ impl ThrottleManager {
         throttles
     }
 
-    /// Cleanup all throttles
+    /// Cleanup all throttles from all backends
     pub fn cleanup(&mut self) -> Result<()> {
-        if let Some(ref mut backend) = self.upload_backend {
-            backend.cleanup()?;
+        let mut errors = Vec::new();
+
+        // Cleanup all upload backends
+        for (name, backend) in &mut self.upload_backends {
+            if let Err(e) = backend.cleanup() {
+                log::error!("Failed to cleanup upload backend {}: {}", name, e);
+                errors.push(e);
+            }
         }
 
-        if let Some(ref mut backend) = self.download_backend {
-            backend.cleanup()?;
+        // Cleanup all download backends
+        for (name, backend) in &mut self.download_backends {
+            if let Err(e) = backend.cleanup() {
+                log::error!("Failed to cleanup download backend {}: {}", name, e);
+                errors.push(e);
+            }
+        }
+
+        if !errors.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Failed to cleanup some backends: {:?}",
+                errors
+            ));
         }
 
         Ok(())

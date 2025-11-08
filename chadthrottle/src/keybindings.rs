@@ -63,7 +63,7 @@ pub fn get_all_keybindings() -> Vec<KeyBinding> {
         // System
         KeyBinding {
             key: "b",
-            description: "Show backend information",
+            description: "View/switch backends",
             category: KeyCategory::System,
         },
         KeyBinding {

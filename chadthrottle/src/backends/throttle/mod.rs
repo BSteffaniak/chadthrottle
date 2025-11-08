@@ -155,6 +155,7 @@ pub struct BackendInfo {
     pub preferred_download: Option<String>,
     pub upload_capabilities: Option<BackendCapabilities>,
     pub download_capabilities: Option<BackendCapabilities>,
+    pub backend_stats: HashMap<String, usize>, // backend_name -> active throttle count
 }
 
 /// Detect all available upload backends
@@ -311,7 +312,7 @@ pub fn select_download_backend(
 }
 
 /// Create an upload backend by name
-fn create_upload_backend(name: &str) -> Result<Box<dyn UploadThrottleBackend>> {
+pub fn create_upload_backend(name: &str) -> Result<Box<dyn UploadThrottleBackend>> {
     log::debug!("Creating upload backend {name}");
     match name {
         #[cfg(feature = "throttle-ebpf")]
@@ -328,7 +329,7 @@ fn create_upload_backend(name: &str) -> Result<Box<dyn UploadThrottleBackend>> {
 }
 
 /// Create a download backend by name
-fn create_download_backend(name: &str) -> Result<Box<dyn DownloadThrottleBackend>> {
+pub fn create_download_backend(name: &str) -> Result<Box<dyn DownloadThrottleBackend>> {
     match name {
         #[cfg(feature = "throttle-ebpf")]
         "ebpf" => Ok(Box::new(download::linux::ebpf::EbpfDownload::new()?)),
