@@ -703,12 +703,20 @@ async fn run_app<B: ratatui::backend::Backend>(
 
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => {
-                        // Special handling for interface detail view
-                        if app.view_mode == ui::ViewMode::InterfaceDetail {
-                            app.exit_interface_detail();
-                            app.status_message = "Back to interface list".to_string();
-                        } else {
-                            return Ok(());
+                        // Special handling for interface views
+                        match app.view_mode {
+                            ui::ViewMode::InterfaceDetail => {
+                                app.exit_interface_detail();
+                                app.status_message = "Back to interface list".to_string();
+                            }
+                            ui::ViewMode::InterfaceList => {
+                                app.view_mode = ui::ViewMode::ProcessView;
+                                app.status_message =
+                                    "Closed interface modal - filter still active".to_string();
+                            }
+                            ui::ViewMode::ProcessView => {
+                                return Ok(());
+                            }
                         }
                     }
                     KeyCode::Char('h') | KeyCode::Char('?') => {

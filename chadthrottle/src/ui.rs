@@ -17,6 +17,7 @@ use std::collections::HashMap;
 
 pub struct AppState {
     pub process_list: Vec<ProcessInfo>,
+    pub unfiltered_process_list: Vec<ProcessInfo>, // Full list before interface filtering
     pub selected_index: Option<usize>,
     pub list_state: ListState,
     pub show_help: bool,
@@ -227,6 +228,7 @@ impl AppState {
 
         Self {
             process_list: Vec::new(),
+            unfiltered_process_list: Vec::new(),
             selected_index: None, // Nothing selected initially
             list_state,
             history: HistoryTracker::new(),
@@ -401,9 +403,7 @@ impl AppState {
     pub fn update_processes(&mut self, process_map: ProcessMap) {
         let mut processes: Vec<ProcessInfo> = process_map.into_values().collect();
 
-        // Apply interface filter BEFORE sorting
-        processes = self.apply_process_filter(processes);
-
+        // Sort first (applies to both filtered and unfiltered lists)
         if self.sort_frozen {
             // FREEZE MODE: Sort by frozen position, new processes go to bottom
             let next_position = self.frozen_order.values().max().copied().unwrap_or(0) + 1;
@@ -485,6 +485,12 @@ impl AppState {
                 a.pid.cmp(&b.pid)
             });
         }
+
+        // Store sorted unfiltered list (for InterfaceDetail view)
+        self.unfiltered_process_list = processes.clone();
+
+        // Apply interface filter for ProcessView/InterfaceList views
+        processes = self.apply_process_filter(processes);
 
         self.process_list = processes;
 
@@ -599,7 +605,10 @@ pub fn draw_ui_with_backend_info(
             draw_process_list(f, chunks[1], app);
         }
         ViewMode::InterfaceList => {
-            draw_interface_list(f, chunks[1], app);
+            // Draw process list in background so we can see live updates
+            draw_process_list(f, chunks[1], app);
+            // Draw interface modal overlay on top
+            draw_interface_modal(f, f.area(), app);
         }
         ViewMode::InterfaceDetail => {
             draw_interface_detail(f, chunks[1], app);
@@ -1549,15 +1558,6 @@ fn draw_interface_list(f: &mut Frame, area: Rect, app: &mut AppState) {
                 "  "
             };
 
-            // Filter checkbox
-            let is_filtered = app.is_interface_filtered(&iface.name);
-            let checkbox = if is_filtered { "[✓]" } else { "[ ]" };
-            let checkbox_style = if is_filtered {
-                Style::default().fg(Color::Green)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-
             // Status indicator: up (✓), down (✗), loopback (⟲)
             let status_indicator = if iface.is_loopback {
                 "⟲"
@@ -1607,8 +1607,6 @@ fn draw_interface_list(f: &mut Frame, area: Rect, app: &mut AppState) {
 
             let content = Line::from(vec![
                 Span::styled(selection_indicator, Style::default().fg(Color::Yellow)),
-                Span::styled(checkbox, checkbox_style),
-                Span::raw(" "),
                 Span::styled(
                     status_indicator,
                     Style::default()
@@ -1688,9 +1686,9 @@ fn draw_interface_list(f: &mut Frame, area: Rect, app: &mut AppState) {
     };
 
     // Render border and title
-    let border = Block::default().borders(Borders::ALL).title(
-        "Network Interfaces [Space: Filter | Enter: Details | A: All | N: None | i: Process view]",
-    );
+    let border = Block::default()
+        .borders(Borders::ALL)
+        .title("Network Interfaces");
     f.render_widget(border, area);
 
     // Render header
@@ -1727,8 +1725,9 @@ fn draw_interface_detail(f: &mut Frame, area: Rect, app: &mut AppState) {
     };
 
     // Filter processes to only show those using this interface
+    // Use unfiltered_process_list to show ALL processes for this interface
     let filtered_processes: Vec<&ProcessInfo> = app
-        .process_list
+        .unfiltered_process_list
         .iter()
         .filter(|p| p.interface_stats.contains_key(&interface_name))
         .collect();
@@ -1879,4 +1878,113 @@ fn draw_interface_detail(f: &mut Frame, area: Rect, app: &mut AppState) {
     };
 
     f.render_widget(list, inner_list_area);
+}
+
+fn draw_interface_modal(f: &mut Frame, area: Rect, app: &AppState) {
+    let mut text = vec![Line::from("")];
+
+    // Title
+    text.push(Line::from(Span::styled(
+        "Network Interfaces - Filter Selection",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+    text.push(Line::from(""));
+
+    // Show current filter state
+    let filter_state = match &app.active_interface_filters {
+        None => "Current: All interfaces (no filter)",
+        Some(filters) if filters.is_empty() => "Current: No interfaces (empty filter)",
+        Some(filters) => {
+            if filters.len() <= 3 {
+                &format!("Current: {}", filters.join(", "))
+            } else {
+                "Current: Multiple interfaces"
+            }
+        }
+    };
+    text.push(Line::from(Span::styled(
+        filter_state,
+        Style::default().fg(Color::Yellow),
+    )));
+    text.push(Line::from(""));
+
+    text.push(Line::from("Select interfaces to show (updates live):"));
+    text.push(Line::from(""));
+
+    // List interfaces with checkboxes
+    for (index, iface) in app.interface_list.iter().enumerate() {
+        let is_cursor = Some(index) == app.selected_interface_index;
+        let is_filtered = app.is_interface_filtered(&iface.name);
+
+        let checkbox = if is_filtered { "[✓]" } else { "[ ]" };
+        let cursor = if is_cursor { "▶ " } else { "  " };
+
+        let checkbox_style = if is_filtered {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        let name_style = if is_cursor {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+                .bg(Color::DarkGray)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        // Calculate total count from unfiltered list (all processes using this interface)
+        let total_count = app
+            .unfiltered_process_list
+            .iter()
+            .filter(|p| p.interface_stats.contains_key(&iface.name))
+            .count();
+
+        // Calculate filtered count (how many are currently visible in the filtered view)
+        let filtered_count = app
+            .process_list
+            .iter()
+            .filter(|p| p.interface_stats.contains_key(&iface.name))
+            .count();
+
+        text.push(Line::from(vec![
+            Span::raw(cursor),
+            Span::styled(checkbox, checkbox_style),
+            Span::raw(" "),
+            Span::styled(format!("{:12}", iface.name), name_style),
+            Span::styled(
+                format!(" ({}/{} processes)", filtered_count, total_count),
+                Style::default().fg(Color::Gray),
+            ),
+        ]));
+    }
+
+    text.push(Line::from(""));
+    text.push(Line::from(""));
+
+    // Instructions
+    text.push(Line::from(Span::styled(
+        "[↑↓] Navigate  [Space] Toggle (applies live)  [A] All  [N] None",
+        Style::default().fg(Color::DarkGray),
+    )));
+    text.push(Line::from(Span::styled(
+        "[Enter] View details  [Esc/i] Close and return to process view",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let widget = Paragraph::new(text)
+        .style(Style::default().bg(Color::Black).fg(Color::White))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Interface Filter (Live)")
+                .style(Style::default().fg(Color::Cyan)),
+        );
+
+    let popup_area = centered_rect(70, 70, area);
+    f.render_widget(Clear, popup_area);
+    f.render_widget(widget, popup_area);
 }
