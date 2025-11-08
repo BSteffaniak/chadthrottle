@@ -1,14 +1,44 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
+
+/// Traffic type for throttling - determines which traffic to throttle
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrafficType {
+    All,      // Throttle all traffic (default/current behavior)
+    Internet, // Throttle only internet traffic
+    Local,    // Throttle only local traffic
+}
+
+impl Default for TrafficType {
+    fn default() -> Self {
+        TrafficType::All
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ProcessInfo {
     pub pid: i32,
     pub name: String,
+
+    // Aggregate rates (existing)
     pub download_rate: u64,  // bytes per second
     pub upload_rate: u64,    // bytes per second
     pub total_download: u64, // total bytes
     pub total_upload: u64,   // total bytes
+
+    // NEW: Internet traffic
+    pub internet_download_rate: u64,
+    pub internet_upload_rate: u64,
+    pub internet_total_download: u64,
+    pub internet_total_upload: u64,
+
+    // NEW: Local traffic
+    pub local_download_rate: u64,
+    pub local_upload_rate: u64,
+    pub local_total_download: u64,
+    pub local_total_upload: u64,
+
     pub throttle_limit: Option<ThrottleLimit>,
     pub is_terminated: bool, // whether the process has terminated
     pub interface_stats: HashMap<String, InterfaceStats>, // per-interface statistics
@@ -16,10 +46,17 @@ pub struct ProcessInfo {
 
 #[derive(Debug, Clone)]
 pub struct InterfaceStats {
+    // Aggregate rates (existing)
     pub download_rate: u64,
     pub upload_rate: u64,
     pub total_download: u64,
     pub total_upload: u64,
+
+    // NEW: Categorized rates
+    pub internet_download_rate: u64,
+    pub internet_upload_rate: u64,
+    pub local_download_rate: u64,
+    pub local_upload_rate: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +75,7 @@ pub struct InterfaceInfo {
 pub struct ThrottleLimit {
     pub download_limit: Option<u64>, // bytes per second
     pub upload_limit: Option<u64>,   // bytes per second
+    pub traffic_type: TrafficType,   // NEW: which traffic to throttle
 }
 
 impl ProcessInfo {
@@ -49,6 +87,14 @@ impl ProcessInfo {
             upload_rate: 0,
             total_download: 0,
             total_upload: 0,
+            internet_download_rate: 0,
+            internet_upload_rate: 0,
+            internet_total_download: 0,
+            internet_total_upload: 0,
+            local_download_rate: 0,
+            local_upload_rate: 0,
+            local_total_download: 0,
+            local_total_upload: 0,
             throttle_limit: None,
             is_terminated: false,
             interface_stats: HashMap::new(),

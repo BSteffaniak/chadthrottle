@@ -73,6 +73,15 @@ struct ProcessBandwidth {
     tx_bytes: u64,
     last_rx_bytes: u64,
     last_tx_bytes: u64,
+    // NEW: Traffic categorization
+    internet_rx_bytes: u64,
+    internet_tx_bytes: u64,
+    local_rx_bytes: u64,
+    local_tx_bytes: u64,
+    last_internet_rx_bytes: u64,
+    last_internet_tx_bytes: u64,
+    last_local_rx_bytes: u64,
+    last_local_tx_bytes: u64,
 }
 
 struct InterfaceBandwidth {
@@ -88,6 +97,15 @@ struct ProcessInterfaceBandwidth {
     tx_bytes: u64,
     last_rx_bytes: u64,
     last_tx_bytes: u64,
+    // NEW: Traffic categorization
+    internet_rx_bytes: u64,
+    internet_tx_bytes: u64,
+    local_rx_bytes: u64,
+    local_tx_bytes: u64,
+    last_internet_rx_bytes: u64,
+    last_internet_tx_bytes: u64,
+    last_local_rx_bytes: u64,
+    last_local_tx_bytes: u64,
 }
 
 impl NetworkMonitor {
@@ -219,6 +237,41 @@ impl NetworkMonitor {
                 0
             };
 
+            // NEW: Calculate categorized rates
+            let internet_rx_diff = bandwidth
+                .internet_rx_bytes
+                .saturating_sub(bandwidth.last_internet_rx_bytes);
+            let internet_tx_diff = bandwidth
+                .internet_tx_bytes
+                .saturating_sub(bandwidth.last_internet_tx_bytes);
+            let local_rx_diff = bandwidth
+                .local_rx_bytes
+                .saturating_sub(bandwidth.last_local_rx_bytes);
+            let local_tx_diff = bandwidth
+                .local_tx_bytes
+                .saturating_sub(bandwidth.last_local_tx_bytes);
+
+            let internet_download_rate = if elapsed > 0.0 {
+                (internet_rx_diff as f64 / elapsed) as u64
+            } else {
+                0
+            };
+            let internet_upload_rate = if elapsed > 0.0 {
+                (internet_tx_diff as f64 / elapsed) as u64
+            } else {
+                0
+            };
+            let local_download_rate = if elapsed > 0.0 {
+                (local_rx_diff as f64 / elapsed) as u64
+            } else {
+                0
+            };
+            let local_upload_rate = if elapsed > 0.0 {
+                (local_tx_diff as f64 / elapsed) as u64
+            } else {
+                0
+            };
+
             let process_exists = self.process_utils.process_exists(pid);
             let term_time = tracker.terminated_processes.get(&pid).copied();
 
@@ -229,6 +282,14 @@ impl NetworkMonitor {
                 bandwidth.tx_bytes,
                 download_rate,
                 upload_rate,
+                bandwidth.internet_rx_bytes,
+                bandwidth.internet_tx_bytes,
+                internet_download_rate,
+                internet_upload_rate,
+                bandwidth.local_rx_bytes,
+                bandwidth.local_tx_bytes,
+                local_download_rate,
+                local_upload_rate,
                 process_exists,
                 term_time,
             ));
@@ -238,6 +299,11 @@ impl NetworkMonitor {
         for (&pid, bandwidth) in &mut tracker.process_bandwidth {
             bandwidth.last_rx_bytes = bandwidth.rx_bytes;
             bandwidth.last_tx_bytes = bandwidth.tx_bytes;
+            // NEW: Update categorized last values
+            bandwidth.last_internet_rx_bytes = bandwidth.internet_rx_bytes;
+            bandwidth.last_internet_tx_bytes = bandwidth.internet_tx_bytes;
+            bandwidth.last_local_rx_bytes = bandwidth.local_rx_bytes;
+            bandwidth.last_local_tx_bytes = bandwidth.local_tx_bytes;
         }
 
         // Track PIDs to remove and newly terminated
@@ -252,6 +318,14 @@ impl NetworkMonitor {
             tx_bytes,
             download_rate,
             upload_rate,
+            internet_rx_bytes,
+            internet_tx_bytes,
+            internet_download_rate,
+            internet_upload_rate,
+            local_rx_bytes,
+            local_tx_bytes,
+            local_download_rate,
+            local_upload_rate,
             process_exists,
             term_time,
         ) in process_data
@@ -264,6 +338,16 @@ impl NetworkMonitor {
                 proc_info.total_download = rx_bytes;
                 proc_info.total_upload = tx_bytes;
                 proc_info.is_terminated = false;
+
+                // Populate categorized traffic fields
+                proc_info.internet_download_rate = internet_download_rate;
+                proc_info.internet_upload_rate = internet_upload_rate;
+                proc_info.internet_total_download = internet_rx_bytes;
+                proc_info.internet_total_upload = internet_tx_bytes;
+                proc_info.local_download_rate = local_download_rate;
+                proc_info.local_upload_rate = local_upload_rate;
+                proc_info.local_total_download = local_rx_bytes;
+                proc_info.local_total_upload = local_tx_bytes;
 
                 // Populate per-interface stats for this process
                 proc_info.interface_stats = tracker
@@ -286,6 +370,39 @@ impl NetworkMonitor {
                             0
                         };
 
+                        // NEW: Calculate categorized rates
+                        let internet_rx_diff = bw
+                            .internet_rx_bytes
+                            .saturating_sub(bw.last_internet_rx_bytes);
+                        let internet_tx_diff = bw
+                            .internet_tx_bytes
+                            .saturating_sub(bw.last_internet_tx_bytes);
+                        let local_rx_diff =
+                            bw.local_rx_bytes.saturating_sub(bw.last_local_rx_bytes);
+                        let local_tx_diff =
+                            bw.local_tx_bytes.saturating_sub(bw.last_local_tx_bytes);
+
+                        let internet_download_rate = if elapsed > 0.0 {
+                            (internet_rx_diff as f64 / elapsed) as u64
+                        } else {
+                            0
+                        };
+                        let internet_upload_rate = if elapsed > 0.0 {
+                            (internet_tx_diff as f64 / elapsed) as u64
+                        } else {
+                            0
+                        };
+                        let local_download_rate = if elapsed > 0.0 {
+                            (local_rx_diff as f64 / elapsed) as u64
+                        } else {
+                            0
+                        };
+                        let local_upload_rate = if elapsed > 0.0 {
+                            (local_tx_diff as f64 / elapsed) as u64
+                        } else {
+                            0
+                        };
+
                         (
                             iface.clone(),
                             crate::process::InterfaceStats {
@@ -293,6 +410,10 @@ impl NetworkMonitor {
                                 upload_rate: iface_upload_rate,
                                 total_download: bw.rx_bytes,
                                 total_upload: bw.tx_bytes,
+                                internet_download_rate,
+                                internet_upload_rate,
+                                local_download_rate,
+                                local_upload_rate,
                             },
                         )
                     })
@@ -313,6 +434,16 @@ impl NetworkMonitor {
                         proc_info.total_upload = tx_bytes;
                         proc_info.is_terminated = true;
 
+                        // Populate categorized traffic totals (rates are 0 for terminated)
+                        proc_info.internet_download_rate = 0;
+                        proc_info.internet_upload_rate = 0;
+                        proc_info.internet_total_download = internet_rx_bytes;
+                        proc_info.internet_total_upload = internet_tx_bytes;
+                        proc_info.local_download_rate = 0;
+                        proc_info.local_upload_rate = 0;
+                        proc_info.local_total_download = local_rx_bytes;
+                        proc_info.local_total_upload = local_tx_bytes;
+
                         process_map.insert(pid, proc_info);
                     } else {
                         // Too old - mark for removal
@@ -328,6 +459,16 @@ impl NetworkMonitor {
                     proc_info.total_download = rx_bytes;
                     proc_info.total_upload = tx_bytes;
                     proc_info.is_terminated = true;
+
+                    // Populate categorized traffic totals (rates are 0 for terminated)
+                    proc_info.internet_download_rate = 0;
+                    proc_info.internet_upload_rate = 0;
+                    proc_info.internet_total_download = internet_rx_bytes;
+                    proc_info.internet_total_upload = internet_tx_bytes;
+                    proc_info.local_download_rate = 0;
+                    proc_info.local_upload_rate = 0;
+                    proc_info.local_total_download = local_rx_bytes;
+                    proc_info.local_total_upload = local_tx_bytes;
 
                     process_map.insert(pid, proc_info);
                 }
@@ -419,6 +560,10 @@ impl NetworkMonitor {
         for (_, bw) in &mut tracker.process_interface_bandwidth {
             bw.last_rx_bytes = bw.rx_bytes;
             bw.last_tx_bytes = bw.tx_bytes;
+            bw.last_internet_rx_bytes = bw.internet_rx_bytes;
+            bw.last_internet_tx_bytes = bw.internet_tx_bytes;
+            bw.last_local_rx_bytes = bw.local_rx_bytes;
+            bw.last_local_tx_bytes = bw.local_tx_bytes;
         }
 
         self.last_update = now;
@@ -540,6 +685,14 @@ impl NetworkMonitor {
                     tx_bytes: 0,
                     last_rx_bytes: 0,
                     last_tx_bytes: 0,
+                    internet_rx_bytes: 0,
+                    internet_tx_bytes: 0,
+                    local_rx_bytes: 0,
+                    local_tx_bytes: 0,
+                    last_internet_rx_bytes: 0,
+                    last_internet_tx_bytes: 0,
+                    last_local_rx_bytes: 0,
+                    last_local_tx_bytes: 0,
                 });
         }
 
@@ -797,6 +950,10 @@ impl NetworkMonitor {
                 .map(|(_, n)| n.clone())
                 .unwrap_or_else(|| format!("PID {}", pid));
 
+            // NEW: Categorize traffic based on remote IP
+            let remote_ip = if is_outbound { dst_addr } else { src_addr };
+            let traffic_category = crate::traffic_classifier::categorize_traffic(&remote_ip);
+
             // Track overall process bandwidth
             let bandwidth = tracker
                 .process_bandwidth
@@ -807,12 +964,38 @@ impl NetworkMonitor {
                     tx_bytes: 0,
                     last_rx_bytes: 0,
                     last_tx_bytes: 0,
+                    internet_rx_bytes: 0,
+                    internet_tx_bytes: 0,
+                    local_rx_bytes: 0,
+                    local_tx_bytes: 0,
+                    last_internet_rx_bytes: 0,
+                    last_internet_tx_bytes: 0,
+                    last_local_rx_bytes: 0,
+                    last_local_tx_bytes: 0,
                 });
 
             if is_outbound {
                 bandwidth.tx_bytes += packet_len as u64;
+                // NEW: Categorized upload
+                match traffic_category {
+                    crate::traffic_classifier::TrafficCategory::Internet => {
+                        bandwidth.internet_tx_bytes += packet_len as u64;
+                    }
+                    crate::traffic_classifier::TrafficCategory::Local => {
+                        bandwidth.local_tx_bytes += packet_len as u64;
+                    }
+                }
             } else {
                 bandwidth.rx_bytes += packet_len as u64;
+                // NEW: Categorized download
+                match traffic_category {
+                    crate::traffic_classifier::TrafficCategory::Internet => {
+                        bandwidth.internet_rx_bytes += packet_len as u64;
+                    }
+                    crate::traffic_classifier::TrafficCategory::Local => {
+                        bandwidth.local_rx_bytes += packet_len as u64;
+                    }
+                }
             }
 
             // Track per-process, per-interface bandwidth
@@ -824,12 +1007,38 @@ impl NetworkMonitor {
                     tx_bytes: 0,
                     last_rx_bytes: 0,
                     last_tx_bytes: 0,
+                    internet_rx_bytes: 0,
+                    internet_tx_bytes: 0,
+                    local_rx_bytes: 0,
+                    local_tx_bytes: 0,
+                    last_internet_rx_bytes: 0,
+                    last_internet_tx_bytes: 0,
+                    last_local_rx_bytes: 0,
+                    last_local_tx_bytes: 0,
                 });
 
             if is_outbound {
                 proc_iface_bandwidth.tx_bytes += packet_len as u64;
+                // NEW: Categorized upload
+                match traffic_category {
+                    crate::traffic_classifier::TrafficCategory::Internet => {
+                        proc_iface_bandwidth.internet_tx_bytes += packet_len as u64;
+                    }
+                    crate::traffic_classifier::TrafficCategory::Local => {
+                        proc_iface_bandwidth.local_tx_bytes += packet_len as u64;
+                    }
+                }
             } else {
                 proc_iface_bandwidth.rx_bytes += packet_len as u64;
+                // NEW: Categorized download
+                match traffic_category {
+                    crate::traffic_classifier::TrafficCategory::Internet => {
+                        proc_iface_bandwidth.internet_rx_bytes += packet_len as u64;
+                    }
+                    crate::traffic_classifier::TrafficCategory::Local => {
+                        proc_iface_bandwidth.local_rx_bytes += packet_len as u64;
+                    }
+                }
             }
 
             // Track interface-level bandwidth

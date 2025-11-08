@@ -4,6 +4,7 @@ mod history;
 mod keybindings;
 mod monitor;
 mod process;
+mod traffic_classifier;
 mod ui;
 
 use anyhow::Result;
@@ -315,6 +316,7 @@ async fn run_cli_mode(args: &Args) -> Result<()> {
     let limit = ThrottleLimit {
         upload_limit,
         download_limit,
+        traffic_type: crate::process::TrafficType::All, // Default to all traffic in CLI mode
     };
 
     throttle_manager.throttle_process(pid, process_name.clone(), &limit)?;
@@ -489,6 +491,7 @@ async fn main() -> Result<()> {
             let limit = ThrottleLimit {
                 upload_limit: saved_throttle.upload_limit,
                 download_limit: saved_throttle.download_limit,
+                traffic_type: crate::process::TrafficType::All, // Default for restored throttles
             };
             if let Err(e) =
                 throttle_manager.throttle_process(*pid, saved_throttle.process_name.clone(), &limit)
@@ -767,6 +770,9 @@ async fn run_app<B: ratatui::backend::Backend>(
                         KeyCode::Tab => {
                             app.throttle_dialog.toggle_field();
                         }
+                        KeyCode::Char('t') => {
+                            app.throttle_dialog.cycle_traffic_type();
+                        }
                         KeyCode::Char(c) if c.is_numeric() => {
                             app.throttle_dialog.handle_char(c);
                         }
@@ -782,6 +788,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                                     let limit = crate::process::ThrottleLimit {
                                         download_limit: download,
                                         upload_limit: upload,
+                                        traffic_type: app.throttle_dialog.get_traffic_type(), // Use selected traffic type
                                     };
 
                                     match throttle_manager.throttle_process(
@@ -874,6 +881,10 @@ async fn run_app<B: ratatui::backend::Backend>(
                             }
                         };
                     }
+                    KeyCode::Char('l') => {
+                        app.toggle_traffic_view_mode();
+                        // status_message is set by toggle_traffic_view_mode()
+                    }
                     KeyCode::Enter => {
                         if app.view_mode == ui::ViewMode::InterfaceList {
                             app.enter_interface_detail();
@@ -963,6 +974,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                             process_info.throttle_limit = Some(crate::process::ThrottleLimit {
                                 download_limit: throttle.download_limit,
                                 upload_limit: throttle.upload_limit,
+                                traffic_type: crate::process::TrafficType::All, // Backend throttles use All for now
                             });
 
                             // Log bandwidth vs throttle limit periodically

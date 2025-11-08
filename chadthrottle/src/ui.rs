@@ -39,6 +39,8 @@ pub struct AppState {
     pub selected_interface_name: Option<String>,
     // Interface filter state
     pub active_interface_filters: Option<Vec<String>>, // None = show all, Some([]) = show nothing, Some([...]) = filter
+    // Traffic categorization view state
+    pub traffic_view_mode: TrafficViewMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -46,6 +48,13 @@ pub enum ViewMode {
     ProcessView,     // Show all processes
     InterfaceList,   // Show list of interfaces
     InterfaceDetail, // Show processes on selected interface
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TrafficViewMode {
+    All,      // Show combined traffic
+    Internet, // Show only internet traffic
+    Local,    // Show only local network traffic
 }
 
 pub struct BackendSelector {
@@ -67,6 +76,7 @@ pub struct ThrottleDialog {
     pub selected_field: ThrottleField,
     pub target_pid: Option<i32>,
     pub target_name: Option<String>,
+    pub traffic_type_index: usize, // NEW: 0=All, 1=Internet, 2=Local
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -167,6 +177,7 @@ impl ThrottleDialog {
             selected_field: ThrottleField::Download,
             target_pid: None,
             target_name: None,
+            traffic_type_index: 0, // Default to "All"
         }
     }
 
@@ -176,6 +187,21 @@ impl ThrottleDialog {
         self.selected_field = ThrottleField::Download;
         self.target_pid = None;
         self.target_name = None;
+        self.traffic_type_index = 0; // Reset to "All"
+    }
+
+    pub fn cycle_traffic_type(&mut self) {
+        self.traffic_type_index = (self.traffic_type_index + 1) % 3;
+    }
+
+    pub fn get_traffic_type(&self) -> crate::process::TrafficType {
+        use crate::process::TrafficType;
+        match self.traffic_type_index {
+            0 => TrafficType::All,
+            1 => TrafficType::Internet,
+            2 => TrafficType::Local,
+            _ => TrafficType::All,
+        }
     }
 
     pub fn handle_char(&mut self, c: char) {
@@ -251,6 +277,7 @@ impl AppState {
             selected_interface_index: None,
             selected_interface_name: None,
             active_interface_filters: None, // Show all by default
+            traffic_view_mode: TrafficViewMode::All, // Show all traffic by default
         }
     }
 
@@ -287,6 +314,22 @@ impl AppState {
                 ViewMode::ProcessView
             }
         };
+    }
+
+    pub fn toggle_traffic_view_mode(&mut self) {
+        self.traffic_view_mode = match self.traffic_view_mode {
+            TrafficViewMode::All => TrafficViewMode::Internet,
+            TrafficViewMode::Internet => TrafficViewMode::Local,
+            TrafficViewMode::Local => TrafficViewMode::All,
+        };
+
+        // Update status message to inform user
+        let mode_str = match self.traffic_view_mode {
+            TrafficViewMode::All => "All Traffic",
+            TrafficViewMode::Internet => "Internet Traffic Only",
+            TrafficViewMode::Local => "Local Traffic Only",
+        };
+        self.status_message = format!("Traffic View: {}", mode_str);
     }
 
     pub fn select_next_interface(&mut self) {
@@ -690,6 +733,30 @@ fn draw_header(f: &mut Frame, area: Rect) {
 }
 
 fn draw_process_list(f: &mut Frame, area: Rect, app: &mut AppState) {
+    // Select which rates to display based on traffic view mode
+    let get_rates = |proc: &ProcessInfo| -> (u64, u64, u64, u64) {
+        match app.traffic_view_mode {
+            TrafficViewMode::All => (
+                proc.download_rate,
+                proc.upload_rate,
+                proc.total_download,
+                proc.total_upload,
+            ),
+            TrafficViewMode::Internet => (
+                proc.internet_download_rate,
+                proc.internet_upload_rate,
+                proc.internet_total_download,
+                proc.internet_total_upload,
+            ),
+            TrafficViewMode::Local => (
+                proc.local_download_rate,
+                proc.local_upload_rate,
+                proc.local_total_download,
+                proc.local_total_upload,
+            ),
+        }
+    };
+
     let items: Vec<ListItem> = app
         .process_list
         .iter()
@@ -745,6 +812,9 @@ fn draw_process_list(f: &mut Frame, area: Rect, app: &mut AppState) {
                 Color::Red
             };
 
+            // Get the appropriate rates based on traffic view mode
+            let (download_rate, upload_rate, total_download, total_upload) = get_rates(proc);
+
             let content = Line::from(vec![
                 Span::styled(selection_indicator, Style::default().fg(Color::Yellow)),
                 Span::raw(format!("{:7} ", proc.pid)),
@@ -760,19 +830,19 @@ fn draw_process_list(f: &mut Frame, area: Rect, app: &mut AppState) {
                     Style::default().fg(name_color),
                 ),
                 Span::styled(
-                    format!("↓{:>10} ", ProcessInfo::format_rate(proc.download_rate)),
+                    format!("↓{:>10} ", ProcessInfo::format_rate(download_rate)),
                     Style::default().fg(dl_rate_color),
                 ),
                 Span::styled(
-                    format!("↑{:>10} ", ProcessInfo::format_rate(proc.upload_rate)),
+                    format!("↑{:>10} ", ProcessInfo::format_rate(upload_rate)),
                     Style::default().fg(ul_rate_color),
                 ),
                 Span::styled(
-                    format!("{:>10} ", ProcessInfo::format_bytes(proc.total_download)),
+                    format!("{:>10} ", ProcessInfo::format_bytes(total_download)),
                     Style::default().fg(dl_total_color),
                 ),
                 Span::styled(
-                    format!("{:>10} ", ProcessInfo::format_bytes(proc.total_upload)),
+                    format!("{:>10} ", ProcessInfo::format_bytes(total_upload)),
                     Style::default().fg(ul_total_color),
                 ),
                 Span::styled(
@@ -865,6 +935,25 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &AppState) {
     }
 
     spans.push(Span::raw("|  "));
+
+    // Show traffic view mode
+    let traffic_mode_text = match app.traffic_view_mode {
+        TrafficViewMode::All => "All",
+        TrafficViewMode::Internet => "Internet",
+        TrafficViewMode::Local => "Local",
+    };
+    let traffic_mode_icon = match app.traffic_view_mode {
+        TrafficViewMode::All => "🌐",
+        TrafficViewMode::Internet => "🌐",
+        TrafficViewMode::Local => "🏠",
+    };
+    spans.push(Span::styled(
+        format!("{} {} ", traffic_mode_icon, traffic_mode_text),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::raw("| "));
 
     // Show filter status
     match &app.active_interface_filters {
@@ -997,6 +1086,13 @@ fn draw_throttle_dialog(f: &mut Frame, area: Rect, app: &AppState) {
         Style::default().fg(Color::White)
     };
 
+    let traffic_type = dialog.get_traffic_type();
+    let traffic_type_display = match traffic_type {
+        crate::process::TrafficType::All => "All Traffic",
+        crate::process::TrafficType::Internet => "Internet Only",
+        crate::process::TrafficType::Local => "Local Only",
+    };
+
     let dialog_text = vec![
         Line::from(""),
         Line::from(vec![
@@ -1023,9 +1119,18 @@ fn draw_throttle_dialog(f: &mut Frame, area: Rect, app: &AppState) {
             ),
         ]),
         Line::from(""),
+        Line::from(vec![
+            Span::styled("Traffic Type:          ", Style::default().fg(Color::White)),
+            Span::styled(
+                traffic_type_display,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
         Line::from(""),
         Line::from(Span::styled(
-            "[Tab] Switch field  [Enter] Apply  [Esc] Cancel",
+            "[Tab] Switch field  [t] Cycle traffic type  [Enter] Apply  [Esc] Cancel",
             Style::default().fg(Color::DarkGray),
         )),
     ];
