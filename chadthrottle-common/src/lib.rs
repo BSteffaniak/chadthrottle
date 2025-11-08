@@ -30,6 +30,11 @@ impl TokenBucket {
     }
 }
 
+/// Traffic type values for eBPF
+pub const TRAFFIC_TYPE_ALL: u8 = 0;
+pub const TRAFFIC_TYPE_INTERNET: u8 = 1;
+pub const TRAFFIC_TYPE_LOCAL: u8 = 2;
+
 /// Configuration for a cgroup throttle
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -38,8 +43,10 @@ pub struct CgroupThrottleConfig {
     pub cgroup_id: u64,
     /// PID of the process
     pub pid: u32,
-    /// Padding for alignment
-    pub _padding: u32,
+    /// Traffic type to throttle (0=All, 1=Internet, 2=Local)
+    pub traffic_type: u8,
+    /// Padding for alignment (3 bytes to maintain 8-byte alignment)
+    pub _padding: [u8; 3],
     /// Rate limit in bytes per second (sustained rate)
     pub rate_bps: u64,
     /// Burst size in bytes (maximum tokens, allows short bursts above rate)
@@ -55,7 +62,8 @@ impl CgroupThrottleConfig {
         Self {
             cgroup_id: 0,
             pid: 0,
-            _padding: 0,
+            traffic_type: TRAFFIC_TYPE_ALL,
+            _padding: [0, 0, 0], // Explicit array literal - [0; 3] causes LLVM errors in eBPF
             rate_bps: 0,
             burst_size: 0,
         }

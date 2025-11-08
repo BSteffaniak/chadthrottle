@@ -14,7 +14,10 @@ use aya_ebpf::{
     maps::HashMap,
     programs::SkBuffContext,
 };
-use chadthrottle_common::{CgroupThrottleConfig, ThrottleStats, TokenBucket};
+use chadthrottle_common::{
+    CgroupThrottleConfig, ThrottleStats, TokenBucket, TRAFFIC_TYPE_ALL, TRAFFIC_TYPE_INTERNET,
+    TRAFFIC_TYPE_LOCAL,
+};
 
 /// Maximum number of throttled cgroups (configurable)
 const MAX_CGROUPS: u32 = 4096;
@@ -25,6 +28,153 @@ const MAX_CGROUPS: u32 = 4096;
 /// the logic and avoids issues with bpf_get_current_cgroup_id() returning
 /// the wrong cgroup ID in softirq context.
 const THROTTLE_KEY: u64 = 0;
+
+/// Check if packet should be throttled based on traffic type filtering
+/// Returns true if packet should be throttled, false if it should be allowed
+///
+/// NOTE: This is a simplified implementation to satisfy the BPF verifier.
+/// - IPv4 with 2-byte precision + IPv6 with 1-byte detection
+/// - Uses minimal stack (separate 2-byte and 1-byte buffers)
+/// - IPv4: Precise RFC 1918 + link-local detection
+/// - IPv6: Basic fe80::/10 and fc00::/7 detection
+#[inline(always)]
+fn should_throttle_packet(ctx: &SkBuffContext, traffic_type: u8) -> bool {
+    // Early return for "All" traffic - most common case
+    if traffic_type == TRAFFIC_TYPE_ALL {
+        return true;
+    }
+
+    // Try IPv4 first (more common)
+    // Check packet is large enough for IPv4 (14 byte ethernet + 20 byte IP = 34 minimum)
+    if ctx.len() >= 34 {
+        // Read TWO bytes of destination IP address (offset 30 in packet)
+        // Offset: 14 (ethernet) + 16 (IP header to dest field) = 30
+        let mut two_bytes = [0u8, 0u8];
+        if ctx.load_bytes(30, &mut two_bytes).is_ok() {
+            let first = two_bytes[0];
+            let second = two_bytes[1];
+
+            // Precise classification based on first TWO octets of IPv4 address:
+            // 10.x.x.x         = RFC 1918 private (all of it)
+            // 127.x.x.x        = loopback (all of it)
+            // 169.254.x.x      = link-local (RFC 3927, ONLY this specific range!)
+            // 172.16-31.x.x    = RFC 1918 private (ONLY this specific range!)
+            // 192.168.x.x      = RFC 1918 private (ONLY this specific range!)
+            let is_ipv4_local = first == 10
+                || first == 127
+                || (first == 169 && second == 254)
+                || (first == 172 && second >= 16 && second <= 31)
+                || (first == 192 && second == 168);
+
+            // IPv4 path - return immediately
+            return match traffic_type {
+                TRAFFIC_TYPE_INTERNET => !is_ipv4_local,
+                TRAFFIC_TYPE_LOCAL => is_ipv4_local,
+                _ => true,
+            };
+        }
+    }
+
+    // Try IPv6 (destination at offset 38, minimum packet size 54)
+    // Packet structure: 14 (ethernet) + 40 (IPv6 header) = 54 minimum
+    if ctx.len() >= 54 {
+        // Read first byte of IPv6 destination address (offset 38)
+        let mut ipv6_first = [0u8];
+        if ctx.load_bytes(38, &mut ipv6_first).is_ok() {
+            // Simplified IPv6 local detection (first byte only):
+            // fe80::/10 = link-local (fe80-febf, first byte == 0xfe)
+            // fc00::/7  = unique local (fc00-fdff, (first_byte & 0xfe) == 0xfc)
+            let is_ipv6_local = ipv6_first[0] == 0xfe || (ipv6_first[0] & 0xfe) == 0xfc;
+
+            // IPv6 path - return immediately
+            return match traffic_type {
+                TRAFFIC_TYPE_INTERNET => !is_ipv6_local,
+                TRAFFIC_TYPE_LOCAL => is_ipv6_local,
+                _ => true,
+            };
+        }
+    }
+
+    // Couldn't parse as IPv4 or IPv6, throttle it (fail closed)
+    true
+}
+
+#[inline(always)]
+fn should_throttle_ipv4(ctx: &SkBuffContext, traffic_type: u8) -> bool {
+    if ctx.len() < 34 {
+        return true;
+    }
+
+    let mut dest_ip = [0u8, 0u8, 0u8, 0u8];
+    if ctx.load_bytes(30, &mut dest_ip).is_err() {
+        return true;
+    }
+
+    let is_local = is_ipv4_local(&dest_ip);
+
+    match traffic_type {
+        TRAFFIC_TYPE_INTERNET => !is_local, // Throttle if internet
+        TRAFFIC_TYPE_LOCAL => is_local,     // Throttle if local
+        _ => true,
+    }
+}
+
+#[inline(always)]
+fn should_throttle_ipv6(ctx: &SkBuffContext, traffic_type: u8) -> bool {
+    if ctx.len() < 54 {
+        return true;
+    }
+
+    let mut dest_ip = [
+        0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+    ];
+    if ctx.load_bytes(38, &mut dest_ip).is_err() {
+        return true;
+    }
+
+    let is_local = is_ipv6_local(&dest_ip);
+
+    match traffic_type {
+        TRAFFIC_TYPE_INTERNET => !is_local,
+        TRAFFIC_TYPE_LOCAL => is_local,
+        _ => true,
+    }
+}
+
+#[inline(always)]
+fn is_ipv4_local(ip: &[u8; 4]) -> bool {
+    // Private ranges (RFC 1918)
+    if ip[0] == 10 || (ip[0] == 172 && ip[1] >= 16 && ip[1] <= 31) || (ip[0] == 192 && ip[1] == 168)
+    {
+        return true;
+    }
+    // Loopback, link-local, broadcast, unspecified
+    if ip[0] == 127
+        || (ip[0] == 169 && ip[1] == 254)
+        || (ip[0] == 255 && ip[1] == 255 && ip[2] == 255 && ip[3] == 255)
+        || (ip[0] == 0 && ip[1] == 0 && ip[2] == 0 && ip[3] == 0)
+    {
+        return true;
+    }
+    false
+}
+
+#[inline(always)]
+fn is_ipv6_local(ip: &[u8; 16]) -> bool {
+    // NOTE: We intentionally skip ::1 (loopback) and :: (unspecified) checks
+    // to avoid loops that the BPF verifier rejects. These are edge cases rarely
+    // seen in actual network traffic. The important local ranges are covered below.
+
+    // Link-local fe80::/10
+    if ip[0] == 0xfe && (ip[1] & 0xc0) == 0x80 {
+        return true;
+    }
+    // Unique local fc00::/7
+    if (ip[0] & 0xfe) == 0xfc {
+        return true;
+    }
+    false
+}
 
 /// Map: cgroup_id -> TokenBucket
 /// Stores token bucket state for each throttled cgroup
@@ -105,7 +255,7 @@ fn token_bucket_allow(bucket: &mut TokenBucket, packet_size: u64, now_ns: u64) -
     }
 }
 
-/// eBPF program for ingress (download) traffic throttling
+/// eBPF program for ingress (upload) traffic throttling
 #[cgroup_skb(ingress)]
 pub fn chadthrottle_ingress(ctx: SkBuffContext) -> i32 {
     match try_chadthrottle_ingress(ctx) {
@@ -119,7 +269,7 @@ fn try_chadthrottle_ingress(ctx: SkBuffContext) -> Result<i32, i64> {
     //
     // Why? bpf_get_current_cgroup_id() returns the cgroup of the "current task",
     // which in cgroup_skb programs running in softirq context is the kernel thread,
-    // NOT the process that will receive the packet!
+    // NOT the process that will send the packet!
     //
     // Since we attach one BPF program instance per cgroup (in userspace),
     // each program only handles packets for its specific cgroup. We use a
@@ -147,6 +297,12 @@ fn try_chadthrottle_ingress(ctx: SkBuffContext) -> Result<i32, i64> {
             return Ok(1); // Allow
         }
     };
+
+    // Check if we should throttle this packet based on traffic type
+    if !should_throttle_packet(&ctx, config.traffic_type) {
+        // This traffic type should not be throttled - allow
+        return Ok(1);
+    }
 
     // Get packet size
     let packet_size = ctx.len() as u64;

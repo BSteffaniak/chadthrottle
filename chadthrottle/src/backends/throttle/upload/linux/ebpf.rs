@@ -229,16 +229,8 @@ impl UploadThrottleBackend for EbpfUpload {
     ) -> Result<()> {
         use crate::process::TrafficType;
 
-        // eBPF backend currently only supports TrafficType::All
-        // Full IP filtering in eBPF would require modifying the BPF program
-        if traffic_type != TrafficType::All {
-            return Err(anyhow::anyhow!(
-                "eBPF backend does not yet support traffic type filtering (Internet/Local only). \
-                 Traffic type '{:?}' requested but only 'All' is supported. \
-                 Use nftables backend for traffic type filtering.",
-                traffic_type
-            ));
-        }
+        // eBPF backend now supports all traffic types via IP classification in kernel
+        // The traffic_type will be passed to the eBPF program via CgroupThrottleConfig
 
         #[cfg(feature = "throttle-ebpf")]
         {
@@ -327,10 +319,21 @@ impl UploadThrottleBackend for EbpfUpload {
                 // Allow bursts up to 2x the sustained rate (configurable)
                 let burst_size = limit_bytes_per_sec * 2;
 
+                // Convert TrafficType to u8 for eBPF
+                use chadthrottle_common::{
+                    TRAFFIC_TYPE_ALL, TRAFFIC_TYPE_INTERNET, TRAFFIC_TYPE_LOCAL,
+                };
+                let traffic_type_value = match traffic_type {
+                    crate::process::TrafficType::All => TRAFFIC_TYPE_ALL,
+                    crate::process::TrafficType::Internet => TRAFFIC_TYPE_INTERNET,
+                    crate::process::TrafficType::Local => TRAFFIC_TYPE_LOCAL,
+                };
+
                 let config = CgroupThrottleConfig {
                     cgroup_id, // Store for diagnostics
                     pid: pid as u32,
-                    _padding: 0,
+                    traffic_type: traffic_type_value,
+                    _padding: [0; 3],
                     rate_bps: limit_bytes_per_sec,
                     burst_size,
                 };
@@ -532,6 +535,11 @@ impl UploadThrottleBackend for EbpfUpload {
         {
             Ok(())
         }
+    }
+
+    fn supports_traffic_type(&self, _traffic_type: crate::process::TrafficType) -> bool {
+        // eBPF backend supports all traffic types with IP filtering
+        true
     }
 
     fn get_stats(&self, _pid: i32) -> Option<crate::backends::throttle::BackendStats> {
