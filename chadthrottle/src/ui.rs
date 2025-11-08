@@ -400,6 +400,32 @@ impl AppState {
         self.status_message = "Filter: showing no interfaces".to_string();
     }
 
+    /// Toggle between all interfaces selected and none selected
+    pub fn toggle_all_interface_filters(&mut self) {
+        // Check if all interfaces are currently selected
+        let all_selected = match &self.active_interface_filters {
+            None => true, // No filter = all selected
+            Some(filters) => {
+                // All selected if filter contains all interfaces
+                filters.len() == self.interface_list.len()
+                    && self
+                        .interface_list
+                        .iter()
+                        .all(|iface| filters.contains(&iface.name))
+            }
+        };
+
+        if all_selected {
+            // Deselect all
+            self.active_interface_filters = Some(vec![]);
+            self.status_message = "Filter: showing no interfaces".to_string();
+        } else {
+            // Select all
+            self.active_interface_filters = None;
+            self.status_message = "Filter cleared - showing all interfaces".to_string();
+        }
+    }
+
     pub fn update_processes(&mut self, process_map: ProcessMap) {
         let mut processes: Vec<ProcessInfo> = process_map.into_values().collect();
 
@@ -1967,7 +1993,7 @@ fn draw_interface_modal(f: &mut Frame, area: Rect, app: &AppState) {
 
     // Instructions
     text.push(Line::from(Span::styled(
-        "[↑↓] Navigate  [Space] Toggle (applies live)  [A] All  [N] None",
+        "[↑↓] Navigate  [Space] Toggle (applies live)  [A] Toggle All/None",
         Style::default().fg(Color::DarkGray),
     )));
     text.push(Line::from(Span::styled(

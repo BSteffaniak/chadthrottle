@@ -56,12 +56,7 @@ pub fn get_all_keybindings() -> Vec<KeyBinding> {
         },
         KeyBinding {
             key: "A",
-            description: "Show all interfaces / clear filter (in interface list)",
-            category: KeyCategory::Navigation,
-        },
-        KeyBinding {
-            key: "N",
-            description: "Show no interfaces / empty filter (in interface list)",
+            description: "Toggle All/None interfaces (in interface list)",
             category: KeyCategory::Navigation,
         },
         // Actions

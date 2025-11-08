@@ -789,24 +789,12 @@ async fn run_app<B: ratatui::backend::Backend>(
                         }
                     }
                     KeyCode::Char('a') | KeyCode::Char('A') => {
-                        // 'A' - Select all (clear filter) in interface list view
+                        // 'A' - Toggle all/none in interface list view
                         if app.view_mode == ui::ViewMode::InterfaceList {
-                            app.clear_interface_filters();
+                            app.toggle_all_interface_filters();
 
                             // Save to config immediately
-                            config.filtered_interfaces = None;
-                            if let Err(e) = config.save() {
-                                log::error!("Failed to save filter config: {}", e);
-                            }
-                        }
-                    }
-                    KeyCode::Char('n') | KeyCode::Char('N') => {
-                        // 'N' - Deselect all (show nothing) in interface list view
-                        if app.view_mode == ui::ViewMode::InterfaceList {
-                            app.set_empty_filter();
-
-                            // Save to config immediately
-                            config.filtered_interfaces = Some(vec![]);
+                            config.filtered_interfaces = app.active_interface_filters.clone();
                             if let Err(e) = config.save() {
                                 log::error!("Failed to save filter config: {}", e);
                             }
