@@ -8,6 +8,7 @@ use procfs::process::all_processes;
 /// Linux process utilities with pluggable socket mapping
 pub struct LinuxProcessUtils {
     socket_mapper: Box<dyn SocketMapperBackend>,
+    socket_mapper_name: String,
 }
 
 impl LinuxProcessUtils {
@@ -20,9 +21,23 @@ impl LinuxProcessUtils {
         let socket_mapper = select_socket_mapper(backend_name)
             .expect("Failed to initialize socket mapper on Linux");
 
-        log::debug!("Using socket mapper backend: {}", socket_mapper.name());
+        let socket_mapper_name = socket_mapper.name().to_string();
+        log::debug!("Using socket mapper backend: {}", socket_mapper_name);
 
-        Self { socket_mapper }
+        Self {
+            socket_mapper,
+            socket_mapper_name,
+        }
+    }
+
+    /// Get the name of the socket mapper backend
+    pub fn socket_mapper_name(&self) -> &str {
+        &self.socket_mapper_name
+    }
+
+    /// Get capabilities of the socket mapper backend
+    pub fn socket_mapper_capabilities(&self) -> crate::backends::BackendCapabilities {
+        self.socket_mapper.capabilities()
     }
 }
 

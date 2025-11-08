@@ -40,6 +40,9 @@ pub struct NetworkMonitor {
     bandwidth_tracker: Arc<Mutex<BandwidthTracker>>,
     // Platform-specific process utilities
     process_utils: Box<dyn ProcessUtils>,
+    // Socket mapper backend information
+    socket_mapper_name: String,
+    socket_mapper_capabilities: crate::backends::BackendCapabilities,
     // Handles to packet capture threads (one per interface)
     _capture_handles: Vec<thread::JoinHandle<()>>,
     last_update: Instant,
@@ -110,10 +113,47 @@ impl NetworkMonitor {
             socket_mapper_preference,
         );
 
+        // Get socket mapper info before moving process_utils
+        let (socket_mapper_name, socket_mapper_capabilities) = {
+            #[cfg(target_os = "linux")]
+            {
+                use crate::backends::process::LinuxProcessUtils;
+                // We need to get the info from the actual implementation
+                // Create a temporary one to get the info
+                let temp_utils = crate::backends::process::LinuxProcessUtils::with_socket_mapper(
+                    socket_mapper_preference,
+                );
+                (
+                    temp_utils.socket_mapper_name().to_string(),
+                    temp_utils.socket_mapper_capabilities(),
+                )
+            }
+            #[cfg(target_os = "macos")]
+            {
+                use crate::backends::process::MacOSProcessUtils;
+                let temp_utils = crate::backends::process::MacOSProcessUtils::with_socket_mapper(
+                    socket_mapper_preference,
+                );
+                (
+                    temp_utils.socket_mapper_name().to_string(),
+                    temp_utils.socket_mapper_capabilities(),
+                )
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            {
+                (
+                    "unknown".to_string(),
+                    crate::backends::BackendCapabilities::default(),
+                )
+            }
+        };
+
         // Create monitor instance first (without starting capture thread yet)
         let mut monitor = Self {
             bandwidth_tracker,
             process_utils,
+            socket_mapper_name,
+            socket_mapper_capabilities,
             _capture_handles: Vec::new(),
             last_update: Instant::now(),
         };
@@ -141,6 +181,11 @@ impl NetworkMonitor {
         }
 
         Ok(monitor)
+    }
+
+    /// Get socket mapper backend information
+    pub fn get_socket_mapper_info(&self) -> (&str, &crate::backends::BackendCapabilities) {
+        (&self.socket_mapper_name, &self.socket_mapper_capabilities)
     }
 
     pub fn update(&mut self) -> Result<(ProcessMap, InterfaceMap)> {

@@ -187,6 +187,7 @@ impl ThrottleManager {
         BackendInfo {
             active_upload: self.default_upload.clone(),
             active_download: self.default_download.clone(),
+            active_socket_mapper: None, // Will be populated by caller from NetworkMonitor
             available_upload: detect_upload_backends()
                 .into_iter()
                 .map(|b| (b.name.to_string(), b.priority, b.available))
@@ -195,10 +196,13 @@ impl ThrottleManager {
                 .into_iter()
                 .map(|b| (b.name.to_string(), b.priority, b.available))
                 .collect(),
+            available_socket_mappers: Vec::new(), // Will be populated by caller
             preferred_upload,
             preferred_download,
+            preferred_socket_mapper: None, // Will be populated by caller
             upload_capabilities,
             download_capabilities,
+            socket_mapper_capabilities: None, // Will be populated by caller
             backend_stats: self.get_active_backend_stats(),
         }
     }

@@ -417,7 +417,10 @@ async fn main() -> Result<()> {
         .download_backend
         .as_deref()
         .or(config.preferred_download_backend.as_deref());
-    let socket_mapper_preference = args.socket_mapper.as_deref();
+    let socket_mapper_preference = args
+        .socket_mapper
+        .as_deref()
+        .or(config.preferred_socket_mapper.as_deref());
 
     // Log which preference source is being used
     if let Some(pref) = upload_preference {
@@ -432,6 +435,13 @@ async fn main() -> Result<()> {
             log::info!("Using download backend from CLI: {}", pref);
         } else {
             log::info!("Using download backend from config: {}", pref);
+        }
+    }
+    if let Some(pref) = socket_mapper_preference {
+        if args.socket_mapper.is_some() {
+            log::info!("Using socket mapper from CLI: {}", pref);
+        } else {
+            log::info!("Using socket mapper from config: {}", pref);
         }
     }
     if let Some(pref) = socket_mapper_preference {
@@ -566,10 +576,25 @@ async fn run_app<B: ratatui::backend::Backend>(
 
     loop {
         // Get backend info for UI display
-        let backend_info = throttle_manager.get_backend_info(
+        let mut backend_info = throttle_manager.get_backend_info(
             config.preferred_upload_backend.clone(),
             config.preferred_download_backend.clone(),
         );
+
+        // Populate socket mapper info from NetworkMonitor
+        {
+            use crate::backends::process::socket_mapper::detect_socket_mappers;
+            let socket_mappers = detect_socket_mappers();
+            backend_info.available_socket_mappers = socket_mappers
+                .iter()
+                .map(|sm| (sm.name.to_string(), sm.priority, sm.available))
+                .collect();
+
+            let (active_sm, capabilities) = monitor.get_socket_mapper_info();
+            backend_info.active_socket_mapper = Some(active_sm.to_string());
+            backend_info.socket_mapper_capabilities = Some(capabilities.clone());
+            backend_info.preferred_socket_mapper = config.preferred_socket_mapper.clone();
+        }
 
         // Draw UI
         terminal.draw(|f| ui::draw_ui_with_backend_info(f, app, Some(&backend_info)))?;
@@ -597,10 +622,25 @@ async fn run_app<B: ratatui::backend::Backend>(
                         KeyCode::Tab => {
                             app.backend_selector.toggle_mode();
                             // Repopulate with backends for new mode
-                            let backend_info = throttle_manager.get_backend_info(
+                            let mut backend_info = throttle_manager.get_backend_info(
                                 config.preferred_upload_backend.clone(),
                                 config.preferred_download_backend.clone(),
                             );
+                            // Populate socket mapper info
+                            {
+                                use crate::backends::process::socket_mapper::detect_socket_mappers;
+                                let socket_mappers = detect_socket_mappers();
+                                backend_info.available_socket_mappers = socket_mappers
+                                    .iter()
+                                    .map(|sm| (sm.name.to_string(), sm.priority, sm.available))
+                                    .collect();
+                                let (active_sm, capabilities) = monitor.get_socket_mapper_info();
+                                backend_info.active_socket_mapper = Some(active_sm.to_string());
+                                backend_info.socket_mapper_capabilities =
+                                    Some(capabilities.clone());
+                                backend_info.preferred_socket_mapper =
+                                    config.preferred_socket_mapper.clone();
+                            }
                             app.backend_selector.populate(&backend_info);
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
@@ -627,13 +667,34 @@ async fn run_app<B: ratatui::backend::Backend>(
                                                 Some(backend_name.clone());
                                             config.save()
                                         }),
+                                    ui::BackendSelectorMode::SocketMapper => {
+                                        // Switch socket mapper backend by rebuilding NetworkMonitor
+                                        match NetworkMonitor::with_socket_mapper(Some(
+                                            &backend_name,
+                                        )) {
+                                            Ok(new_monitor) => {
+                                                *monitor = new_monitor;
+                                                config.preferred_socket_mapper =
+                                                    Some(backend_name.clone());
+                                                config.save()
+                                            }
+                                            Err(e) => Err(e),
+                                        }
+                                    }
                                 };
 
                                 match result {
                                     Ok(_) => {
+                                        let backend_type = match app.backend_selector.mode {
+                                            ui::BackendSelectorMode::Upload => "Upload backend",
+                                            ui::BackendSelectorMode::Download => "Download backend",
+                                            ui::BackendSelectorMode::SocketMapper => {
+                                                "Socket mapper"
+                                            }
+                                        };
                                         app.status_message = format!(
-                                            "✅ New throttles will use '{}' backend",
-                                            backend_name
+                                            "✅ {} switched to '{}'",
+                                            backend_type, backend_name
                                         );
                                     }
                                     Err(e) => {
@@ -656,10 +717,25 @@ async fn run_app<B: ratatui::backend::Backend>(
                             // Switch to backend selector
                             app.show_backend_info = false;
                             app.show_backend_selector = true;
-                            let backend_info = throttle_manager.get_backend_info(
+                            let mut backend_info = throttle_manager.get_backend_info(
                                 config.preferred_upload_backend.clone(),
                                 config.preferred_download_backend.clone(),
                             );
+                            // Populate socket mapper info
+                            {
+                                use crate::backends::process::socket_mapper::detect_socket_mappers;
+                                let socket_mappers = detect_socket_mappers();
+                                backend_info.available_socket_mappers = socket_mappers
+                                    .iter()
+                                    .map(|sm| (sm.name.to_string(), sm.priority, sm.available))
+                                    .collect();
+                                let (active_sm, capabilities) = monitor.get_socket_mapper_info();
+                                backend_info.active_socket_mapper = Some(active_sm.to_string());
+                                backend_info.socket_mapper_capabilities =
+                                    Some(capabilities.clone());
+                                backend_info.preferred_socket_mapper =
+                                    config.preferred_socket_mapper.clone();
+                            }
                             app.backend_selector.populate(&backend_info);
                         }
                         KeyCode::Char('b') | KeyCode::Char('q') | KeyCode::Esc => {

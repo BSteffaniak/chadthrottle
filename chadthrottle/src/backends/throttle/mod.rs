@@ -149,12 +149,16 @@ pub struct DownloadBackendInfo {
 pub struct BackendInfo {
     pub active_upload: Option<String>,
     pub active_download: Option<String>,
+    pub active_socket_mapper: Option<String>,
     pub available_upload: Vec<(String, BackendPriority, bool)>,
     pub available_download: Vec<(String, BackendPriority, bool)>,
+    pub available_socket_mappers: Vec<(String, BackendPriority, bool)>,
     pub preferred_upload: Option<String>,
     pub preferred_download: Option<String>,
+    pub preferred_socket_mapper: Option<String>,
     pub upload_capabilities: Option<BackendCapabilities>,
     pub download_capabilities: Option<BackendCapabilities>,
+    pub socket_mapper_capabilities: Option<BackendCapabilities>,
     pub backend_stats: HashMap<String, usize>, // backend_name -> active throttle count
 }
 

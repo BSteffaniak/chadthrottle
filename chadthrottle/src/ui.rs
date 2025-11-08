@@ -58,6 +58,7 @@ pub struct BackendSelector {
 pub enum BackendSelectorMode {
     Upload,
     Download,
+    SocketMapper,
 }
 
 pub struct ThrottleDialog {
@@ -86,7 +87,8 @@ impl BackendSelector {
     pub fn toggle_mode(&mut self) {
         self.mode = match self.mode {
             BackendSelectorMode::Upload => BackendSelectorMode::Download,
-            BackendSelectorMode::Download => BackendSelectorMode::Upload,
+            BackendSelectorMode::Download => BackendSelectorMode::SocketMapper,
+            BackendSelectorMode::SocketMapper => BackendSelectorMode::Upload,
         };
         self.selected_index = 0; // Reset selection when switching modes
     }
@@ -145,6 +147,7 @@ impl BackendSelector {
         self.available_backends = match self.mode {
             BackendSelectorMode::Upload => backend_info.available_upload.clone(),
             BackendSelectorMode::Download => backend_info.available_download.clone(),
+            BackendSelectorMode::SocketMapper => backend_info.available_socket_mappers.clone(),
         };
 
         // Find first available backend and select it
@@ -1292,6 +1295,74 @@ fn draw_backend_info(f: &mut Frame, area: Rect, backend_info: &BackendInfo) {
 
     text.push(Line::from(""));
 
+    // Socket Mapper Backends Section
+    text.push(Line::from(Span::styled(
+        "Socket Mapper Backends:",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+
+    if backend_info.available_socket_mappers.is_empty() {
+        text.push(Line::from(Span::styled(
+            "  ⚪ (none available)",
+            Style::default().fg(Color::Gray),
+        )));
+    } else {
+        for (name, priority, available) in &backend_info.available_socket_mappers {
+            let is_active = backend_info.active_socket_mapper.as_ref() == Some(name);
+            let (symbol, color) = if is_active {
+                ("⭐", Color::Yellow)
+            } else if *available {
+                ("✅", Color::Green)
+            } else {
+                ("❌", Color::Red)
+            };
+
+            let status = if is_active {
+                "[DEFAULT]"
+            } else if *available {
+                "Available"
+            } else {
+                "Unavailable"
+            };
+
+            let priority_str = format!("{:?}", priority);
+
+            text.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(symbol, Style::default().fg(color)),
+                Span::raw(" "),
+                Span::styled(
+                    format!("{:15}", name),
+                    if is_active {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::White)
+                    },
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    format!("{:12}", status),
+                    Style::default().fg(if is_active {
+                        Color::Yellow
+                    } else {
+                        Color::Gray
+                    }),
+                ),
+                Span::raw("  Priority: "),
+                Span::styled(
+                    format!("{:8}", priority_str),
+                    Style::default().fg(Color::Cyan),
+                ),
+            ]));
+        }
+    }
+
+    text.push(Line::from(""));
+
     // Configuration Section
     text.push(Line::from(Span::styled(
         "Configuration:",
@@ -1334,6 +1405,28 @@ fn draw_backend_info(f: &mut Frame, area: Rect, backend_info: &BackendInfo) {
         Span::raw("  Preferred Download:   "),
         Span::styled(
             format!("{}{}", preferred_download_display, active_download_display),
+            Style::default().fg(Color::White),
+        ),
+    ]));
+
+    let preferred_socket_mapper_display = backend_info
+        .preferred_socket_mapper
+        .as_ref()
+        .map(|s| s.as_str())
+        .unwrap_or("Auto");
+    let active_socket_mapper_display = backend_info
+        .active_socket_mapper
+        .as_ref()
+        .map(|s| format!(" ({} selected)", s))
+        .unwrap_or_else(|| " (none available)".to_string());
+
+    text.push(Line::from(vec![
+        Span::raw("  Preferred Socket Map: "),
+        Span::styled(
+            format!(
+                "{}{}",
+                preferred_socket_mapper_display, active_socket_mapper_display
+            ),
             Style::default().fg(Color::White),
         ),
     ]));
@@ -1454,6 +1547,7 @@ fn draw_backend_selector(f: &mut Frame, area: Rect, app: &AppState, backend_info
     let mode_title = match app.backend_selector.mode {
         BackendSelectorMode::Upload => "Select Default Upload Backend",
         BackendSelectorMode::Download => "Select Default Download Backend",
+        BackendSelectorMode::SocketMapper => "Select Default Socket Mapper Backend",
     };
 
     text.push(Line::from(Span::styled(
@@ -1468,6 +1562,7 @@ fn draw_backend_selector(f: &mut Frame, area: Rect, app: &AppState, backend_info
     let current_default = match app.backend_selector.mode {
         BackendSelectorMode::Upload => backend_info.active_upload.as_ref(),
         BackendSelectorMode::Download => backend_info.active_download.as_ref(),
+        BackendSelectorMode::SocketMapper => backend_info.active_socket_mapper.as_ref(),
     };
 
     // Get backend stats from backend_info
@@ -1553,7 +1648,7 @@ fn draw_backend_selector(f: &mut Frame, area: Rect, app: &AppState, backend_info
 
     // Instructions
     text.push(Line::from(Span::styled(
-        "[Tab] Switch Upload/Download  [↑↓] Navigate  [Enter] Select  [Esc] Cancel",
+        "[Tab] Switch Upload/Download/Socket  [↑↓] Navigate  [Enter] Select  [Esc] Cancel",
         Style::default().fg(Color::DarkGray),
     )));
 

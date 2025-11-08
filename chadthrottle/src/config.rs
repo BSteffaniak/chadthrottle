@@ -36,6 +36,10 @@ pub struct Config {
     #[serde(default)]
     pub preferred_download_backend: Option<String>,
 
+    /// Preferred socket mapper backend
+    #[serde(default)]
+    pub preferred_socket_mapper: Option<String>,
+
     /// Interface filter: None = show all, Some([]) = show nothing, Some([...]) = filter to these
     #[serde(default)]
     pub filtered_interfaces: Option<Vec<String>>,
@@ -52,6 +56,7 @@ impl Default for Config {
             auto_restore: true,
             preferred_upload_backend: None,
             preferred_download_backend: None,
+            preferred_socket_mapper: None,
             filtered_interfaces: None, // Show all by default
         }
     }
