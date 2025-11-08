@@ -350,6 +350,15 @@ impl UploadThrottleBackend for EbpfUpload {
                     cgroup_id
                 );
 
+                // Get cgroup path for this PID to find which program to detach
+                let cgroup_path = match get_cgroup_path(pid) {
+                    Ok(path) => Some(path),
+                    Err(e) => {
+                        log::warn!("Could not get cgroup path for PID {}: {}", pid, e);
+                        None
+                    }
+                };
+
                 // Decrement reference count for this cgroup
                 if let Some(refcount) = self.cgroup_refcount.get_mut(&cgroup_id) {
                     *refcount -= 1;
@@ -357,29 +366,65 @@ impl UploadThrottleBackend for EbpfUpload {
 
                     // If this was the last PID in the cgroup, clean up
                     if *refcount == 0 {
-                        log::debug!("Last PID removed from cgroup {}, cleaning up", cgroup_id);
+                        log::info!(
+                            "Last PID removed from cgroup {}, cleaning up maps and detaching program",
+                            cgroup_id
+                        );
+
+                        // CRITICAL: Use fixed key (0) to match what we inserted!
+                        // The eBPF program uses fixed key, so we must remove with the same key
+                        const MAP_KEY: u64 = 0;
 
                         // Remove from BPF maps
                         if let Some(ref mut ebpf) = self.ebpf {
                             let mut config_map: BpfHashMap<_, u64, CgroupThrottleConfig> =
                                 get_bpf_map(ebpf, "CGROUP_CONFIGS")?;
-                            let _ = config_map.remove(&cgroup_id); // Ignore errors if already removed
+                            let _ = config_map.remove(&MAP_KEY);
+                            log::debug!("Removed config from map[{}]", MAP_KEY);
 
                             let mut bucket_map: BpfHashMap<_, u64, TokenBucket> =
                                 get_bpf_map(ebpf, "CGROUP_BUCKETS")?;
-                            let _ = bucket_map.remove(&cgroup_id);
+                            let _ = bucket_map.remove(&MAP_KEY);
+                            log::debug!("Removed bucket from map[{}]", MAP_KEY);
 
                             let mut stats_map: BpfHashMap<_, u64, ThrottleStats> =
                                 get_bpf_map(ebpf, "CGROUP_STATS")?;
-                            let _ = stats_map.remove(&cgroup_id);
+                            let _ = stats_map.remove(&MAP_KEY);
+                            log::debug!("Removed stats from map[{}]", MAP_KEY);
+                        }
+
+                        // Detach BPF program from this cgroup
+                        if let Some(ref path) = cgroup_path {
+                            // Find and remove the attached program for this cgroup path
+                            if let Some(pos) = self
+                                .attached_programs
+                                .iter()
+                                .position(|p| &p.cgroup_path == path)
+                            {
+                                let attached = self.attached_programs.remove(pos);
+                                log::info!(
+                                    "Detaching BPF program from cgroup: {:?}",
+                                    attached.cgroup_path
+                                );
+                                if let Err(e) = detach_cgroup_skb_legacy(
+                                    &attached.cgroup_path,
+                                    attached.attach_type,
+                                ) {
+                                    log::warn!(
+                                        "Failed to detach program from {:?}: {}",
+                                        attached.cgroup_path,
+                                        e
+                                    );
+                                } else {
+                                    log::info!("✅ Successfully detached BPF program");
+                                }
+                                // Remove from attached_cgroups set too
+                                self.attached_cgroups.remove(&attached.cgroup_path);
+                            }
                         }
 
                         // Remove reference count entry
                         self.cgroup_refcount.remove(&cgroup_id);
-
-                        // TODO: In a future enhancement, we could detach the eBPF program here
-                        // However, aya doesn't currently provide a clean way to detach individual programs
-                        // The programs will be automatically detached when the Ebpf instance is dropped
                     }
                 }
             }
