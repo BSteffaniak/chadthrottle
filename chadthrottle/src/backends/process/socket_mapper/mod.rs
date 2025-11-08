@@ -53,9 +53,15 @@ pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
 
+#[cfg(target_os = "windows")]
+pub mod windows;
+
 // Platform-specific re-exports and functions
 #[cfg(target_os = "linux")]
 pub use linux::{detect_socket_mappers, select_socket_mapper};
 
 #[cfg(target_os = "macos")]
 pub use macos::{detect_socket_mappers, select_socket_mapper};
+
+#[cfg(target_os = "windows")]
+pub use windows::{detect_socket_mappers, select_socket_mapper};

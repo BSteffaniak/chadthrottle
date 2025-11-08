@@ -1,14 +1,24 @@
 use crate::backends::process::ProcessUtils;
 use crate::process::{InterfaceInfo, InterfaceMap, ProcessInfo, ProcessMap};
 use anyhow::{Context, Result};
+
+#[cfg(feature = "monitor-pnet")]
 use pnet::datalink::{self, Channel, NetworkInterface};
+#[cfg(feature = "monitor-pnet")]
 use pnet::packet::Packet;
+#[cfg(feature = "monitor-pnet")]
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
+#[cfg(feature = "monitor-pnet")]
 use pnet::packet::ip::IpNextHeaderProtocols;
+#[cfg(feature = "monitor-pnet")]
 use pnet::packet::ipv4::Ipv4Packet;
+#[cfg(feature = "monitor-pnet")]
 use pnet::packet::ipv6::Ipv6Packet;
+#[cfg(feature = "monitor-pnet")]
 use pnet::packet::tcp::TcpPacket;
+#[cfg(feature = "monitor-pnet")]
 use pnet::packet::udp::UdpPacket;
+
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};

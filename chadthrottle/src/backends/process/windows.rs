@@ -1,0 +1,71 @@
+// Windows ProcessUtils implementation using sysinfo
+//
+// Windows networking monitoring is not yet fully implemented.
+// This provides basic process enumeration for monitoring-only mode.
+
+use super::{ConnectionMap, ProcessEntry, ProcessUtils};
+use anyhow::Result;
+use std::collections::HashMap;
+use sysinfo::{Pid, System};
+
+pub struct WindowsProcessUtils;
+
+impl WindowsProcessUtils {
+    pub fn new() -> Self {
+        WindowsProcessUtils
+    }
+
+    pub fn with_socket_mapper(_socket_mapper_preference: Option<&str>) -> Self {
+        // Socket mapper not yet implemented for Windows
+        Self::new()
+    }
+}
+
+impl ProcessUtils for WindowsProcessUtils {
+    fn get_process_name(&self, pid: i32) -> Result<String> {
+        let sys = System::new_all();
+        let pid_obj = Pid::from_u32(pid as u32);
+
+        sys.process(pid_obj)
+            .map(|p| p.name().to_str().unwrap_or("unknown").to_string())
+            .ok_or_else(|| anyhow::anyhow!("Process {} not found", pid))
+    }
+
+    fn process_exists(&self, pid: i32) -> bool {
+        let sys = System::new_all();
+        let pid_obj = Pid::from_u32(pid as u32);
+        sys.process(pid_obj).is_some()
+    }
+
+    fn get_all_processes(&self) -> Result<Vec<ProcessEntry>> {
+        let sys = System::new_all();
+
+        let entries = sys
+            .processes()
+            .iter()
+            .map(|(pid, proc)| ProcessEntry {
+                pid: pid.as_u32() as i32,
+                name: proc.name().to_str().unwrap_or("unknown").to_string(),
+            })
+            .collect();
+
+        Ok(entries)
+    }
+
+    fn get_connection_map(&self) -> Result<ConnectionMap> {
+        // TODO: Implement socket-to-PID mapping for Windows
+        // Could use:
+        // - GetExtendedTcpTable / GetExtendedUdpTable from iphlpapi.dll
+        // - netstat parsing
+        // For now, return empty map
+        log::warn!("Socket-to-PID mapping not yet implemented for Windows");
+
+        Ok(ConnectionMap {
+            socket_to_pid: HashMap::new(),
+            tcp_connections: Vec::new(),
+            tcp6_connections: Vec::new(),
+            udp_connections: Vec::new(),
+            udp6_connections: Vec::new(),
+        })
+    }
+}

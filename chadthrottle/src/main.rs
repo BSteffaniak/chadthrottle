@@ -2,7 +2,66 @@ mod backends;
 mod config;
 mod history;
 mod keybindings;
+
+// NetworkMonitor module - conditionally compiled based on available backends
+#[cfg(feature = "monitor-pnet")]
 mod monitor;
+
+// Stub monitor module when no backends are available
+#[cfg(not(feature = "monitor-pnet"))]
+mod monitor {
+    use crate::process::{InterfaceMap, ProcessMap};
+    use anyhow::Result;
+    use std::collections::HashMap;
+    use std::time::Instant;
+
+    pub struct NetworkMonitor;
+
+    pub struct ProcessBandwidth {
+        name: String,
+        rx_bytes: u64,
+        tx_bytes: u64,
+        last_rx_bytes: u64,
+        last_tx_bytes: u64,
+    }
+
+    impl NetworkMonitor {
+        pub fn with_socket_mapper(_: Option<&str>) -> Result<Self> {
+            log::warn!("No monitoring backend available - monitoring disabled");
+            Ok(NetworkMonitor)
+        }
+
+        pub fn get_socket_mapper_info(&self) -> (&str, &crate::backends::BackendCapabilities) {
+            static CAPS: crate::backends::BackendCapabilities =
+                crate::backends::BackendCapabilities {
+                    ipv4_support: false,
+                    ipv6_support: false,
+                    per_process: false,
+                    per_connection: false,
+                };
+            ("none", &CAPS)
+        }
+
+        pub fn update(&mut self) -> Result<(ProcessMap, InterfaceMap)> {
+            Ok((HashMap::new(), HashMap::new()))
+        }
+
+        pub fn extract_bandwidth_data(
+            &self,
+        ) -> (HashMap<i32, ProcessBandwidth>, HashMap<i32, Instant>) {
+            (HashMap::new(), HashMap::new())
+        }
+
+        pub fn restore_bandwidth_data(
+            &mut self,
+            _process_bandwidth: HashMap<i32, ProcessBandwidth>,
+            _terminated_processes: HashMap<i32, Instant>,
+        ) {
+            // No-op
+        }
+    }
+}
+
 mod process;
 mod traffic_classifier;
 mod ui;
@@ -10,7 +69,9 @@ mod ui;
 use anyhow::Result;
 use clap::Parser;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -605,6 +666,12 @@ async fn run_app<B: ratatui::backend::Backend>(
         // Handle input with timeout
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
+                // Only handle key press events (ignore release and repeat)
+                // This prevents modals from closing immediately on Windows
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+
                 // ALWAYS check Ctrl+C first - force quit regardless of modal state
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                     return Ok(());

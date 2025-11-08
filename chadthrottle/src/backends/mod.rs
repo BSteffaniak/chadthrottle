@@ -43,7 +43,7 @@ pub enum BackendPriority {
 }
 
 /// Capabilities that a backend supports
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct BackendCapabilities {
     pub ipv4_support: bool,
     pub ipv6_support: bool,

@@ -68,6 +68,11 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::MacOSProcessUtils;
 
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+pub use windows::WindowsProcessUtils;
+
 /// Factory function to create platform-specific ProcessUtils
 pub fn create_process_utils() -> Box<dyn ProcessUtils> {
     create_process_utils_with_socket_mapper(None)
@@ -91,8 +96,17 @@ pub fn create_process_utils_with_socket_mapper(
         ))
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(target_os = "windows")]
     {
-        compile_error!("Unsupported platform - only Linux and macOS are currently supported");
+        Box::new(WindowsProcessUtils::with_socket_mapper(
+            socket_mapper_preference,
+        ))
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        compile_error!(
+            "Unsupported platform - only Linux, macOS, and Windows are currently supported"
+        );
     }
 }

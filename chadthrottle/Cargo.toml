@@ -63,10 +63,10 @@ pnet = { version = "0.35.0", optional = true }
 pnet_datalink = { version = "0.35.0", optional = true }
 pnet_packet = { version = "0.35.0", optional = true }
 
-# Process information library (cross-platform)
+# Process information library
 # macOS: wraps native libproc API for socket enumeration
-# Linux: provides process listing API (complements procfs)
-libproc = "0.14"
+# Linux: uses procfs (see Linux-specific dependencies below)
+# Windows: uses sysinfo (see core dependencies above)
 
 # eBPF support (optional, Linux-only)
 aya = { workspace = true, optional = true }
@@ -76,7 +76,8 @@ chadthrottle-common = { workspace = true, optional = true, default-features = tr
 [target.'cfg(target_os = "linux")'.dependencies]
 procfs = "0.16"                                              # Always needed for LinuxProcessUtils
 nix = { version = "0.29", features = ["process", "signal"] }
+libproc = "0.14"                                             # Used by LibprocSocketMapper backend
 
 # macOS-specific dependencies (always available on macOS)
 [target.'cfg(target_os = "macos")'.dependencies]
-# No extra required dependencies - sysinfo is already in core deps
+libproc = "0.14" # Native libproc API for socket enumeration
