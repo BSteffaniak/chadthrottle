@@ -369,7 +369,21 @@ impl DownloadThrottleBackend for IfbTcDownload {
         pid: i32,
         process_name: String,
         limit_bytes_per_sec: u64,
+        traffic_type: crate::process::TrafficType,
     ) -> Result<()> {
+        use crate::process::TrafficType;
+
+        // IFB/TC operates at cgroup level and cannot filter by IP address
+        // Only TrafficType::All is supported
+        if traffic_type != TrafficType::All {
+            return Err(anyhow::anyhow!(
+                "IFB/TC backend does not support traffic type filtering (Internet/Local only). \
+                 Traffic type '{:?}' requested but only 'All' is supported. \
+                 Consider using nftables backend for traffic type filtering (if upload) or accept 'All' traffic throttling.",
+                traffic_type
+            ));
+        }
+
         // Initialize IFB if not already done
         self.init()?;
 

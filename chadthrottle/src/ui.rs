@@ -41,6 +41,9 @@ pub struct AppState {
     pub active_interface_filters: Option<Vec<String>>, // None = show all, Some([]) = show nothing, Some([...]) = filter
     // Traffic categorization view state
     pub traffic_view_mode: TrafficViewMode,
+    // Backend compatibility dialog state
+    pub show_backend_compatibility_dialog: bool,
+    pub backend_compatibility_dialog: Option<BackendCompatibilityDialog>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -83,6 +86,88 @@ pub struct ThrottleDialog {
 pub enum ThrottleField {
     Download,
     Upload,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BackendCompatibilityAction {
+    Cancel,
+    SwitchTemporary(String),      // backend name
+    SwitchAndMakeDefault(String), // backend name
+    ConvertToAll,
+}
+
+pub struct BackendCompatibilityDialog {
+    pub current_backend: String,
+    pub traffic_type: crate::process::TrafficType,
+    pub compatible_backends: Vec<String>,
+    pub selected_action: usize,
+    pub is_upload: bool,
+}
+
+impl BackendCompatibilityDialog {
+    pub fn new(
+        current_backend: String,
+        traffic_type: crate::process::TrafficType,
+        compatible_backends: Vec<String>,
+        is_upload: bool,
+    ) -> Self {
+        Self {
+            current_backend,
+            traffic_type,
+            compatible_backends: compatible_backends.clone(),
+            selected_action: if compatible_backends.is_empty() { 0 } else { 1 },
+            is_upload,
+        }
+    }
+
+    pub fn select_next(&mut self) {
+        let total = self.get_total_options();
+        if total > 0 {
+            self.selected_action = (self.selected_action + 1) % total;
+        }
+    }
+
+    pub fn select_previous(&mut self) {
+        let total = self.get_total_options();
+        if total > 0 {
+            self.selected_action = if self.selected_action == 0 {
+                total - 1
+            } else {
+                self.selected_action - 1
+            };
+        }
+    }
+
+    pub fn get_total_options(&self) -> usize {
+        // Cancel + (2 options per compatible backend) + Convert to All
+        1 + (self.compatible_backends.len() * 2) + 1
+    }
+
+    pub fn get_action(&self) -> BackendCompatibilityAction {
+        if self.selected_action == 0 {
+            return BackendCompatibilityAction::Cancel;
+        }
+
+        let last_option = self.get_total_options() - 1;
+        if self.selected_action == last_option {
+            return BackendCompatibilityAction::ConvertToAll;
+        }
+
+        // Options are: Cancel, [Switch temp, Switch default] * N, Convert to All
+        let backend_option_index = self.selected_action - 1;
+        let backend_index = backend_option_index / 2;
+        let is_make_default = backend_option_index % 2 == 1;
+
+        if let Some(backend_name) = self.compatible_backends.get(backend_index) {
+            if is_make_default {
+                BackendCompatibilityAction::SwitchAndMakeDefault(backend_name.clone())
+            } else {
+                BackendCompatibilityAction::SwitchTemporary(backend_name.clone())
+            }
+        } else {
+            BackendCompatibilityAction::Cancel
+        }
+    }
 }
 
 impl BackendSelector {
@@ -278,6 +363,8 @@ impl AppState {
             selected_interface_name: None,
             active_interface_filters: None, // Show all by default
             traffic_view_mode: TrafficViewMode::All, // Show all traffic by default
+            show_backend_compatibility_dialog: false,
+            backend_compatibility_dialog: None,
         }
     }
 
@@ -718,6 +805,13 @@ pub fn draw_ui_with_backend_info(
             draw_backend_selector(f, f.area(), app, info);
         }
     }
+
+    // Backend compatibility dialog (highest priority - renders on top of everything)
+    if app.show_backend_compatibility_dialog {
+        if let Some(dialog) = &app.backend_compatibility_dialog {
+            draw_backend_compatibility_dialog(f, f.area(), dialog);
+        }
+    }
 }
 
 fn draw_header(f: &mut Frame, area: Rect) {
@@ -1147,6 +1241,95 @@ fn draw_throttle_dialog(f: &mut Frame, area: Rect, app: &AppState) {
     let dialog_area = centered_rect(60, 30, area);
     f.render_widget(Clear, dialog_area);
     f.render_widget(dialog_widget, dialog_area);
+}
+
+fn draw_backend_compatibility_dialog(
+    f: &mut Frame,
+    area: Rect,
+    dialog: &BackendCompatibilityDialog,
+) {
+    // Build option list
+    let mut options = vec!["Cancel - don't apply throttle".to_string()];
+
+    for backend in &dialog.compatible_backends {
+        options.push(format!("Switch to '{}' for this throttle only", backend));
+        options.push(format!("Switch to '{}' and make it default", backend));
+    }
+
+    options.push("Apply as 'All Traffic' instead".to_string());
+
+    // Build styled lines with radio buttons
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(format!(
+            "{} {} backend '{}' does not support '{:?}' traffic filtering.",
+            if dialog.compatible_backends.is_empty() {
+                "No available"
+            } else {
+                "Current"
+            },
+            if dialog.is_upload {
+                "upload"
+            } else {
+                "download"
+            },
+            dialog.current_backend,
+            dialog.traffic_type
+        )),
+        Line::from(""),
+        Line::from(if dialog.compatible_backends.is_empty() {
+            "No backends on this system support IP-based traffic filtering."
+        } else {
+            "Only 'All Traffic' throttling is supported by this backend."
+        }),
+        Line::from(""),
+        Line::from(Span::styled(
+            "What would you like to do?",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+
+    for (i, option) in options.iter().enumerate() {
+        let radio = if i == dialog.selected_action {
+            "●"
+        } else {
+            "○"
+        };
+        let style = if i == dialog.selected_action {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(radio, style),
+            Span::raw(" "),
+            Span::styled(option, style),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "[Enter] Confirm  [↑↓] Navigate  [Esc/q] Cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    // Render paragraph
+    let paragraph = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Backend Incompatibility")
+            .style(Style::default().fg(Color::Red)),
+    );
+
+    let dialog_area = centered_rect(70, 60, area);
+    f.render_widget(Clear, dialog_area);
+    f.render_widget(paragraph, dialog_area);
 }
 
 fn draw_bandwidth_graph(f: &mut Frame, area: Rect, app: &AppState) {

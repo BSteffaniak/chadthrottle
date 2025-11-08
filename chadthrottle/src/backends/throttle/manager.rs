@@ -72,6 +72,11 @@ impl ThrottleManager {
         (self.default_upload.clone(), self.default_download.clone())
     }
 
+    /// Get current default backends (upload, download)
+    pub fn get_default_backends(&self) -> (Option<String>, Option<String>) {
+        self.backend_names()
+    }
+
     /// Set default upload backend for new throttles
     pub fn set_default_upload_backend(&mut self, name: &str) -> Result<()> {
         // Validate backend is available
@@ -223,13 +228,19 @@ impl ThrottleManager {
         if let Some(upload_limit) = limit.upload_limit {
             if let Some(backend_name) = &self.default_upload.clone() {
                 let backend = self.get_or_create_upload_backend(backend_name)?;
-                backend.throttle_upload(pid, process_name.clone(), upload_limit)?;
+                backend.throttle_upload(
+                    pid,
+                    process_name.clone(),
+                    upload_limit,
+                    limit.traffic_type,
+                )?;
                 self.upload_backend_map.insert(pid, backend_name.clone());
                 applied_any = true;
                 log::info!(
-                    "Applied upload throttle to PID {} using {} backend",
+                    "Applied upload throttle to PID {} using {} backend (traffic type: {:?})",
                     pid,
-                    backend_name
+                    backend_name,
+                    limit.traffic_type
                 );
             } else {
                 log::error!("⚠️  Upload throttling requested but no default backend set");
@@ -241,13 +252,19 @@ impl ThrottleManager {
         if let Some(download_limit) = limit.download_limit {
             if let Some(backend_name) = &self.default_download.clone() {
                 let backend = self.get_or_create_download_backend(backend_name)?;
-                backend.throttle_download(pid, process_name.clone(), download_limit)?;
+                backend.throttle_download(
+                    pid,
+                    process_name.clone(),
+                    download_limit,
+                    limit.traffic_type,
+                )?;
                 self.download_backend_map.insert(pid, backend_name.clone());
                 applied_any = true;
                 log::info!(
-                    "Applied download throttle to PID {} using {} backend",
+                    "Applied download throttle to PID {} using {} backend (traffic type: {:?})",
                     pid,
-                    backend_name
+                    backend_name,
+                    limit.traffic_type
                 );
             } else {
                 log::error!("⚠️  Download throttling requested but no default backend set");
@@ -420,6 +437,56 @@ impl ThrottleManager {
         }
 
         Ok(())
+    }
+
+    /// Check if current upload backend supports a specific traffic type
+    pub fn current_upload_backend_supports(
+        &self,
+        traffic_type: crate::process::TrafficType,
+    ) -> bool {
+        if let Some(backend_name) = &self.default_upload {
+            if let Some(backend) = self.upload_backends.get(backend_name) {
+                return backend.supports_traffic_type(traffic_type);
+            }
+        }
+        false
+    }
+
+    /// Check if current download backend supports a specific traffic type
+    pub fn current_download_backend_supports(
+        &self,
+        traffic_type: crate::process::TrafficType,
+    ) -> bool {
+        if let Some(backend_name) = &self.default_download {
+            if let Some(backend) = self.download_backends.get(backend_name) {
+                return backend.supports_traffic_type(traffic_type);
+            }
+        }
+        false
+    }
+
+    /// Find all available upload backends that support the given traffic type
+    pub fn find_compatible_upload_backends(
+        &self,
+        traffic_type: crate::process::TrafficType,
+    ) -> Vec<String> {
+        self.upload_backends
+            .iter()
+            .filter(|(_, backend)| backend.supports_traffic_type(traffic_type))
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    /// Find all available download backends that support the given traffic type
+    pub fn find_compatible_download_backends(
+        &self,
+        traffic_type: crate::process::TrafficType,
+    ) -> Vec<String> {
+        self.download_backends
+            .iter()
+            .filter(|(_, backend)| backend.supports_traffic_type(traffic_type))
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 }
 

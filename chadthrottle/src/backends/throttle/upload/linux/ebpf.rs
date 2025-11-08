@@ -225,7 +225,21 @@ impl UploadThrottleBackend for EbpfUpload {
         pid: i32,
         _process_name: String,
         limit_bytes_per_sec: u64,
+        traffic_type: crate::process::TrafficType,
     ) -> Result<()> {
+        use crate::process::TrafficType;
+
+        // eBPF backend currently only supports TrafficType::All
+        // Full IP filtering in eBPF would require modifying the BPF program
+        if traffic_type != TrafficType::All {
+            return Err(anyhow::anyhow!(
+                "eBPF backend does not yet support traffic type filtering (Internet/Local only). \
+                 Traffic type '{:?}' requested but only 'All' is supported. \
+                 Use nftables backend for traffic type filtering.",
+                traffic_type
+            ));
+        }
+
         #[cfg(feature = "throttle-ebpf")]
         {
             self.ensure_loaded()?;

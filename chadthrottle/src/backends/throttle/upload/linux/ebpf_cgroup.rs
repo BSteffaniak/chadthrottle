@@ -15,10 +15,10 @@
 // - Implement rate limiting logic in eBPF
 // - Use BPF maps for per-cgroup rate limits
 
-use anyhow::{Result, anyhow};
-use std::collections::HashMap;
-use crate::backends::{BackendCapabilities, BackendPriority};
 use crate::backends::throttle::UploadThrottleBackend;
+use crate::backends::{BackendCapabilities, BackendPriority};
+use anyhow::{anyhow, Result};
+use std::collections::HashMap;
 
 /// eBPF cgroup-based upload throttling (STUB)
 pub struct EbpfCgroupUpload {
@@ -35,20 +35,20 @@ impl UploadThrottleBackend for EbpfCgroupUpload {
     fn name(&self) -> &'static str {
         "ebpf_cgroup_upload"
     }
-    
+
     fn priority(&self) -> BackendPriority {
-        BackendPriority::Best  // Highest priority when available
+        BackendPriority::Best // Highest priority when available
     }
-    
+
     fn is_available() -> bool {
         // TODO: Check for:
         // - Kernel version >= 4.10
         // - BPF syscall availability
         // - cgroup2 mounted
         // - CAP_SYS_ADMIN capability
-        false  // Not implemented yet
+        false // Not implemented yet
     }
-    
+
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
             ipv4_support: true,
@@ -57,27 +57,33 @@ impl UploadThrottleBackend for EbpfCgroupUpload {
             per_connection: false,
         }
     }
-    
+
     fn init(&mut self) -> Result<()> {
         Err(anyhow!("Not implemented"))
     }
-    
-    fn throttle_upload(&mut self, _pid: i32, _process_name: String, _limit_bytes_per_sec: u64) -> Result<()> {
+
+    fn throttle_upload(
+        &mut self,
+        _pid: i32,
+        _process_name: String,
+        _limit_bytes_per_sec: u64,
+        _traffic_type: crate::process::TrafficType,
+    ) -> Result<()> {
         Err(anyhow!("Not implemented"))
     }
-    
+
     fn remove_upload_throttle(&mut self, _pid: i32) -> Result<()> {
         Err(anyhow!("Not implemented"))
     }
-    
+
     fn get_upload_throttle(&self, pid: i32) -> Option<u64> {
         self.active_throttles.get(&pid).copied()
     }
-    
+
     fn get_all_throttles(&self) -> HashMap<i32, u64> {
         self.active_throttles.clone()
     }
-    
+
     fn cleanup(&mut self) -> Result<()> {
         Err(anyhow!("Not implemented"))
     }

@@ -619,7 +619,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                 // If backend selector is shown, handle navigation
                 if app.show_backend_selector {
                     match key.code {
-                        KeyCode::Esc => {
+                        KeyCode::Esc | KeyCode::Char('q') => {
                             app.show_backend_selector = false;
                         }
                         KeyCode::Tab => {
@@ -760,10 +760,185 @@ async fn run_app<B: ratatui::backend::Backend>(
                     continue;
                 }
 
+                // Handle backend compatibility dialog (highest priority)
+                if app.show_backend_compatibility_dialog {
+                    match key.code {
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            if let Some(dialog) = &mut app.backend_compatibility_dialog {
+                                dialog.select_previous();
+                            }
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            if let Some(dialog) = &mut app.backend_compatibility_dialog {
+                                dialog.select_next();
+                            }
+                        }
+                        KeyCode::Enter => {
+                            // Process the selected action
+                            if let Some(dialog) = &app.backend_compatibility_dialog {
+                                let action = dialog.get_action();
+                                let is_upload = dialog.is_upload;
+
+                                // Get throttle info before we consume dialog
+                                let (download, upload) =
+                                    app.throttle_dialog.parse_limits().unwrap_or((None, None));
+                                let pid = app.throttle_dialog.target_pid;
+                                let process_name = app.throttle_dialog.target_name.clone();
+                                let traffic_type = app.throttle_dialog.get_traffic_type();
+
+                                match &action {
+                                    ui::BackendCompatibilityAction::Cancel => {
+                                        // Just close the modal, keep throttle dialog open
+                                        app.show_backend_compatibility_dialog = false;
+                                        app.backend_compatibility_dialog = None;
+                                    }
+                                    ui::BackendCompatibilityAction::SwitchTemporary(
+                                        backend_name,
+                                    )
+                                    | ui::BackendCompatibilityAction::SwitchAndMakeDefault(
+                                        backend_name,
+                                    ) => {
+                                        let make_default = matches!(
+                                            &action,
+                                            ui::BackendCompatibilityAction::SwitchAndMakeDefault(_)
+                                        );
+
+                                        // Store original backend
+                                        let (original_upload, original_download) =
+                                            throttle_manager.get_default_backends();
+
+                                        // Switch to compatible backend
+                                        let switch_result = if is_upload {
+                                            throttle_manager
+                                                .set_default_upload_backend(&backend_name)
+                                        } else {
+                                            throttle_manager
+                                                .set_default_download_backend(&backend_name)
+                                        };
+
+                                        if let Err(e) = switch_result {
+                                            app.status_message =
+                                                format!("Failed to switch backend: {}", e);
+                                            app.show_backend_compatibility_dialog = false;
+                                            app.backend_compatibility_dialog = None;
+                                            continue;
+                                        }
+
+                                        // Apply throttle
+                                        if let (Some(pid), Some(name)) = (pid, process_name) {
+                                            let limit = crate::process::ThrottleLimit {
+                                                download_limit: download,
+                                                upload_limit: upload,
+                                                traffic_type,
+                                            };
+
+                                            match throttle_manager.throttle_process(
+                                                pid,
+                                                name.clone(),
+                                                &limit,
+                                            ) {
+                                                Ok(_) => {
+                                                    app.status_message = format!(
+                                                        "Throttle applied to {} using {} backend{}",
+                                                        name,
+                                                        backend_name,
+                                                        if make_default {
+                                                            " (now default)"
+                                                        } else {
+                                                            ""
+                                                        }
+                                                    );
+
+                                                    // Update config if making default
+                                                    if make_default {
+                                                        if is_upload {
+                                                            config.preferred_upload_backend =
+                                                                Some(backend_name.clone());
+                                                        } else {
+                                                            config.preferred_download_backend =
+                                                                Some(backend_name.clone());
+                                                        }
+                                                        let _ = config.save();
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    app.status_message =
+                                                        format!("Failed to apply throttle: {}", e);
+                                                }
+                                            }
+                                        }
+
+                                        // Switch back if not making default
+                                        if !make_default {
+                                            if is_upload {
+                                                if let Some(orig) = original_upload {
+                                                    let _ = throttle_manager
+                                                        .set_default_upload_backend(&orig);
+                                                }
+                                            } else {
+                                                if let Some(orig) = original_download {
+                                                    let _ = throttle_manager
+                                                        .set_default_download_backend(&orig);
+                                                }
+                                            }
+                                        }
+
+                                        // Close both dialogs
+                                        app.show_backend_compatibility_dialog = false;
+                                        app.backend_compatibility_dialog = None;
+                                        app.show_throttle_dialog = false;
+                                        app.throttle_dialog.reset();
+                                    }
+                                    ui::BackendCompatibilityAction::ConvertToAll => {
+                                        // Apply throttle with All traffic type
+                                        if let (Some(pid), Some(name)) = (pid, process_name) {
+                                            let limit = crate::process::ThrottleLimit {
+                                                download_limit: download,
+                                                upload_limit: upload,
+                                                traffic_type: crate::process::TrafficType::All,
+                                            };
+
+                                            match throttle_manager.throttle_process(
+                                                pid,
+                                                name.clone(),
+                                                &limit,
+                                            ) {
+                                                Ok(_) => {
+                                                    app.status_message = format!(
+                                                        "Throttle applied to {} as 'All Traffic'",
+                                                        name
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    app.status_message =
+                                                        format!("Failed to apply throttle: {}", e);
+                                                }
+                                            }
+                                        }
+
+                                        // Close both dialogs
+                                        app.show_backend_compatibility_dialog = false;
+                                        app.backend_compatibility_dialog = None;
+                                        app.show_throttle_dialog = false;
+                                        app.throttle_dialog.reset();
+                                    }
+                                }
+                            }
+                        }
+                        KeyCode::Esc | KeyCode::Char('q') => {
+                            // Cancel - close modal, keep throttle dialog open
+                            app.show_backend_compatibility_dialog = false;
+                            app.backend_compatibility_dialog = None;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 // Handle throttle dialog input
                 if app.show_throttle_dialog {
                     match key.code {
-                        KeyCode::Esc => {
+                        KeyCode::Esc | KeyCode::Char('q') => {
                             app.show_throttle_dialog = false;
                             app.throttle_dialog.reset();
                         }
@@ -788,9 +963,53 @@ async fn run_app<B: ratatui::backend::Backend>(
                                     let limit = crate::process::ThrottleLimit {
                                         download_limit: download,
                                         upload_limit: upload,
-                                        traffic_type: app.throttle_dialog.get_traffic_type(), // Use selected traffic type
+                                        traffic_type: app.throttle_dialog.get_traffic_type(),
                                     };
 
+                                    // Check if backend compatibility dialog is needed
+                                    let needs_upload_compat = limit.upload_limit.is_some()
+                                        && !throttle_manager
+                                            .current_upload_backend_supports(limit.traffic_type);
+                                    let needs_download_compat = limit.download_limit.is_some()
+                                        && !throttle_manager
+                                            .current_download_backend_supports(limit.traffic_type);
+
+                                    if needs_upload_compat {
+                                        // Show upload backend compatibility dialog
+                                        let compatible = throttle_manager
+                                            .find_compatible_upload_backends(limit.traffic_type);
+                                        let (current_backend, _) =
+                                            throttle_manager.get_default_backends();
+                                        app.backend_compatibility_dialog =
+                                            Some(ui::BackendCompatibilityDialog::new(
+                                                current_backend.unwrap_or("none".to_string()),
+                                                limit.traffic_type,
+                                                compatible,
+                                                true, // is_upload
+                                            ));
+                                        app.show_backend_compatibility_dialog = true;
+                                        // DON'T close throttle dialog - keep it in background
+                                        continue; // Skip applying throttle for now
+                                    } else if needs_download_compat {
+                                        // Show download backend compatibility dialog
+                                        let compatible = throttle_manager
+                                            .find_compatible_download_backends(limit.traffic_type);
+                                        let (_, current_backend) =
+                                            throttle_manager.get_default_backends();
+                                        app.backend_compatibility_dialog =
+                                            Some(ui::BackendCompatibilityDialog::new(
+                                                current_backend.unwrap_or("none".to_string()),
+                                                limit.traffic_type,
+                                                compatible,
+                                                false, // is_upload=false
+                                            ));
+                                        app.show_backend_compatibility_dialog = true;
+                                        // DON'T close throttle dialog - keep it in background
+                                        continue; // Skip applying throttle for now
+                                    }
+
+                                    // No compatibility issues or no compatible backends available
+                                    // Proceed with throttle attempt
                                     match throttle_manager.throttle_process(
                                         pid,
                                         process_name.clone(),

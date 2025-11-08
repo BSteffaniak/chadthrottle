@@ -136,6 +136,7 @@ impl DownloadThrottleBackend for NftablesDownload {
         pid: i32,
         process_name: String,
         limit_bytes_per_sec: u64,
+        _traffic_type: crate::process::TrafficType,
     ) -> Result<()> {
         self.ensure_initialized()?;
 

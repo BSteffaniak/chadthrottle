@@ -57,6 +57,7 @@ pub trait UploadThrottleBackend: Send + Sync {
         pid: i32,
         process_name: String,
         limit_bytes_per_sec: u64,
+        traffic_type: crate::process::TrafficType,
     ) -> Result<()>;
 
     /// Remove upload throttle from a process
@@ -74,6 +75,13 @@ pub trait UploadThrottleBackend: Send + Sync {
     /// Get statistics for a throttled process (if supported by backend)
     fn get_stats(&self, _pid: i32) -> Option<BackendStats> {
         None // Default implementation returns None for backends that don't support stats
+    }
+
+    /// Check if this backend supports a specific traffic type
+    /// Default implementation: only supports TrafficType::All
+    fn supports_traffic_type(&self, traffic_type: crate::process::TrafficType) -> bool {
+        use crate::process::TrafficType;
+        traffic_type == TrafficType::All
     }
 }
 
@@ -102,6 +110,7 @@ pub trait DownloadThrottleBackend: Send + Sync {
         pid: i32,
         process_name: String,
         limit_bytes_per_sec: u64,
+        traffic_type: crate::process::TrafficType,
     ) -> Result<()>;
 
     /// Remove download throttle from a process
@@ -125,6 +134,13 @@ pub trait DownloadThrottleBackend: Send + Sync {
     /// Default implementation does nothing - only eBPF backend implements this
     fn log_diagnostics(&mut self, _pid: i32) -> Result<()> {
         Ok(())
+    }
+
+    /// Check if this backend supports a specific traffic type
+    /// Default implementation: only supports TrafficType::All
+    fn supports_traffic_type(&self, traffic_type: crate::process::TrafficType) -> bool {
+        use crate::process::TrafficType;
+        traffic_type == TrafficType::All
     }
 }
 

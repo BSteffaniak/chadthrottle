@@ -99,6 +99,7 @@ impl UploadThrottleBackend for NftablesUpload {
         pid: i32,
         process_name: String,
         limit_bytes_per_sec: u64,
+        traffic_type: crate::process::TrafficType,
     ) -> Result<()> {
         self.ensure_initialized()?;
 
@@ -106,8 +107,13 @@ impl UploadThrottleBackend for NftablesUpload {
         let backend = self.get_cgroup_backend_mut()?;
         let cgroup_handle = backend.create_cgroup(pid, &process_name)?;
 
-        // Add nftables rate limit rule using backend's filter expression
-        add_cgroup_rate_limit_with_handle(&cgroup_handle, limit_bytes_per_sec, Direction::Upload)?;
+        // Add nftables rate limit rule with traffic type filtering
+        add_cgroup_rate_limit_with_handle_and_traffic_type(
+            &cgroup_handle,
+            limit_bytes_per_sec,
+            Direction::Upload,
+            traffic_type,
+        )?;
 
         // Track throttle
         self.active_throttles.insert(
@@ -159,6 +165,10 @@ impl UploadThrottleBackend for NftablesUpload {
         let _ = cleanup_nft_table();
 
         Ok(())
+    }
+
+    fn supports_traffic_type(&self, _traffic_type: crate::process::TrafficType) -> bool {
+        true // nftables supports all traffic types (All, Internet, Local)
     }
 }
 

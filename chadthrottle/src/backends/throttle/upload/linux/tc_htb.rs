@@ -99,7 +99,21 @@ impl UploadThrottleBackend for TcHtbUpload {
         pid: i32,
         process_name: String,
         limit_bytes_per_sec: u64,
+        traffic_type: crate::process::TrafficType,
     ) -> Result<()> {
+        use crate::process::TrafficType;
+
+        // TC HTB operates at cgroup level and cannot filter by IP address
+        // Only TrafficType::All is supported
+        if traffic_type != TrafficType::All {
+            return Err(anyhow::anyhow!(
+                "TC HTB backend does not support traffic type filtering (Internet/Local only). \
+                 Traffic type '{:?}' requested but only 'All' is supported. \
+                 Use nftables backend for traffic type filtering.",
+                traffic_type
+            ));
+        }
+
         // Initialize if not already done
         self.init()?;
 

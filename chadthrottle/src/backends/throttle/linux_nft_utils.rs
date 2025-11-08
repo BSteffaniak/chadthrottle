@@ -135,6 +135,75 @@ pub fn add_cgroup_rate_limit(
     Ok(())
 }
 
+/// Add rate limit rule for a cgroup with traffic type filtering
+pub fn add_cgroup_rate_limit_with_traffic_type(
+    cgroup_path: &str,
+    rate_bytes_per_sec: u64,
+    direction: Direction,
+    traffic_type: crate::process::TrafficType,
+) -> Result<()> {
+    use crate::process::TrafficType;
+
+    let chain = match direction {
+        Direction::Upload => NFT_CHAIN_OUTPUT,
+        Direction::Download => NFT_CHAIN_INPUT,
+    };
+
+    // Build IP filter based on traffic type
+    let ip_filter = match traffic_type {
+        TrafficType::All => {
+            // No IP filtering - apply to all traffic
+            String::new()
+        }
+        TrafficType::Internet => {
+            // Only throttle non-local IPs (internet traffic)
+            // Exclude RFC1918 private ranges, loopback, link-local, etc.
+            format!(
+                "ip daddr != {{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16, 224.0.0.0/4, 240.0.0.0/4 }} \
+                 ip6 daddr != {{ ::1, fe80::/10, fc00::/7, ff00::/8 }} "
+            )
+        }
+        TrafficType::Local => {
+            // Only throttle local network IPs
+            format!("ip daddr {{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 }} ")
+        }
+    };
+
+    // Create rule with rate limit and optional IP filtering
+    let rule = if ip_filter.is_empty() {
+        format!(
+            "socket cgroupv2 level 1 \"{}\" limit rate {} bytes/second",
+            cgroup_path, rate_bytes_per_sec
+        )
+    } else {
+        format!(
+            "socket cgroupv2 level 1 \"{}\" {} limit rate {} bytes/second",
+            cgroup_path, ip_filter, rate_bytes_per_sec
+        )
+    };
+
+    let status = Command::new("nft")
+        .args(&["add", "rule", "inet", NFT_TABLE, chain, &rule])
+        .status()
+        .context("Failed to add nftables rate limit rule")?;
+
+    if !status.success() {
+        return Err(anyhow!(
+            "Failed to add rate limit rule for cgroup {} with traffic type {:?}",
+            cgroup_path,
+            traffic_type
+        ));
+    }
+
+    log::info!(
+        "Added nftables rate limit: {} bytes/sec for {} (traffic type: {:?})",
+        rate_bytes_per_sec,
+        cgroup_path,
+        traffic_type
+    );
+    Ok(())
+}
+
 /// Remove all rules for a cgroup
 pub fn remove_cgroup_rules(cgroup_path: &str, direction: Direction) -> Result<()> {
     let chain = match direction {
@@ -261,6 +330,86 @@ pub fn add_cgroup_rate_limit_with_handle(
         rate_bytes_per_sec,
         handle.pid,
         handle.backend_type
+    );
+    Ok(())
+}
+
+/// Add rate limit rule for a cgroup with traffic type filtering using CgroupHandle
+pub fn add_cgroup_rate_limit_with_handle_and_traffic_type(
+    handle: &CgroupHandle,
+    rate_bytes_per_sec: u64,
+    direction: Direction,
+    traffic_type: crate::process::TrafficType,
+) -> Result<()> {
+    use crate::process::TrafficType;
+
+    let chain = match direction {
+        Direction::Upload => NFT_CHAIN_OUTPUT,
+        Direction::Download => NFT_CHAIN_INPUT,
+    };
+
+    // Build IP filter based on traffic type
+    let ip_filter = match traffic_type {
+        TrafficType::All => {
+            // No IP filtering - apply to all traffic
+            String::new()
+        }
+        TrafficType::Internet => {
+            // Only throttle non-local IPs (internet traffic)
+            // Exclude RFC1918 private ranges, loopback, link-local, multicast, reserved
+            format!(
+                "ip daddr != {{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16, 224.0.0.0/4, 240.0.0.0/4 }} \
+                 ip6 daddr != {{ ::1, fe80::/10, fc00::/7, ff00::/8 }} "
+            )
+        }
+        TrafficType::Local => {
+            // Only throttle local network IPs (RFC1918 + link-local)
+            format!("ip daddr {{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 }} ")
+        }
+    };
+
+    // Build rule based on cgroup backend type
+    let cgroup_match = match handle.backend_type {
+        CgroupBackendType::V2Nftables | CgroupBackendType::V2Ebpf => {
+            format!("socket cgroupv2 level 0 \"{}\"", handle.identifier)
+        }
+        CgroupBackendType::V1 => {
+            format!("meta cgroup {}", handle.identifier)
+        }
+    };
+
+    // Combine cgroup match, optional IP filter, and rate limit
+    let rule = if ip_filter.is_empty() {
+        format!(
+            "{} limit rate over {} bytes/second drop",
+            cgroup_match, rate_bytes_per_sec
+        )
+    } else {
+        format!(
+            "{} {} limit rate over {} bytes/second drop",
+            cgroup_match, ip_filter, rate_bytes_per_sec
+        )
+    };
+
+    let status = Command::new("nft")
+        .args(&["add", "rule", "inet", NFT_TABLE, chain, &rule])
+        .status()
+        .context("Failed to add nftables rate limit rule with traffic type filter")?;
+
+    if !status.success() {
+        return Err(anyhow!(
+            "Failed to add rate limit rule for cgroup (PID {}) with traffic type {:?}",
+            handle.pid,
+            traffic_type
+        ));
+    }
+
+    log::info!(
+        "Added nftables rate limit: {} bytes/sec for PID {} (backend: {}, traffic type: {:?})",
+        rate_bytes_per_sec,
+        handle.pid,
+        handle.backend_type,
+        traffic_type
     );
     Ok(())
 }
