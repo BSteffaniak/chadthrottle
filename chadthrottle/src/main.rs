@@ -471,6 +471,16 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Load traffic view mode from config
+    if let Some(traffic_type) = config.traffic_view_mode {
+        app.traffic_view_mode = match traffic_type {
+            crate::process::TrafficType::All => ui::TrafficViewMode::All,
+            crate::process::TrafficType::Internet => ui::TrafficViewMode::Internet,
+            crate::process::TrafficType::Local => ui::TrafficViewMode::Local,
+        };
+        log::info!("Loaded traffic view mode: {:?}", app.traffic_view_mode);
+    }
+
     // Determine backend preferences: CLI args override config file preferences
     let upload_preference = args
         .upload_backend
@@ -1191,6 +1201,16 @@ async fn run_app<B: ratatui::backend::Backend>(
                     KeyCode::Char('l') => {
                         app.toggle_traffic_view_mode();
                         // status_message is set by toggle_traffic_view_mode()
+
+                        // Save traffic view mode to config
+                        config.traffic_view_mode = Some(match app.traffic_view_mode {
+                            ui::TrafficViewMode::All => crate::process::TrafficType::All,
+                            ui::TrafficViewMode::Internet => crate::process::TrafficType::Internet,
+                            ui::TrafficViewMode::Local => crate::process::TrafficType::Local,
+                        });
+                        if let Err(e) = config.save() {
+                            log::warn!("Failed to save traffic view mode to config: {}", e);
+                        }
                     }
                     KeyCode::Enter => {
                         if app.view_mode == ui::ViewMode::InterfaceList {

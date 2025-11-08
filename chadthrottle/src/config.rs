@@ -43,6 +43,10 @@ pub struct Config {
     /// Interface filter: None = show all, Some([]) = show nothing, Some([...]) = filter to these
     #[serde(default)]
     pub filtered_interfaces: Option<Vec<String>>,
+
+    /// Traffic view mode: All, Internet, or Local
+    #[serde(default)]
+    pub traffic_view_mode: Option<crate::process::TrafficType>,
 }
 
 fn default_auto_restore() -> bool {
@@ -58,6 +62,7 @@ impl Default for Config {
             preferred_download_backend: None,
             preferred_socket_mapper: None,
             filtered_interfaces: None, // Show all by default
+            traffic_view_mode: None,   // Use default (All) if not set
         }
     }
 }
