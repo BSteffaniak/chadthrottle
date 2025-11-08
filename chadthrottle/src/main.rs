@@ -616,132 +616,98 @@ async fn run_app<B: ratatui::backend::Backend>(
                     continue;
                 }
 
-                // If backend selector is shown, handle navigation
-                if app.show_backend_selector {
-                    match key.code {
-                        KeyCode::Esc | KeyCode::Char('q') => {
-                            app.show_backend_selector = false;
-                        }
-                        KeyCode::Tab => {
-                            app.backend_selector.toggle_mode();
-                            // Repopulate with backends for new mode
-                            let mut backend_info = throttle_manager.get_backend_info(
-                                config.preferred_upload_backend.clone(),
-                                config.preferred_download_backend.clone(),
-                            );
-                            // Populate socket mapper info
-                            {
-                                use crate::backends::process::socket_mapper::detect_socket_mappers;
-                                let socket_mappers = detect_socket_mappers();
-                                backend_info.available_socket_mappers = socket_mappers
-                                    .iter()
-                                    .map(|sm| (sm.name.to_string(), sm.priority, sm.available))
-                                    .collect();
-                                let (active_sm, capabilities) = monitor.get_socket_mapper_info();
-                                backend_info.active_socket_mapper = Some(active_sm.to_string());
-                                backend_info.socket_mapper_capabilities =
-                                    Some(capabilities.clone());
-                                backend_info.preferred_socket_mapper =
-                                    config.preferred_socket_mapper.clone();
-                            }
-                            app.backend_selector.populate(&backend_info);
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            app.backend_selector.select_previous();
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            app.backend_selector.select_next();
-                        }
-                        KeyCode::Enter => {
-                            // Apply backend selection
-                            if let Some(backend_name) = app.backend_selector.get_selected() {
-                                let result = match app.backend_selector.mode {
-                                    ui::BackendSelectorMode::Upload => throttle_manager
-                                        .set_default_upload_backend(&backend_name)
-                                        .and_then(|_| {
-                                            config.preferred_upload_backend =
-                                                Some(backend_name.clone());
-                                            config.save()
-                                        }),
-                                    ui::BackendSelectorMode::Download => throttle_manager
-                                        .set_default_download_backend(&backend_name)
-                                        .and_then(|_| {
-                                            config.preferred_download_backend =
-                                                Some(backend_name.clone());
-                                            config.save()
-                                        }),
-                                    ui::BackendSelectorMode::SocketMapper => {
-                                        // Switch socket mapper backend by rebuilding NetworkMonitor
-                                        match NetworkMonitor::with_socket_mapper(Some(
-                                            &backend_name,
-                                        )) {
-                                            Ok(new_monitor) => {
-                                                *monitor = new_monitor;
-                                                config.preferred_socket_mapper =
-                                                    Some(backend_name.clone());
-                                                config.save()
-                                            }
-                                            Err(e) => Err(e),
-                                        }
-                                    }
-                                };
-
-                                match result {
-                                    Ok(_) => {
-                                        let backend_type = match app.backend_selector.mode {
-                                            ui::BackendSelectorMode::Upload => "Upload backend",
-                                            ui::BackendSelectorMode::Download => "Download backend",
-                                            ui::BackendSelectorMode::SocketMapper => {
-                                                "Socket mapper"
-                                            }
-                                        };
-                                        app.status_message = format!(
-                                            "✅ {} switched to '{}'",
-                                            backend_type, backend_name
-                                        );
-                                    }
-                                    Err(e) => {
-                                        app.status_message =
-                                            format!("Failed to set backend: {}", e);
-                                    }
-                                }
-                            }
-                            app.show_backend_selector = false;
-                        }
-                        _ => {}
-                    }
-                    continue;
-                }
-
                 // If backend info is shown, Enter switches to selector, Esc/q closes it
                 if app.show_backend_info {
                     match key.code {
-                        KeyCode::Enter => {
-                            // Switch to backend selector
-                            app.show_backend_info = false;
-                            app.show_backend_selector = true;
-                            let mut backend_info = throttle_manager.get_backend_info(
-                                config.preferred_upload_backend.clone(),
-                                config.preferred_download_backend.clone(),
-                            );
-                            // Populate socket mapper info
-                            {
-                                use crate::backends::process::socket_mapper::detect_socket_mappers;
-                                let socket_mappers = detect_socket_mappers();
-                                backend_info.available_socket_mappers = socket_mappers
-                                    .iter()
-                                    .map(|sm| (sm.name.to_string(), sm.priority, sm.available))
-                                    .collect();
-                                let (active_sm, capabilities) = monitor.get_socket_mapper_info();
-                                backend_info.active_socket_mapper = Some(active_sm.to_string());
-                                backend_info.socket_mapper_capabilities =
-                                    Some(capabilities.clone());
-                                backend_info.preferred_socket_mapper =
-                                    config.preferred_socket_mapper.clone();
+                        KeyCode::Char(' ') => {
+                            // Space bar - immediately apply backend selection
+                            if let Some((name, group)) = app.get_selected_backend() {
+                                match group {
+                                    ui::BackendGroup::SocketMapper => {
+                                        // Only switch if different from current
+                                        let (current_sm, _) = monitor.get_socket_mapper_info();
+                                        if name != current_sm {
+                                            match NetworkMonitor::with_socket_mapper(Some(name)) {
+                                                Ok(new_monitor) => {
+                                                    *monitor = new_monitor;
+                                                    config.preferred_socket_mapper =
+                                                        Some(name.to_string());
+                                                    let _ = config.save();
+                                                    app.status_message =
+                                                        format!("✅ Socket mapper → {}", name);
+                                                }
+                                                Err(e) => {
+                                                    app.status_message =
+                                                        format!("❌ Socket mapper: {}", e);
+                                                }
+                                            }
+                                        } else {
+                                            app.status_message =
+                                                format!("'{}' is already active", name);
+                                        }
+                                    }
+                                    ui::BackendGroup::Upload => {
+                                        match throttle_manager.set_default_upload_backend(name) {
+                                            Ok(_) => {
+                                                config.preferred_upload_backend =
+                                                    Some(name.to_string());
+                                                let _ = config.save();
+                                                app.status_message =
+                                                    format!("✅ Upload backend → {}", name);
+                                            }
+                                            Err(e) => {
+                                                app.status_message =
+                                                    format!("❌ Upload backend: {}", e);
+                                            }
+                                        }
+                                    }
+                                    ui::BackendGroup::Download => {
+                                        match throttle_manager.set_default_download_backend(name) {
+                                            Ok(_) => {
+                                                config.preferred_download_backend =
+                                                    Some(name.to_string());
+                                                let _ = config.save();
+                                                app.status_message =
+                                                    format!("✅ Download backend → {}", name);
+                                            }
+                                            Err(e) => {
+                                                app.status_message =
+                                                    format!("❌ Download backend: {}", e);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Rebuild backend items to reflect new state
+                                let mut backend_info = throttle_manager.get_backend_info(
+                                    config.preferred_upload_backend.clone(),
+                                    config.preferred_download_backend.clone(),
+                                );
+                                {
+                                    use crate::backends::process::socket_mapper::detect_socket_mappers;
+                                    let socket_mappers = detect_socket_mappers();
+                                    backend_info.available_socket_mappers = socket_mappers
+                                        .iter()
+                                        .map(|sm| (sm.name.to_string(), sm.priority, sm.available))
+                                        .collect();
+                                    let (active_sm, capabilities) =
+                                        monitor.get_socket_mapper_info();
+                                    backend_info.active_socket_mapper = Some(active_sm.to_string());
+                                    backend_info.socket_mapper_capabilities =
+                                        Some(capabilities.clone());
+                                    backend_info.preferred_socket_mapper =
+                                        config.preferred_socket_mapper.clone();
+                                }
+                                app.build_backend_items(&backend_info);
                             }
-                            app.backend_selector.populate(&backend_info);
                         }
-                        KeyCode::Char('b') | KeyCode::Char('q') | KeyCode::Esc => {
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            app.select_previous_backend();
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            app.select_next_backend();
+                        }
+                        KeyCode::Enter | KeyCode::Char('b') | KeyCode::Char('q') | KeyCode::Esc => {
                             app.show_backend_info = false;
                         }
                         _ => {}
@@ -1059,7 +1025,32 @@ async fn run_app<B: ratatui::backend::Backend>(
                         app.show_help = true;
                     }
                     KeyCode::Char('b') => {
-                        app.show_backend_info = !app.show_backend_info;
+                        if !app.show_backend_info {
+                            // Build backend items when opening modal
+                            let mut backend_info = throttle_manager.get_backend_info(
+                                config.preferred_upload_backend.clone(),
+                                config.preferred_download_backend.clone(),
+                            );
+                            // Populate socket mapper info
+                            {
+                                use crate::backends::process::socket_mapper::detect_socket_mappers;
+                                let socket_mappers = detect_socket_mappers();
+                                backend_info.available_socket_mappers = socket_mappers
+                                    .iter()
+                                    .map(|sm| (sm.name.to_string(), sm.priority, sm.available))
+                                    .collect();
+                                let (active_sm, capabilities) = monitor.get_socket_mapper_info();
+                                backend_info.active_socket_mapper = Some(active_sm.to_string());
+                                backend_info.socket_mapper_capabilities =
+                                    Some(capabilities.clone());
+                                backend_info.preferred_socket_mapper =
+                                    config.preferred_socket_mapper.clone();
+                            }
+                            app.build_backend_items(&backend_info);
+                            app.show_backend_info = true;
+                        } else {
+                            app.show_backend_info = false;
+                        }
                     }
                     KeyCode::Char('f') => {
                         app.toggle_sort_freeze();

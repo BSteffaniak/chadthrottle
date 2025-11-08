@@ -23,9 +23,7 @@ pub struct AppState {
     pub show_help: bool,
     pub show_throttle_dialog: bool,
     pub show_backend_info: bool,
-    pub show_backend_selector: bool,
     pub throttle_dialog: ThrottleDialog,
-    pub backend_selector: BackendSelector,
     pub status_message: String,
     pub history: HistoryTracker,
     pub show_graph: bool,
@@ -44,6 +42,9 @@ pub struct AppState {
     // Backend compatibility dialog state
     pub show_backend_compatibility_dialog: bool,
     pub backend_compatibility_dialog: Option<BackendCompatibilityDialog>,
+    // Backend selection state (for interactive backend modal)
+    pub backend_items: Vec<BackendSelectorItem>,
+    pub backend_selected_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -60,17 +61,23 @@ pub enum TrafficViewMode {
     Local,    // Show only local network traffic
 }
 
-pub struct BackendSelector {
-    pub mode: BackendSelectorMode,
-    pub selected_index: usize,
-    pub available_backends: Vec<(String, BackendPriority, bool)>, // (name, priority, available)
+#[derive(Debug, Clone, PartialEq)]
+pub enum BackendSelectorItem {
+    GroupHeader(BackendGroup),
+    Backend {
+        name: String,
+        group: BackendGroup,
+        priority: BackendPriority,
+        available: bool,
+        is_current_default: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum BackendSelectorMode {
+pub enum BackendGroup {
+    SocketMapper,
     Upload,
     Download,
-    SocketMapper,
 }
 
 pub struct ThrottleDialog {
@@ -170,90 +177,6 @@ impl BackendCompatibilityDialog {
     }
 }
 
-impl BackendSelector {
-    pub fn new() -> Self {
-        Self {
-            mode: BackendSelectorMode::Upload,
-            selected_index: 0,
-            available_backends: Vec::new(),
-        }
-    }
-
-    pub fn toggle_mode(&mut self) {
-        self.mode = match self.mode {
-            BackendSelectorMode::Upload => BackendSelectorMode::Download,
-            BackendSelectorMode::Download => BackendSelectorMode::SocketMapper,
-            BackendSelectorMode::SocketMapper => BackendSelectorMode::Upload,
-        };
-        self.selected_index = 0; // Reset selection when switching modes
-    }
-
-    pub fn select_next(&mut self) {
-        if !self.available_backends.is_empty() {
-            // Skip unavailable backends
-            let mut next_index = (self.selected_index + 1) % self.available_backends.len();
-            let start_index = next_index;
-
-            while !self.available_backends[next_index].2 {
-                next_index = (next_index + 1) % self.available_backends.len();
-                if next_index == start_index {
-                    break; // Avoid infinite loop if all are unavailable
-                }
-            }
-
-            self.selected_index = next_index;
-        }
-    }
-
-    pub fn select_previous(&mut self) {
-        if !self.available_backends.is_empty() {
-            let len = self.available_backends.len();
-            // Skip unavailable backends
-            let mut prev_index = if self.selected_index == 0 {
-                len - 1
-            } else {
-                self.selected_index - 1
-            };
-            let start_index = prev_index;
-
-            while !self.available_backends[prev_index].2 {
-                prev_index = if prev_index == 0 {
-                    len - 1
-                } else {
-                    prev_index - 1
-                };
-                if prev_index == start_index {
-                    break; // Avoid infinite loop if all are unavailable
-                }
-            }
-
-            self.selected_index = prev_index;
-        }
-    }
-
-    pub fn get_selected(&self) -> Option<String> {
-        self.available_backends
-            .get(self.selected_index)
-            .filter(|(_, _, available)| *available)
-            .map(|(name, _, _)| name.clone())
-    }
-
-    pub fn populate(&mut self, backend_info: &BackendInfo) {
-        self.available_backends = match self.mode {
-            BackendSelectorMode::Upload => backend_info.available_upload.clone(),
-            BackendSelectorMode::Download => backend_info.available_download.clone(),
-            BackendSelectorMode::SocketMapper => backend_info.available_socket_mappers.clone(),
-        };
-
-        // Find first available backend and select it
-        self.selected_index = self
-            .available_backends
-            .iter()
-            .position(|(_, _, available)| *available)
-            .unwrap_or(0);
-    }
-}
-
 impl ThrottleDialog {
     pub fn new() -> Self {
         Self {
@@ -350,9 +273,7 @@ impl AppState {
             show_help: false,
             show_throttle_dialog: false,
             show_backend_info: false,
-            show_backend_selector: false,
             throttle_dialog: ThrottleDialog::new(),
-            backend_selector: BackendSelector::new(),
             status_message: String::from("ChadThrottle started. Press 'h' for help."),
             sort_frozen: false,
             frozen_order: HashMap::new(),
@@ -365,6 +286,8 @@ impl AppState {
             traffic_view_mode: TrafficViewMode::All, // Show all traffic by default
             show_backend_compatibility_dialog: false,
             backend_compatibility_dialog: None,
+            backend_items: Vec::new(),
+            backend_selected_index: 0,
         }
     }
 
@@ -735,6 +658,164 @@ impl AppState {
             }
         }
     }
+
+    /// Build backend items list for interactive backend modal
+    pub fn build_backend_items(&mut self, backend_info: &BackendInfo) {
+        // Save current selection if any (to preserve cursor position across rebuilds)
+        let current_backend_name = self
+            .backend_items
+            .get(self.backend_selected_index)
+            .and_then(|item| match item {
+                BackendSelectorItem::Backend { name, .. } => Some(name.clone()),
+                _ => None,
+            });
+
+        self.backend_items.clear();
+
+        // Socket Mapper group
+        if !backend_info.available_socket_mappers.is_empty() {
+            self.backend_items
+                .push(BackendSelectorItem::GroupHeader(BackendGroup::SocketMapper));
+            for (name, priority, available) in &backend_info.available_socket_mappers {
+                let is_current = backend_info.active_socket_mapper.as_ref() == Some(name);
+                self.backend_items.push(BackendSelectorItem::Backend {
+                    name: name.clone(),
+                    group: BackendGroup::SocketMapper,
+                    priority: *priority,
+                    available: *available,
+                    is_current_default: is_current,
+                });
+            }
+        }
+
+        // Upload group
+        if !backend_info.available_upload.is_empty() {
+            self.backend_items
+                .push(BackendSelectorItem::GroupHeader(BackendGroup::Upload));
+            for (name, priority, available) in &backend_info.available_upload {
+                let is_current = backend_info.active_upload.as_ref() == Some(name);
+                self.backend_items.push(BackendSelectorItem::Backend {
+                    name: name.clone(),
+                    group: BackendGroup::Upload,
+                    priority: *priority,
+                    available: *available,
+                    is_current_default: is_current,
+                });
+            }
+        }
+
+        // Download group
+        if !backend_info.available_download.is_empty() {
+            self.backend_items
+                .push(BackendSelectorItem::GroupHeader(BackendGroup::Download));
+            for (name, priority, available) in &backend_info.available_download {
+                let is_current = backend_info.active_download.as_ref() == Some(name);
+                self.backend_items.push(BackendSelectorItem::Backend {
+                    name: name.clone(),
+                    group: BackendGroup::Download,
+                    priority: *priority,
+                    available: *available,
+                    is_current_default: is_current,
+                });
+            }
+        }
+
+        // Try to restore previous selection (preserves cursor position)
+        if let Some(name) = current_backend_name {
+            if let Some(index) = self.backend_items.iter().position(
+                |item| matches!(item, BackendSelectorItem::Backend { name: n, .. } if n == &name),
+            ) {
+                self.backend_selected_index = index;
+                return; // Found it, keep cursor there!
+            }
+        }
+
+        // Fallback: find first available backend item and select it
+        self.backend_selected_index = self
+            .backend_items
+            .iter()
+            .position(|item| {
+                matches!(
+                    item,
+                    BackendSelectorItem::Backend {
+                        available: true,
+                        ..
+                    }
+                )
+            })
+            .unwrap_or(0);
+    }
+
+    pub fn select_next_backend(&mut self) {
+        if self.backend_items.is_empty() {
+            return;
+        }
+
+        // Move down, skip group headers and unavailable backends
+        let start_index = self.backend_selected_index;
+        loop {
+            self.backend_selected_index =
+                (self.backend_selected_index + 1) % self.backend_items.len();
+
+            if let Some(BackendSelectorItem::Backend { available, .. }) =
+                self.backend_items.get(self.backend_selected_index)
+            {
+                if *available {
+                    break;
+                }
+            }
+
+            // Prevent infinite loop if no available backends
+            if self.backend_selected_index == start_index {
+                break;
+            }
+        }
+    }
+
+    pub fn select_previous_backend(&mut self) {
+        if self.backend_items.is_empty() {
+            return;
+        }
+
+        // Move up, skip group headers and unavailable backends
+        let start_index = self.backend_selected_index;
+        loop {
+            self.backend_selected_index = if self.backend_selected_index == 0 {
+                self.backend_items.len() - 1
+            } else {
+                self.backend_selected_index - 1
+            };
+
+            if let Some(BackendSelectorItem::Backend { available, .. }) =
+                self.backend_items.get(self.backend_selected_index)
+            {
+                if *available {
+                    break;
+                }
+            }
+
+            // Prevent infinite loop if no available backends
+            if self.backend_selected_index == start_index {
+                break;
+            }
+        }
+    }
+
+    /// Get the currently selected backend (for immediate apply)
+    pub fn get_selected_backend(&self) -> Option<(&str, BackendGroup)> {
+        if let Some(BackendSelectorItem::Backend {
+            name,
+            group,
+            available,
+            ..
+        }) = self.backend_items.get(self.backend_selected_index)
+        {
+            if *available {
+                return Some((name.as_str(), *group));
+            }
+        }
+        None
+    }
 }
 
 pub fn draw_ui(f: &mut Frame, app: &mut AppState) {
@@ -795,14 +876,7 @@ pub fn draw_ui_with_backend_info(
     // Backend info modal (highest priority, renders on top)
     if app.show_backend_info {
         if let Some(info) = backend_info {
-            draw_backend_info(f, f.area(), info);
-        }
-    }
-
-    // Backend selector modal (even higher priority)
-    if app.show_backend_selector {
-        if let Some(info) = backend_info {
-            draw_backend_selector(f, f.area(), app, info);
+            draw_backend_info(f, f.area(), app, info);
         }
     }
 
@@ -1430,8 +1504,128 @@ fn draw_bandwidth_graph(f: &mut Frame, area: Rect, app: &AppState) {
     f.render_widget(instructions, inst_area);
 }
 
-fn draw_backend_info(f: &mut Frame, area: Rect, backend_info: &BackendInfo) {
+fn draw_backend_info(f: &mut Frame, area: Rect, app: &AppState, backend_info: &BackendInfo) {
     let mut text = vec![Line::from("")];
+
+    text.push(Line::from(Span::styled(
+        "ChadThrottle - Backends",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+    text.push(Line::from(""));
+
+    // Get backend stats from backend_info
+    let backend_stats = &backend_info.backend_stats;
+
+    // Render all items (group headers and backends) with radio buttons
+    for (index, item) in app.backend_items.iter().enumerate() {
+        match item {
+            BackendSelectorItem::GroupHeader(group) => {
+                // Add spacing before groups (except first)
+                if index > 0 {
+                    text.push(Line::from(""));
+                }
+
+                let header = match group {
+                    BackendGroup::SocketMapper => "Socket Mapper Backends:",
+                    BackendGroup::Upload => "Upload Backends:",
+                    BackendGroup::Download => "Download Backends:",
+                };
+                text.push(Line::from(Span::styled(
+                    header,
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )));
+            }
+            BackendSelectorItem::Backend {
+                name,
+                group,
+                priority,
+                available,
+                is_current_default,
+            } => {
+                let is_selected = index == app.backend_selected_index;
+
+                // Radio button shows active backend (not pending, since Space applies immediately)
+                let is_active = *is_current_default;
+                let radio = if is_active { "◉" } else { "○" };
+                let radio_style = if is_active {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+
+                // Status indicator
+                let (status_symbol, status_color) = if *is_current_default {
+                    ("⭐", Color::Yellow)
+                } else if *available {
+                    ("✅", Color::Green)
+                } else {
+                    ("❌", Color::Red)
+                };
+
+                // Name style
+                let name_style = if is_selected {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(Color::DarkGray)
+                } else if !available {
+                    Style::default().fg(Color::Gray)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+
+                let priority_str = format!("{:?}", priority);
+                let throttle_count = backend_stats.get(name).copied().unwrap_or(0);
+                let throttle_info = if throttle_count > 0 {
+                    format!(" ({} active)", throttle_count)
+                } else {
+                    String::new()
+                };
+
+                let mut line_spans = vec![
+                    Span::raw("  "),
+                    Span::styled(radio, radio_style),
+                    Span::raw(" "),
+                    Span::styled(format!("{:18}", name), name_style),
+                    Span::styled(
+                        format!(" [{:8}]", priority_str),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::raw("  "),
+                    Span::styled(status_symbol, Style::default().fg(status_color)),
+                ];
+
+                // Add status text
+                if *is_current_default {
+                    line_spans.push(Span::styled(" ACTIVE", Style::default().fg(Color::Yellow)));
+                } else if !available {
+                    line_spans.push(Span::styled(
+                        " (unavailable)",
+                        Style::default().fg(Color::Gray),
+                    ));
+                }
+
+                // Add throttle info if available
+                if !throttle_info.is_empty() {
+                    line_spans.push(Span::styled(
+                        throttle_info,
+                        Style::default().fg(Color::Gray),
+                    ));
+                }
+
+                text.push(Line::from(line_spans));
+            }
+        }
+    }
+
+    text.push(Line::from(""));
+    text.push(Line::from(""));
 
     // Upload Backends Section
     text.push(Line::from(Span::styled(
@@ -1807,10 +2001,9 @@ fn draw_backend_info(f: &mut Frame, area: Rect, backend_info: &BackendInfo) {
         text.push(Line::from(""));
     }
 
-    // Footer
-    text.push(Line::from(""));
+    // Instructions
     text.push(Line::from(Span::styled(
-        "[Enter] Switch backends  [b/Esc] Close",
+        "[↑↓] Navigate  [Space] Apply  [Enter/b/Esc] Close",
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -1826,132 +2019,6 @@ fn draw_backend_info(f: &mut Frame, area: Rect, backend_info: &BackendInfo) {
     let popup_area = centered_rect(70, 80, area);
     f.render_widget(Clear, popup_area);
     f.render_widget(backend_widget, popup_area);
-}
-
-fn draw_backend_selector(f: &mut Frame, area: Rect, app: &AppState, backend_info: &BackendInfo) {
-    let mut text = vec![Line::from("")];
-
-    // Title based on current mode
-    let mode_title = match app.backend_selector.mode {
-        BackendSelectorMode::Upload => "Select Default Upload Backend",
-        BackendSelectorMode::Download => "Select Default Download Backend",
-        BackendSelectorMode::SocketMapper => "Select Default Socket Mapper Backend",
-    };
-
-    text.push(Line::from(Span::styled(
-        mode_title,
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )));
-    text.push(Line::from(""));
-
-    // Get current default backend
-    let current_default = match app.backend_selector.mode {
-        BackendSelectorMode::Upload => backend_info.active_upload.as_ref(),
-        BackendSelectorMode::Download => backend_info.active_download.as_ref(),
-        BackendSelectorMode::SocketMapper => backend_info.active_socket_mapper.as_ref(),
-    };
-
-    // Get backend stats from backend_info
-    let backend_stats = &backend_info.backend_stats;
-
-    // List backends
-    for (index, (name, priority, available)) in
-        app.backend_selector.available_backends.iter().enumerate()
-    {
-        let is_selected = index == app.backend_selector.selected_index;
-        let is_current_default = current_default.map(|d| d == name).unwrap_or(false);
-
-        // Determine symbol and color
-        let (symbol, base_color) = if is_current_default {
-            ("⭐", Color::Yellow)
-        } else if *available {
-            ("✅", Color::Green)
-        } else {
-            ("❌", Color::Red)
-        };
-
-        let name_style = if is_selected && *available {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-                .bg(Color::DarkGray)
-        } else if is_current_default {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else if !available {
-            Style::default().fg(Color::Gray)
-        } else {
-            Style::default().fg(Color::White)
-        };
-
-        let status_text = if is_current_default {
-            " [CURRENT DEFAULT]"
-        } else if *available {
-            ""
-        } else {
-            " (unavailable)"
-        };
-
-        let priority_str = format!("{:?}", priority);
-        let throttle_count = backend_stats.get(name).copied().unwrap_or(0);
-        let throttle_info = if throttle_count > 0 {
-            format!(" ({} active)", throttle_count)
-        } else {
-            String::new()
-        };
-
-        let selection_indicator = if is_selected && *available {
-            "▶ "
-        } else {
-            "  "
-        };
-
-        text.push(Line::from(vec![
-            Span::raw(selection_indicator),
-            Span::styled(symbol, Style::default().fg(base_color)),
-            Span::raw(" "),
-            Span::styled(format!("{:15}", name), name_style),
-            Span::styled(
-                format!("{:20}", status_text),
-                if is_current_default {
-                    Style::default().fg(Color::Yellow)
-                } else {
-                    Style::default().fg(Color::Gray)
-                },
-            ),
-            Span::raw(" Priority: "),
-            Span::styled(
-                format!("{:8}", priority_str),
-                Style::default().fg(Color::Cyan),
-            ),
-            Span::styled(throttle_info, Style::default().fg(Color::Gray)),
-        ]));
-    }
-
-    text.push(Line::from(""));
-    text.push(Line::from(""));
-
-    // Instructions
-    text.push(Line::from(Span::styled(
-        "[Tab] Switch Upload/Download/Socket  [↑↓] Navigate  [Enter] Select  [Esc] Cancel",
-        Style::default().fg(Color::DarkGray),
-    )));
-
-    let selector_widget = Paragraph::new(text)
-        .style(Style::default().bg(Color::Black).fg(Color::White))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Backend Selection")
-                .style(Style::default().fg(Color::Cyan)),
-        );
-
-    let popup_area = centered_rect(80, 60, area);
-    f.render_widget(Clear, popup_area);
-    f.render_widget(selector_widget, popup_area);
 }
 
 fn draw_interface_list(f: &mut Frame, area: Rect, app: &mut AppState) {
