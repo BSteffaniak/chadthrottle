@@ -44,7 +44,7 @@ impl TcHtbUpload {
 
 impl UploadThrottleBackend for TcHtbUpload {
     fn name(&self) -> &'static str {
-        "tc_htb_upload"
+        "tc_htb"
     }
 
     fn priority(&self) -> BackendPriority {

@@ -92,7 +92,7 @@ impl NftablesDownload {
 
 impl DownloadThrottleBackend for NftablesDownload {
     fn name(&self) -> &'static str {
-        "nftables_download"
+        "nftables"
     }
 
     fn priority(&self) -> BackendPriority {

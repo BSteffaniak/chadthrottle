@@ -248,9 +248,22 @@ async fn run_cli_mode(args: &Args) -> Result<()> {
     }
     println!();
 
+    // Load config to get backend preferences (CLI mode also respects config)
+    let config = config::Config::load().unwrap_or_default();
+
+    // Determine backend preferences: CLI args override config file preferences
+    let upload_preference = args
+        .upload_backend
+        .as_deref()
+        .or(config.preferred_upload_backend.as_deref());
+    let download_preference = args
+        .download_backend
+        .as_deref()
+        .or(config.preferred_download_backend.as_deref());
+
     // Select backends
-    let upload_backend = select_upload_backend(args.upload_backend.as_deref());
-    let download_backend = select_download_backend(args.download_backend.as_deref());
+    let upload_backend = select_upload_backend(upload_preference);
+    let download_backend = select_download_backend(download_preference);
 
     if let Some(ref backend) = upload_backend {
         println!("Using upload backend:   {}", backend.name());
@@ -349,9 +362,38 @@ async fn main() -> Result<()> {
     // Create app state
     let mut app = AppState::new();
 
-    // Select and create backends
-    let upload_backend = select_upload_backend(args.upload_backend.as_deref());
-    let download_backend = select_download_backend(args.download_backend.as_deref());
+    // Load config FIRST to get backend preferences
+    let mut config = config::Config::load().unwrap_or_default();
+
+    // Determine backend preferences: CLI args override config file preferences
+    let upload_preference = args
+        .upload_backend
+        .as_deref()
+        .or(config.preferred_upload_backend.as_deref());
+    let download_preference = args
+        .download_backend
+        .as_deref()
+        .or(config.preferred_download_backend.as_deref());
+
+    // Log which preference source is being used
+    if let Some(pref) = upload_preference {
+        if args.upload_backend.is_some() {
+            log::info!("Using upload backend from CLI: {}", pref);
+        } else {
+            log::info!("Using upload backend from config: {}", pref);
+        }
+    }
+    if let Some(pref) = download_preference {
+        if args.download_backend.is_some() {
+            log::info!("Using download backend from CLI: {}", pref);
+        } else {
+            log::info!("Using download backend from config: {}", pref);
+        }
+    }
+
+    // Select and create backends with preferences
+    let upload_backend = select_upload_backend(upload_preference);
+    let download_backend = select_download_backend(download_preference);
 
     // Show backend status
     log::error!("🔥 ChadThrottle v0.6.0 - Backend Status:");
@@ -384,9 +426,6 @@ async fn main() -> Result<()> {
     // Create managers with selected backends
     let mut throttle_manager = ThrottleManager::new(upload_backend, download_backend);
     let mut monitor = NetworkMonitor::new()?;
-
-    // Load and optionally restore saved config
-    let mut config = config::Config::load().unwrap_or_default();
     if !args.no_restore {
         log::info!("Restoring saved throttles...");
         for (pid, saved_throttle) in config.get_throttles() {

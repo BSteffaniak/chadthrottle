@@ -314,7 +314,7 @@ impl IfbTcDownload {
 
 impl DownloadThrottleBackend for IfbTcDownload {
     fn name(&self) -> &'static str {
-        "ifb_tc_download"
+        "ifb_tc"
     }
 
     fn priority(&self) -> BackendPriority {

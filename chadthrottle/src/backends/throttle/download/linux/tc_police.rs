@@ -81,7 +81,7 @@ impl TcPoliceDownload {
 
 impl DownloadThrottleBackend for TcPoliceDownload {
     fn name(&self) -> &'static str {
-        "tc_police_download"
+        "tc_police"
     }
 
     fn priority(&self) -> BackendPriority {

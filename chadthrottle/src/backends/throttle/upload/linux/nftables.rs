@@ -58,7 +58,7 @@ impl NftablesUpload {
 
 impl UploadThrottleBackend for NftablesUpload {
     fn name(&self) -> &'static str {
-        "nftables_upload"
+        "nftables"
     }
 
     fn priority(&self) -> BackendPriority {
