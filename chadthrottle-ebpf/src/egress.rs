@@ -1,9 +1,15 @@
 #![no_std]
 #![no_main]
 
+#[cfg(not(test))]
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    unsafe { core::hint::unreachable_unchecked() }
+}
+
 use aya_ebpf::{
     bindings::BPF_F_NO_PREALLOC,
-    helpers::{bpf_get_current_cgroup_id, bpf_ktime_get_ns},
+    helpers::bpf_ktime_get_ns,
     macros::{cgroup_skb, map},
     maps::HashMap,
     programs::SkBuffContext,
@@ -12,6 +18,13 @@ use chadthrottle_common::{CgroupThrottleConfig, ThrottleStats, TokenBucket};
 
 /// Maximum number of throttled cgroups (configurable)
 const MAX_CGROUPS: u32 = 4096;
+
+/// Fixed map key for single-cgroup programs
+/// Since we attach one BPF program instance per cgroup, each program
+/// only needs to handle one throttle config. Using a fixed key simplifies
+/// the logic and avoids issues with bpf_get_current_cgroup_id() returning
+/// the wrong cgroup ID in softirq context.
+const THROTTLE_KEY: u64 = 0;
 
 /// Map: cgroup_id -> TokenBucket
 /// Stores token bucket state for each throttled cgroup
@@ -93,7 +106,7 @@ fn token_bucket_allow(bucket: &mut TokenBucket, packet_size: u64, now_ns: u64) -
 }
 
 /// eBPF program for egress (upload) traffic throttling
-#[cgroup_skb]
+#[cgroup_skb(egress)]
 pub fn chadthrottle_egress(ctx: SkBuffContext) -> i32 {
     match try_chadthrottle_egress(ctx) {
         Ok(ret) => ret,
@@ -102,20 +115,44 @@ pub fn chadthrottle_egress(ctx: SkBuffContext) -> i32 {
 }
 
 fn try_chadthrottle_egress(ctx: SkBuffContext) -> Result<i32, i64> {
-    // Get current cgroup ID
-    let cgroup_id = unsafe { bpf_get_current_cgroup_id() };
+    // CRITICAL: Use fixed key instead of bpf_get_current_cgroup_id()
+    //
+    // Why? bpf_get_current_cgroup_id() returns the cgroup of the "current task",
+    // which in cgroup_skb programs running in softirq context is the kernel thread,
+    // NOT the process that will send the packet!
+    //
+    // Since we attach one BPF program instance per cgroup (in userspace),
+    // each program only handles packets for its specific cgroup. We use a
+    // fixed key and userspace inserts the config with this same key.
+    const KEY: u64 = THROTTLE_KEY;
+
+    // Get or create statistics (need to track program calls even if not throttled)
+    let mut stats = match unsafe { CGROUP_STATS.get(&KEY) } {
+        Some(s) => *s,
+        None => ThrottleStats::new(),
+    };
+
+    // Update diagnostic fields
+    stats.program_calls = stats.program_calls.saturating_add(1);
 
     // Check if this cgroup is being throttled
-    let config = match unsafe { CGROUP_CONFIGS.get(&cgroup_id) } {
+    let config = match unsafe { CGROUP_CONFIGS.get(&KEY) } {
         Some(cfg) => cfg,
-        None => return Ok(1), // Not throttled, allow
+        None => {
+            // Not throttled - increment config miss counter and allow
+            stats.config_misses = stats.config_misses.saturating_add(1);
+            unsafe {
+                CGROUP_STATS.insert(&KEY, &stats, 0)?;
+            }
+            return Ok(1); // Allow
+        }
     };
 
     // Get packet size
     let packet_size = ctx.len() as u64;
 
     // Get or create token bucket
-    let mut bucket = match unsafe { CGROUP_BUCKETS.get(&cgroup_id) } {
+    let mut bucket = match unsafe { CGROUP_BUCKETS.get(&KEY) } {
         Some(b) => *b,
         None => {
             // Initialize new bucket
@@ -137,15 +174,10 @@ fn try_chadthrottle_egress(ctx: SkBuffContext) -> Result<i32, i64> {
 
     // Update bucket in map
     unsafe {
-        CGROUP_BUCKETS.insert(&cgroup_id, &bucket, 0)?;
+        CGROUP_BUCKETS.insert(&KEY, &bucket, 0)?;
     }
 
-    // Update statistics
-    let mut stats = match unsafe { CGROUP_STATS.get(&cgroup_id) } {
-        Some(s) => *s,
-        None => ThrottleStats::new(),
-    };
-
+    // Update traffic statistics
     stats.packets_total = stats.packets_total.saturating_add(1);
     stats.bytes_total = stats.bytes_total.saturating_add(packet_size);
 
@@ -154,15 +186,17 @@ fn try_chadthrottle_egress(ctx: SkBuffContext) -> Result<i32, i64> {
         stats.bytes_dropped = stats.bytes_dropped.saturating_add(packet_size);
     }
 
+    // Store the actual cgroup ID from config for diagnostics
+    stats.cgroup_id_seen = config.cgroup_id;
+
     unsafe {
-        CGROUP_STATS.insert(&cgroup_id, &stats, 0)?;
+        CGROUP_STATS.insert(&KEY, &stats, 0)?;
     }
 
     // Return verdict: 1 = allow, 0 = drop
     Ok(if allow { 1 } else { 0 })
 }
 
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    unsafe { core::hint::unreachable_unchecked() }
-}
+#[unsafe(no_mangle)]
+#[unsafe(link_section = "license")]
+pub static LICENSE: [u8; 4] = *b"GPL\0";

@@ -16,21 +16,31 @@ fn main() {
         let target_dir = workspace_root.join("target/bpfel-unknown-none/release");
         let egress_exists = target_dir.join("chadthrottle-egress").exists();
         let ingress_exists = target_dir.join("chadthrottle-ingress").exists();
+        let tc_classifier_exists = target_dir.join("chadthrottle-tc-classifier").exists();
 
-        if egress_exists && ingress_exists {
+        if egress_exists && ingress_exists && tc_classifier_exists {
             // Copy pre-built programs to out_dir
-            if let Err(e) = std::fs::copy(
+            let copy_egress = std::fs::copy(
                 target_dir.join("chadthrottle-egress"),
                 out_dir.join("chadthrottle-egress"),
-            ) {
-                println!("cargo:warning=Failed to copy egress program: {}", e);
-            } else if let Err(e) = std::fs::copy(
+            );
+            let copy_ingress = std::fs::copy(
                 target_dir.join("chadthrottle-ingress"),
                 out_dir.join("chadthrottle-ingress"),
-            ) {
+            );
+            let copy_tc_classifier = std::fs::copy(
+                target_dir.join("chadthrottle-tc-classifier"),
+                out_dir.join("chadthrottle-tc-classifier"),
+            );
+
+            if let Err(e) = copy_egress {
+                println!("cargo:warning=Failed to copy egress program: {}", e);
+            } else if let Err(e) = copy_ingress {
                 println!("cargo:warning=Failed to copy ingress program: {}", e);
+            } else if let Err(e) = copy_tc_classifier {
+                println!("cargo:warning=Failed to copy tc_classifier program: {}", e);
             } else {
-                // Successfully copied pre-built programs
+                // Successfully copied all pre-built programs
                 println!("cargo:rustc-cfg=ebpf_programs_built");
                 return;
             }

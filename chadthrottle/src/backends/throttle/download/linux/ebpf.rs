@@ -15,6 +15,8 @@
 use anyhow::{Context, Result};
 #[cfg(feature = "throttle-ebpf")]
 use std::collections::HashMap;
+#[cfg(feature = "throttle-ebpf")]
+use std::path::PathBuf;
 
 #[cfg(feature = "throttle-ebpf")]
 use aya::{
@@ -22,6 +24,14 @@ use aya::{
     maps::HashMap as BpfHashMap,
     programs::{CgroupSkb, CgroupSkbAttachType},
 };
+
+#[cfg(feature = "throttle-ebpf")]
+/// Track attached programs for proper cleanup
+#[derive(Debug, Clone)]
+struct AttachedProgram {
+    cgroup_path: PathBuf,
+    attach_type: CgroupSkbAttachType,
+}
 
 #[cfg(feature = "throttle-ebpf")]
 use chadthrottle_common::{CgroupThrottleConfig, ThrottleStats, TokenBucket};
@@ -52,6 +62,12 @@ pub struct EbpfDownload {
     #[cfg(feature = "throttle-ebpf")]
     /// Reference count for each cgroup (how many PIDs are using it)
     cgroup_refcount: HashMap<u64, usize>,
+    #[cfg(feature = "throttle-ebpf")]
+    /// Track which parent cgroup paths we've attached to (to avoid duplicate attachments)
+    attached_cgroups: std::collections::HashSet<PathBuf>,
+    #[cfg(feature = "throttle-ebpf")]
+    /// Track attached programs for proper cleanup (especially for legacy attach method)
+    attached_programs: Vec<AttachedProgram>,
     active_throttles: HashMap<i32, u64>,
 }
 
@@ -69,6 +85,8 @@ impl EbpfDownload {
                 ebpf: None,
                 pid_to_cgroup: HashMap::new(),
                 cgroup_refcount: HashMap::new(),
+                attached_cgroups: std::collections::HashSet::new(),
+                attached_programs: Vec::new(),
                 active_throttles: HashMap::new(),
             })
         }
@@ -95,7 +113,23 @@ impl EbpfDownload {
                 const PROGRAM_BYTES: &[u8] =
                     aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/chadthrottle-ingress"));
 
-                let ebpf = load_ebpf_program(PROGRAM_BYTES)?;
+                let mut ebpf = load_ebpf_program(PROGRAM_BYTES)?;
+
+                // Load the program into the kernel NOW to create map FDs
+                // This ensures there's only ONE set of maps that both
+                // userspace and the BPF program will use
+                // CRITICAL: Must load before any attach calls to prevent map instance mismatch!
+                let program: &mut CgroupSkb = ebpf
+                    .program_mut("chadthrottle_ingress")
+                    .ok_or_else(|| anyhow::anyhow!("Program chadthrottle_ingress not found"))?
+                    .try_into()
+                    .context("Program is not a CgroupSkb program")?;
+
+                program
+                    .load()
+                    .context("Failed to load chadthrottle_ingress program into kernel")?;
+                log::info!("✅ Loaded chadthrottle_ingress program into kernel (maps created)");
+
                 self.ebpf = Some(ebpf);
                 return Ok(());
             }
@@ -112,6 +146,97 @@ impl EbpfDownload {
                 ));
             }
         }
+        Ok(())
+    }
+
+    #[cfg(feature = "throttle-ebpf")]
+    pub fn log_throttle_stats(&mut self, pid: i32) -> Result<()> {
+        // Get cgroup ID for this PID
+        let cgroup_id = match self.pid_to_cgroup.get(&pid) {
+            Some(id) => *id,
+            None => return Ok(()), // PID not tracked
+        };
+
+        // CRITICAL: Use fixed key (0) to match eBPF program
+        const MAP_KEY: u64 = 0;
+
+        if let Some(ref mut ebpf) = self.ebpf {
+            // Read stats from CGROUP_STATS map
+            let stats_map: BpfHashMap<_, u64, ThrottleStats> = get_bpf_map(ebpf, "CGROUP_STATS")?;
+
+            if let Ok(stats) = stats_map.get(&MAP_KEY, 0) {
+                let drop_rate = if stats.packets_total > 0 {
+                    (stats.packets_dropped as f64 / stats.packets_total as f64) * 100.0
+                } else {
+                    0.0
+                };
+
+                // Check if eBPF program is being called
+                if stats.program_calls == 0 {
+                    log::warn!(
+                        "⚠️  PID {} cgroup {}: eBPF program NOT BEING CALLED! \
+                         (program_calls=0, config_misses={}, cgroup_id_seen={})",
+                        pid,
+                        cgroup_id,
+                        stats.config_misses,
+                        stats.cgroup_id_seen
+                    );
+                } else if stats.packets_total == 0 {
+                    log::warn!(
+                        "⚠️  PID {} cgroup {}: eBPF program called but NO PACKETS! \
+                         (program_calls={}, config_misses={})",
+                        pid,
+                        cgroup_id,
+                        stats.program_calls,
+                        stats.config_misses
+                    );
+                } else if stats.packets_dropped == 0 && stats.packets_total > 100 {
+                    log::warn!(
+                        "⚠️  PID {} cgroup {}: eBPF NOT DROPPING PACKETS! \
+                         packets_total={}, packets_dropped=0, bytes_total={}, drop_rate=0.0%",
+                        pid,
+                        cgroup_id,
+                        stats.packets_total,
+                        stats.bytes_total
+                    );
+                } else {
+                    log::info!(
+                        "eBPF stats PID {} cgroup {}: program_calls={}, packets={}, dropped={} ({:.1}%), \
+                         bytes={}, bytes_dropped={}, config_misses={}, cgroup_id_seen={}",
+                        pid,
+                        cgroup_id,
+                        stats.program_calls,
+                        stats.packets_total,
+                        stats.packets_dropped,
+                        drop_rate,
+                        stats.bytes_total,
+                        stats.bytes_dropped,
+                        stats.config_misses,
+                        stats.cgroup_id_seen
+                    );
+                }
+            } else {
+                log::warn!(
+                    "⚠️  PID {} cgroup {}: No stats in BPF map (eBPF not initialized?)",
+                    pid,
+                    cgroup_id
+                );
+            }
+
+            // Read token bucket state
+            let bucket_map: BpfHashMap<_, u64, TokenBucket> = get_bpf_map(ebpf, "CGROUP_BUCKETS")?;
+
+            if let Ok(bucket) = bucket_map.get(&MAP_KEY, 0) {
+                log::debug!(
+                    "PID {} token bucket: tokens={}/{} bytes, rate={} bytes/sec",
+                    pid,
+                    bucket.tokens,
+                    bucket.capacity,
+                    bucket.rate_bps
+                );
+            }
+        }
+
         Ok(())
     }
 }
@@ -205,14 +330,12 @@ impl DownloadThrottleBackend for EbpfDownload {
             // Track PID to cgroup mapping
             self.pid_to_cgroup.insert(pid, cgroup_id);
 
-            // Attach eBPF program to cgroup if this is the first PID in this cgroup
-            let refcount = self.cgroup_refcount.entry(cgroup_id).or_insert(0);
-            if *refcount == 0 {
-                // First PID in this cgroup - attach the program
+            // Attach eBPF program to cgroup if we haven't attached there yet
+            // We track by path (not cgroup_id) to avoid duplicate attachments to the same cgroup
+            if !self.attached_cgroups.contains(&cgroup_path) {
                 if let Some(ref mut ebpf) = self.ebpf {
                     log::info!(
-                        "Attaching eBPF ingress program to cgroup {} (path: {:?})",
-                        cgroup_id,
+                        "Attaching eBPF ingress program to cgroup (path: {:?})",
                         cgroup_path
                     );
                     attach_cgroup_skb(
@@ -222,11 +345,21 @@ impl DownloadThrottleBackend for EbpfDownload {
                         CgroupSkbAttachType::Ingress,
                     )?;
                     log::info!(
-                        "Successfully attached eBPF ingress program to cgroup {}",
-                        cgroup_id
+                        "Successfully attached eBPF ingress program to {:?}",
+                        cgroup_path
                     );
+                    self.attached_cgroups.insert(cgroup_path.clone());
+
+                    // Track this attachment for cleanup
+                    self.attached_programs.push(AttachedProgram {
+                        cgroup_path: cgroup_path.clone(),
+                        attach_type: CgroupSkbAttachType::Ingress,
+                    });
                 }
             }
+
+            // Increment reference count for this specific cgroup ID
+            let refcount = self.cgroup_refcount.entry(cgroup_id).or_insert(0);
             *refcount += 1;
             log::info!("Cgroup {} now has {} PIDs throttled", cgroup_id, refcount);
 
@@ -235,19 +368,25 @@ impl DownloadThrottleBackend for EbpfDownload {
                 // Allow bursts up to 2x the sustained rate (configurable)
                 let burst_size = limit_bytes_per_sec * 2;
 
+                // CRITICAL: Use fixed key (0) instead of cgroup_id
+                // The eBPF program uses a fixed key because it runs in softirq context
+                // where bpf_get_current_cgroup_id() returns the wrong cgroup.
+                // Each program instance is attached to ONE cgroup, so we use key 0.
+                const MAP_KEY: u64 = 0;
+
                 // Set configuration
                 let mut config_map: BpfHashMap<_, u64, CgroupThrottleConfig> =
                     get_bpf_map(ebpf, "CGROUP_CONFIGS")?;
 
                 let config = CgroupThrottleConfig {
-                    cgroup_id,
+                    cgroup_id, // Store for diagnostics
                     pid: pid as u32,
                     _padding: 0,
                     rate_bps: limit_bytes_per_sec,
                     burst_size,
                 };
 
-                config_map.insert(cgroup_id, config, 0)?;
+                config_map.insert(MAP_KEY, config, 0)?;
 
                 // Initialize token bucket
                 let mut bucket_map: BpfHashMap<_, u64, TokenBucket> =
@@ -263,7 +402,7 @@ impl DownloadThrottleBackend for EbpfDownload {
                     rate_bps: limit_bytes_per_sec,
                 };
 
-                bucket_map.insert(cgroup_id, bucket, 0)?;
+                bucket_map.insert(MAP_KEY, bucket, 0)?;
 
                 log::debug!(
                     "Initialized token bucket for cgroup {}: rate={} bytes/sec, burst={} bytes, tokens={}",
@@ -349,18 +488,57 @@ impl DownloadThrottleBackend for EbpfDownload {
         {
             log::info!("Cleaning up eBPF download backend");
 
-            // Remove all throttles
+            // Remove all throttles (clears BPF maps)
             let pids: Vec<i32> = self.active_throttles.keys().copied().collect();
             for pid in pids {
                 let _ = self.remove_download_throttle(pid);
             }
 
-            // Drop the eBPF instance (this will detach all programs)
+            // Detach all attached programs (CRITICAL for legacy attach method)
+            // Modern bpf_link_create auto-detaches when FD is dropped, but legacy
+            // bpf_prog_attach requires explicit detach via bpf_prog_detach syscall
+            log::debug!(
+                "Detaching {} attached programs",
+                self.attached_programs.len()
+            );
+            for attached in &self.attached_programs {
+                log::debug!(
+                    "Detaching program from cgroup: {:?} (type: {:?})",
+                    attached.cgroup_path,
+                    attached.attach_type
+                );
+                if let Err(e) =
+                    detach_cgroup_skb_legacy(&attached.cgroup_path, attached.attach_type)
+                {
+                    log::warn!(
+                        "Failed to detach program from {:?}: {} (may already be detached)",
+                        attached.cgroup_path,
+                        e
+                    );
+                }
+            }
+            self.attached_programs.clear();
+
+            // Drop the eBPF instance
             self.ebpf = None;
             self.pid_to_cgroup.clear();
             self.cgroup_refcount.clear();
+            self.attached_cgroups.clear();
 
+            log::info!("eBPF download backend cleanup complete");
             Ok(())
+        }
+
+        #[cfg(not(feature = "throttle-ebpf"))]
+        {
+            Err(anyhow!("eBPF backend not compiled"))
+        }
+    }
+
+    fn log_diagnostics(&mut self, pid: i32) -> Result<()> {
+        #[cfg(feature = "throttle-ebpf")]
+        {
+            self.log_throttle_stats(pid)
         }
 
         #[cfg(not(feature = "throttle-ebpf"))]
@@ -384,15 +562,20 @@ impl EbpfDownload {
     pub fn get_stats_mut(&mut self, pid: i32) -> Option<crate::backends::throttle::BackendStats> {
         use crate::backends::throttle::BackendStats;
 
-        // Get the cgroup ID for this PID
-        let cgroup_id = *self.pid_to_cgroup.get(&pid)?;
+        // Check if PID is tracked
+        if !self.pid_to_cgroup.contains_key(&pid) {
+            return None;
+        }
+
+        // CRITICAL: Use fixed key (0) to match eBPF program
+        const MAP_KEY: u64 = 0;
 
         // Try to read stats from BPF map
         if let Some(ref mut ebpf) = self.ebpf {
             let stats_map: BpfHashMap<_, u64, ThrottleStats> =
                 get_bpf_map(ebpf, "CGROUP_STATS").ok()?;
 
-            if let Ok(stats) = unsafe { stats_map.get(&cgroup_id, 0) } {
+            if let Ok(stats) = unsafe { stats_map.get(&MAP_KEY, 0) } {
                 return Some(BackendStats {
                     packets_total: stats.packets_total,
                     bytes_total: stats.bytes_total,

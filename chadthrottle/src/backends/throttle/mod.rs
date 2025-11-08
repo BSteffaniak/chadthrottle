@@ -17,6 +17,9 @@ pub mod linux_nft_utils;
 #[cfg(all(target_os = "linux", feature = "throttle-ebpf"))]
 pub mod linux_ebpf_utils;
 
+#[cfg(all(target_os = "linux", feature = "throttle-ebpf"))]
+pub use linux_ebpf_utils::{BpfAttachMethod, BpfConfig, init_bpf_config};
+
 // Re-export manager
 pub use manager::ThrottleManager;
 
@@ -116,6 +119,12 @@ pub trait DownloadThrottleBackend: Send + Sync {
     /// Get statistics for a throttled process (if supported by backend)
     fn get_stats(&self, _pid: i32) -> Option<BackendStats> {
         None // Default implementation returns None for backends that don't support stats
+    }
+
+    /// Log diagnostic information for a throttled process (for debugging)
+    /// Default implementation does nothing - only eBPF backend implements this
+    fn log_diagnostics(&mut self, _pid: i32) -> Result<()> {
+        Ok(())
     }
 }
 

@@ -35,6 +35,14 @@ impl ThrottleManager {
         )
     }
 
+    /// Log eBPF throttle stats for a PID (if using eBPF backend)
+    pub fn log_ebpf_stats(&mut self, pid: i32) -> Result<()> {
+        if let Some(backend) = self.download_backend.as_mut() {
+            backend.log_diagnostics(pid)?;
+        }
+        Ok(())
+    }
+
     /// Get comprehensive backend information for UI display
     pub fn get_backend_info(
         &self,

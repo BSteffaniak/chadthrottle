@@ -25,6 +25,17 @@ use aya::{
 };
 
 #[cfg(feature = "throttle-ebpf")]
+use std::path::PathBuf;
+
+#[cfg(feature = "throttle-ebpf")]
+/// Track attached programs for proper cleanup
+#[derive(Debug, Clone)]
+struct AttachedProgram {
+    cgroup_path: PathBuf,
+    attach_type: CgroupSkbAttachType,
+}
+
+#[cfg(feature = "throttle-ebpf")]
 use chadthrottle_common::{CgroupThrottleConfig, ThrottleStats, TokenBucket};
 
 #[cfg(feature = "throttle-ebpf")]
@@ -53,6 +64,12 @@ pub struct EbpfUpload {
     #[cfg(feature = "throttle-ebpf")]
     /// Reference count for each cgroup (how many PIDs are using it)
     cgroup_refcount: HashMap<u64, usize>,
+    #[cfg(feature = "throttle-ebpf")]
+    /// Track which parent cgroup paths we've attached to (to avoid duplicate attachments)
+    attached_cgroups: std::collections::HashSet<PathBuf>,
+    #[cfg(feature = "throttle-ebpf")]
+    /// Track attached programs for proper cleanup (especially for legacy attach method)
+    attached_programs: Vec<AttachedProgram>,
     active_throttles: HashMap<i32, u64>,
 }
 
@@ -73,6 +90,8 @@ impl EbpfUpload {
                 ebpf: None,
                 pid_to_cgroup: HashMap::new(),
                 cgroup_refcount: HashMap::new(),
+                attached_cgroups: std::collections::HashSet::new(),
+                attached_programs: Vec::new(),
                 active_throttles: HashMap::new(),
             })
         }
@@ -99,7 +118,23 @@ impl EbpfUpload {
                 const PROGRAM_BYTES: &[u8] =
                     aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/chadthrottle-egress"));
 
-                let ebpf = load_ebpf_program(PROGRAM_BYTES)?;
+                let mut ebpf = load_ebpf_program(PROGRAM_BYTES)?;
+
+                // Load the program into the kernel NOW to create map FDs
+                // This ensures there's only ONE set of maps that both
+                // userspace and the BPF program will use
+                // CRITICAL: Must load before any attach calls to prevent map instance mismatch!
+                let program: &mut CgroupSkb = ebpf
+                    .program_mut("chadthrottle_egress")
+                    .ok_or_else(|| anyhow::anyhow!("Program chadthrottle_egress not found"))?
+                    .try_into()
+                    .context("Program is not a CgroupSkb program")?;
+
+                program
+                    .load()
+                    .context("Failed to load chadthrottle_egress program into kernel")?;
+                log::info!("✅ Loaded chadthrottle_egress program into kernel (maps created)");
+
                 self.ebpf = Some(ebpf);
                 return Ok(());
             }
@@ -209,10 +244,9 @@ impl UploadThrottleBackend for EbpfUpload {
             // Track PID to cgroup mapping
             self.pid_to_cgroup.insert(pid, cgroup_id);
 
-            // Attach eBPF program to cgroup if this is the first PID in this cgroup
-            let refcount = self.cgroup_refcount.entry(cgroup_id).or_insert(0);
-            if *refcount == 0 {
-                // First PID in this cgroup - attach the program
+            // Attach eBPF program to cgroup if we haven't attached there yet
+            // We track by path (not cgroup_id) to avoid duplicate attachments to the same cgroup
+            if !self.attached_cgroups.contains(&cgroup_path) {
                 if let Some(ref mut ebpf) = self.ebpf {
                     log::info!(
                         "Attaching eBPF egress program to cgroup {} (path: {:?})",
@@ -229,13 +263,29 @@ impl UploadThrottleBackend for EbpfUpload {
                         "Successfully attached eBPF egress program to cgroup {}",
                         cgroup_id
                     );
+                    self.attached_cgroups.insert(cgroup_path.clone());
+
+                    // Track this attachment for cleanup
+                    self.attached_programs.push(AttachedProgram {
+                        cgroup_path: cgroup_path.clone(),
+                        attach_type: CgroupSkbAttachType::Egress,
+                    });
                 }
             }
+
+            // Increment reference count for this specific cgroup ID
+            let refcount = self.cgroup_refcount.entry(cgroup_id).or_insert(0);
             *refcount += 1;
             log::info!("Cgroup {} now has {} PIDs throttled", cgroup_id, refcount);
 
             // Update BPF maps with configuration
             if let Some(ref mut ebpf) = self.ebpf {
+                // CRITICAL: Use fixed key (0) instead of cgroup_id
+                // The eBPF program uses a fixed key because it runs in softirq context
+                // where bpf_get_current_cgroup_id() returns the wrong cgroup.
+                // Each program instance is attached to ONE cgroup, so we use key 0.
+                const MAP_KEY: u64 = 0;
+
                 // Set configuration
                 let mut config_map: BpfHashMap<_, u64, CgroupThrottleConfig> =
                     get_bpf_map(ebpf, "CGROUP_CONFIGS")?;
@@ -244,14 +294,14 @@ impl UploadThrottleBackend for EbpfUpload {
                 let burst_size = limit_bytes_per_sec * 2;
 
                 let config = CgroupThrottleConfig {
-                    cgroup_id,
+                    cgroup_id, // Store for diagnostics
                     pid: pid as u32,
                     _padding: 0,
                     rate_bps: limit_bytes_per_sec,
                     burst_size,
                 };
 
-                config_map.insert(cgroup_id, config, 0)?;
+                config_map.insert(MAP_KEY, config, 0)?;
 
                 // Initialize token bucket
                 let mut bucket_map: BpfHashMap<_, u64, TokenBucket> =
@@ -267,7 +317,7 @@ impl UploadThrottleBackend for EbpfUpload {
                     rate_bps: limit_bytes_per_sec,
                 };
 
-                bucket_map.insert(cgroup_id, bucket, 0)?;
+                bucket_map.insert(MAP_KEY, bucket, 0)?;
 
                 log::debug!(
                     "Initialized token bucket for cgroup {}: rate={} bytes/sec, burst={} bytes, tokens={}",
@@ -357,17 +407,44 @@ impl UploadThrottleBackend for EbpfUpload {
         {
             log::info!("Cleaning up eBPF upload backend");
 
-            // Remove all throttles
+            // Remove all throttles (clears BPF maps)
             let pids: Vec<i32> = self.active_throttles.keys().copied().collect();
             for pid in pids {
                 let _ = self.remove_upload_throttle(pid);
             }
 
-            // Drop the eBPF instance (this will detach all programs)
+            // Detach all attached programs (CRITICAL for legacy attach method)
+            // Modern bpf_link_create auto-detaches when FD is dropped, but legacy
+            // bpf_prog_attach requires explicit detach via bpf_prog_detach syscall
+            log::debug!(
+                "Detaching {} attached programs",
+                self.attached_programs.len()
+            );
+            for attached in &self.attached_programs {
+                log::debug!(
+                    "Detaching program from cgroup: {:?} (type: {:?})",
+                    attached.cgroup_path,
+                    attached.attach_type
+                );
+                if let Err(e) =
+                    detach_cgroup_skb_legacy(&attached.cgroup_path, attached.attach_type)
+                {
+                    log::warn!(
+                        "Failed to detach program from {:?}: {} (may already be detached)",
+                        attached.cgroup_path,
+                        e
+                    );
+                }
+            }
+            self.attached_programs.clear();
+
+            // Drop the eBPF instance
             self.ebpf = None;
             self.pid_to_cgroup.clear();
             self.cgroup_refcount.clear();
+            self.attached_cgroups.clear();
 
+            log::info!("eBPF upload backend cleanup complete");
             Ok(())
         }
 

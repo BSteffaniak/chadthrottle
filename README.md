@@ -39,7 +39,11 @@ sudo cp target/release/chadthrottle /usr/local/bin/
 
 ## Usage
 
-### Start the TUI monitor
+ChadThrottle supports two modes: **TUI mode** (interactive) and **CLI mode** (non-interactive).
+
+### TUI Mode (Interactive)
+
+Start the interactive terminal UI:
 
 ```bash
 sudo chadthrottle
@@ -47,7 +51,7 @@ sudo chadthrottle
 
 **Note:** Requires root/sudo for full network monitoring capabilities.
 
-### Keyboard Shortcuts
+#### Keyboard Shortcuts
 
 - `↑`/`k` - Move selection up
 - `↓`/`j` - Move selection down
@@ -63,6 +67,38 @@ sudo chadthrottle
 - `Backspace` - Delete character
 - `Enter` - Apply throttle
 - `Esc` - Cancel
+
+### CLI Mode (Non-Interactive)
+
+Throttle a specific process without the TUI:
+
+```bash
+# Throttle both download and upload
+sudo chadthrottle --pid 1234 --download-limit 1M --upload-limit 500K
+
+# Throttle only download
+sudo chadthrottle --pid 1234 --download-limit 1.5M
+
+# Throttle for a specific duration (30 seconds)
+sudo chadthrottle --pid 1234 --download-limit 1M --duration 30
+
+# Use specific backends
+sudo chadthrottle --pid 1234 --download-limit 1M --upload-backend tc-htb --download-backend ebpf-cgroup
+```
+
+**Bandwidth limit formats:**
+
+- `500K` or `500KB` = 500 KB/s
+- `1M` or `1MB` = 1 MB/s
+- `1.5M` = 1.5 MB/s
+- `1G` or `1GB` = 1 GB/s
+
+**CLI mode features:**
+
+- Applies throttle immediately
+- Runs until Ctrl+C (or `--duration` expires)
+- Automatically removes throttle on exit
+- Perfect for scripts and automation
 
 ## Architecture
 

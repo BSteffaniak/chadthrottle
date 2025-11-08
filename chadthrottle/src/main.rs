@@ -27,6 +27,23 @@ use crate::monitor::NetworkMonitor;
 use crate::process::ThrottleLimit;
 use crate::ui::AppState;
 
+/// Format bytes as human-readable string (e.g., "1.5 MB", "500 KB")
+fn human_readable(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 /// ChadThrottle - A TUI network monitor and throttler for Linux
 #[derive(Parser, Debug)]
 #[command(name = "chadthrottle")]
@@ -52,6 +69,27 @@ struct Args {
     /// Don't save throttles on exit
     #[arg(long)]
     no_save: bool,
+
+    // CLI mode arguments
+    /// PID to throttle (CLI mode - skips TUI)
+    #[arg(long, value_name = "PID")]
+    pid: Option<i32>,
+
+    /// Download limit (e.g., "1M", "500K", "1.5M") - requires --pid
+    #[arg(long, value_name = "LIMIT")]
+    download_limit: Option<String>,
+
+    /// Upload limit (e.g., "1M", "500K", "1.5M") - requires --pid
+    #[arg(long, value_name = "LIMIT")]
+    upload_limit: Option<String>,
+
+    /// Duration to run throttle in seconds (default: run until Ctrl+C)
+    #[arg(long, value_name = "SECONDS")]
+    duration: Option<u64>,
+
+    /// BPF attach method: auto (try link, fallback to legacy), link (bpf_link_create), legacy (bpf_prog_attach)
+    #[arg(long, value_name = "METHOD")]
+    bpf_attach_method: Option<String>,
 }
 
 fn print_available_backends() {
@@ -99,8 +137,172 @@ fn print_available_backends() {
 
     println!();
     println!("Usage:");
-    println!("  chadthrottle --upload-backend <name> --download-backend <name>");
-    println!("  chadthrottle  (auto-selects best available backends)");
+    println!("  TUI Mode:");
+    println!("    chadthrottle [--upload-backend <name>] [--download-backend <name>]");
+    println!();
+    println!("  CLI Mode:");
+    println!(
+        "    chadthrottle --pid <PID> [--download-limit <LIMIT>] [--upload-limit <LIMIT>] [--duration <SECONDS>]"
+    );
+    println!("    Examples:");
+    println!("      chadthrottle --pid 1234 --download-limit 1M --upload-limit 500K");
+    println!("      chadthrottle --pid 1234 --download-limit 1.5M --duration 60");
+    println!();
+    println!("  BPF Options:");
+    println!(
+        "    --bpf-attach-method <METHOD>   BPF attach method: auto, link, legacy (default: auto)"
+    );
+    println!("      auto   - Try modern method, fallback to legacy on error");
+    println!("      link   - Use bpf_link_create only");
+    println!("      legacy - Use bpf_prog_attach only");
+}
+
+/// Parse bandwidth limit string (e.g., "1M", "500K", "1.5M") to bytes per second
+fn parse_bandwidth_limit(limit_str: &str) -> Result<u64> {
+    let limit_str = limit_str.trim().to_uppercase();
+
+    // Try to split into number and unit
+    let (num_str, unit) = if limit_str.ends_with("M") || limit_str.ends_with("MB") {
+        if limit_str.ends_with("MB") {
+            (&limit_str[..limit_str.len() - 2], "M")
+        } else {
+            (&limit_str[..limit_str.len() - 1], "M")
+        }
+    } else if limit_str.ends_with("K") || limit_str.ends_with("KB") {
+        if limit_str.ends_with("KB") {
+            (&limit_str[..limit_str.len() - 2], "K")
+        } else {
+            (&limit_str[..limit_str.len() - 1], "K")
+        }
+    } else if limit_str.ends_with("G") || limit_str.ends_with("GB") {
+        if limit_str.ends_with("GB") {
+            (&limit_str[..limit_str.len() - 2], "G")
+        } else {
+            (&limit_str[..limit_str.len() - 1], "G")
+        }
+    } else {
+        // Assume bytes if no unit
+        return limit_str
+            .parse::<u64>()
+            .map_err(|_| anyhow::anyhow!("Invalid bandwidth limit: {}", limit_str));
+    };
+
+    let number: f64 = num_str
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid bandwidth limit number: {}", num_str))?;
+
+    let bytes_per_sec = match unit {
+        "K" => (number * 1024.0) as u64,
+        "M" => (number * 1024.0 * 1024.0) as u64,
+        "G" => (number * 1024.0 * 1024.0 * 1024.0) as u64,
+        _ => return Err(anyhow::anyhow!("Unknown unit: {}", unit)),
+    };
+
+    Ok(bytes_per_sec)
+}
+
+/// Run CLI mode - apply throttle and wait
+async fn run_cli_mode(args: &Args) -> Result<()> {
+    use tokio::signal;
+
+    let pid = args.pid.unwrap();
+
+    // Parse bandwidth limits
+    let download_limit = if let Some(ref limit_str) = args.download_limit {
+        Some(parse_bandwidth_limit(limit_str)?)
+    } else {
+        None
+    };
+
+    let upload_limit = if let Some(ref limit_str) = args.upload_limit {
+        Some(parse_bandwidth_limit(limit_str)?)
+    } else {
+        None
+    };
+
+    if download_limit.is_none() && upload_limit.is_none() {
+        return Err(anyhow::anyhow!(
+            "At least one of --download-limit or --upload-limit is required with --pid"
+        ));
+    }
+
+    // Get process name
+    let process_name = std::fs::read_to_string(format!("/proc/{}/comm", pid))
+        .unwrap_or_else(|_| format!("PID {}", pid))
+        .trim()
+        .to_string();
+
+    println!("ChadThrottle v0.6.0 - CLI Mode");
+    println!();
+    println!("Throttling process: {} (PID {})", process_name, pid);
+    if let Some(dl) = download_limit {
+        println!("  Download limit: {}/s", human_readable(dl));
+    }
+    if let Some(ul) = upload_limit {
+        println!("  Upload limit:   {}/s", human_readable(ul));
+    }
+    if let Some(dur) = args.duration {
+        println!("  Duration:       {} seconds", dur);
+    } else {
+        println!("  Duration:       Until Ctrl+C");
+    }
+    println!();
+
+    // Select backends
+    let upload_backend = select_upload_backend(args.upload_backend.as_deref());
+    let download_backend = select_download_backend(args.download_backend.as_deref());
+
+    if let Some(ref backend) = upload_backend {
+        println!("Using upload backend:   {}", backend.name());
+    } else {
+        println!("Upload backend:         Not available");
+    }
+
+    if let Some(ref backend) = download_backend {
+        println!("Using download backend: {}", backend.name());
+    } else {
+        println!("Download backend:       Not available");
+    }
+    println!();
+
+    // Create throttle manager
+    let mut throttle_manager = ThrottleManager::new(upload_backend, download_backend);
+
+    // Apply throttle
+    let limit = ThrottleLimit {
+        upload_limit,
+        download_limit,
+    };
+
+    throttle_manager.throttle_process(pid, process_name.clone(), &limit)?;
+    println!("✅ Throttle applied successfully!");
+    println!();
+
+    // Wait for duration or Ctrl+C
+    if let Some(duration) = args.duration {
+        println!(
+            "Running for {} seconds... (Press Ctrl+C to stop early)",
+            duration
+        );
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(duration)) => {
+                println!("\n⏱️  Duration elapsed, removing throttle...");
+            }
+            _ = signal::ctrl_c() => {
+                println!("\n🛑 Received Ctrl+C, removing throttle...");
+            }
+        }
+    } else {
+        println!("Press Ctrl+C to stop and remove throttle...");
+        signal::ctrl_c().await?;
+        println!("\n🛑 Received Ctrl+C, removing throttle...");
+    }
+
+    // Remove throttle
+    throttle_manager.remove_throttle(pid)?;
+    println!("✅ Throttle removed successfully!");
+
+    Ok(())
 }
 
 #[tokio::main]
@@ -114,13 +316,30 @@ async fn main() -> Result<()> {
             .init();
     }
 
+    // Initialize BPF configuration
+    #[cfg(feature = "throttle-ebpf")]
+    {
+        use crate::backends::throttle::{BpfAttachMethod, BpfConfig, init_bpf_config};
+
+        // Parse attach method from CLI arg or environment
+        let attach_method = BpfAttachMethod::from_env_and_arg(args.bpf_attach_method.as_deref());
+        init_bpf_config(BpfConfig::new(attach_method));
+
+        log::info!("BPF attach method: {:?}", attach_method);
+    }
+
     // Handle --list-backends
     if args.list_backends {
         print_available_backends();
         return Ok(());
     }
 
-    // Setup terminal
+    // Handle CLI mode (--pid specified)
+    if args.pid.is_some() {
+        return run_cli_mode(&args).await;
+    }
+
+    // Setup terminal for TUI mode
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -248,6 +467,7 @@ async fn run_app<B: ratatui::backend::Backend>(
     config: &config::Config,
 ) -> Result<()> {
     let mut update_interval = interval(Duration::from_secs(1));
+    let mut bandwidth_log_counter = 0u32; // Log bandwidth every N updates
 
     loop {
         // Get backend info for UI display
@@ -409,6 +629,10 @@ async fn run_app<B: ratatui::backend::Backend>(
         {
             match monitor.update() {
                 Ok(mut process_map) => {
+                    // Increment bandwidth log counter
+                    bandwidth_log_counter += 1;
+                    let should_log_bandwidth = bandwidth_log_counter % 5 == 0; // Log every 5 seconds
+
                     // Update throttle status and history for each process
                     for (pid, process_info) in process_map.iter_mut() {
                         if let Some(throttle) = throttle_manager.get_throttle(*pid) {
@@ -416,6 +640,37 @@ async fn run_app<B: ratatui::backend::Backend>(
                                 download_limit: throttle.download_limit,
                                 upload_limit: throttle.upload_limit,
                             });
+
+                            // Log bandwidth vs throttle limit periodically
+                            if should_log_bandwidth {
+                                // Check download throttle
+                                if let Some(download_limit) = throttle.download_limit {
+                                    let actual_bps = process_info.download_rate;
+                                    let ratio = actual_bps as f64 / download_limit as f64;
+
+                                    let status = if ratio > 1.5 {
+                                        "⚠️  THROTTLE NOT WORKING"
+                                    } else if ratio > 1.1 {
+                                        "⚠️  OVER LIMIT"
+                                    } else {
+                                        "✅ THROTTLED"
+                                    };
+
+                                    log::info!(
+                                        "PID {} ({}) download: actual={}/s, limit={}/s, ratio={:.2}x {}",
+                                        pid,
+                                        process_info.name,
+                                        human_readable(actual_bps),
+                                        human_readable(download_limit),
+                                        ratio,
+                                        status
+                                    );
+                                }
+
+                                // Log eBPF stats if using eBPF backend
+                                #[cfg(feature = "throttle-ebpf")]
+                                let _ = throttle_manager.log_ebpf_stats(*pid);
+                            }
                         }
 
                         // Track bandwidth history

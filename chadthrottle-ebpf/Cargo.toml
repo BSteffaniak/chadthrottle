@@ -18,3 +18,7 @@ path = "src/egress.rs"
 [[bin]]
 name = "chadthrottle-ingress"
 path = "src/ingress.rs"
+
+[[bin]]
+name = "chadthrottle-tc-classifier"
+path = "src/tc_classifier.rs"

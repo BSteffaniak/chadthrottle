@@ -13,7 +13,7 @@ default = [
   "throttle-ifb-tc",
   "throttle-tc-police",
   "throttle-nftables",
-  # "throttle-ebpf",  # Disabled: Requires building eBPF programs with 'cargo xtask build-ebpf'
+  "throttle-ebpf",      # Disabled: Requires building eBPF programs with 'cargo xtask build-ebpf'
   "cgroup-v1",
   "cgroup-v2-nftables",
 ]

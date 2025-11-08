@@ -74,6 +74,14 @@ pub struct ThrottleStats {
     pub packets_dropped: u64,
     /// Bytes dropped due to rate limiting
     pub bytes_dropped: u64,
+    /// Number of times eBPF program was called (diagnostic)
+    pub program_calls: u64,
+    /// Number of times cgroup not found in config map (diagnostic)
+    pub config_misses: u64,
+    /// The cgroup ID that the eBPF program actually sees (diagnostic)
+    pub cgroup_id_seen: u64,
+    /// Reserved for future use
+    pub _reserved: u64,
 }
 
 // SAFETY: ThrottleStats is a plain old data type with all u64 fields
@@ -87,6 +95,10 @@ impl ThrottleStats {
             bytes_total: 0,
             packets_dropped: 0,
             bytes_dropped: 0,
+            program_calls: 0,
+            config_misses: 0,
+            cgroup_id_seen: 0,
+            _reserved: 0,
         }
     }
 }

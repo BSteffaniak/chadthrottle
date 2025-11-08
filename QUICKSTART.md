@@ -7,8 +7,11 @@
 cd /home/braden/ChadThrottle
 cargo build --release
 
-# Run it (requires sudo for network monitoring)
+# Run in TUI mode (interactive)
 sudo ./target/release/chadthrottle
+
+# Or run in CLI mode (non-interactive, throttle a specific PID)
+sudo ./target/release/chadthrottle --pid 1234 --download-limit 1M --upload-limit 500K
 ```
 
 ## What You'll See
@@ -54,7 +57,7 @@ You should see these processes appear in ChadThrottle with their bandwidth usage
 - ✅ Interactive throttle dialog
 - ✅ Dynamic throttle management
 
-**How to Throttle:**
+**How to Throttle (TUI Mode):**
 
 1. Run with sudo: `sudo ./target/release/chadthrottle`
 2. Generate some traffic (e.g., `curl` in another terminal)
@@ -64,6 +67,18 @@ You should see these processes appear in ChadThrottle with their bandwidth usage
 6. Press Enter to apply
 7. Watch the ⚡ indicator appear!
 8. Press `r` to remove the throttle
+
+**How to Throttle (CLI Mode):**
+
+```bash
+# Find the PID you want to throttle
+ps aux | grep firefox
+
+# Throttle it directly
+sudo ./target/release/chadthrottle --pid 1234 --download-limit 1M --upload-limit 500K
+
+# Runs until you press Ctrl+C, then automatically removes the throttle
+```
 
 **Example:**
 

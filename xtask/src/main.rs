@@ -217,10 +217,11 @@ fn build_ebpf(release: bool) -> Result<()> {
     // Determine nightly strategy
     let strategy = ensure_nightly_available()?;
 
-    // Build both eBPF programs
+    // Build all eBPF programs
     for (name, bin) in &[
         ("egress", "chadthrottle-egress"),
         ("ingress", "chadthrottle-ingress"),
+        ("tc_classifier", "chadthrottle-tc-classifier"),
     ] {
         println!("  → Building {}...", bin);
 

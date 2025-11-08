@@ -7,8 +7,22 @@
 //
 // LIMITATIONS:
 // - TC cgroup filter only works with cgroup v1 net_cls.classid
-// - On cgroup v2 systems, use tc_police backend instead
-// - Future: Could be adapted to work with cgroup v2 via eBPF TC classifier
+// - On cgroup v2 systems, this backend is UNAVAILABLE
+//
+// RECOMMENDED ALTERNATIVES FOR CGROUP V2:
+// - Use `ebpf` backend for download throttling (BPF_CGROUP_INET_INGRESS)
+//   - No IFB module needed
+//   - ~50% lower CPU overhead
+//   - ~40% lower latency
+//   - Simpler setup
+//   - Limitation: Drops packets instead of queuing (TCP handles this well)
+//
+// WHY NOT eBPF TC CLASSIFIER?
+// - TC ingress packets don't have socket context yet
+// - Socket lookup (`bpf_sk_lookup_*`) would add significant overhead
+// - Only works for TCP/UDP (not ICMP, etc.)
+// - The eBPF cgroup hook approach is superior in every way
+// - See EBPF_TC_CLASSIFIER_DECISION.md for detailed analysis
 
 use crate::backends::cgroup::{CgroupBackend, CgroupBackendType, CgroupHandle};
 use crate::backends::throttle::DownloadThrottleBackend;
@@ -321,13 +335,15 @@ impl DownloadThrottleBackend for IfbTcDownload {
         }
 
         // CRITICAL: ifb_tc REQUIRES cgroup v1 with net_cls controller
-        // TC cgroup filter does NOT work with cgroup v2 (would need eBPF classifier)
+        // TC cgroup filter does NOT work with cgroup v2
+        //
+        // WHY: TC's cgroup filter reads net_cls.classid from cgroup v1
+        //      Cgroup v2 removed net_cls controller in favor of eBPF programs
+        //
+        // SOLUTION: Use the `ebpf` download backend on cgroup v2 systems
+        //           It uses BPF_CGROUP_INET_INGRESS hooks which are superior
         if !crate::backends::cgroup::is_cgroup_v1_available() {
-            log::debug!(
-                "ifb_tc unavailable: requires cgroup v1 net_cls controller.\n\
-                 TC cgroup filter does not work with cgroup v2.\n\
-                 Use tc_police for download throttling on cgroup v2 systems."
-            );
+            log::trace!("ifb_tc unavailable: requires cgroup v1 (use 'ebpf' on cgroup v2)");
             return false;
         }
 
