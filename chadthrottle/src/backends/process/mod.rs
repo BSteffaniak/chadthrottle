@@ -54,6 +54,9 @@ pub struct ConnectionEntry {
     pub inode: u64,
 }
 
+// Socket mapper backend system (cross-platform)
+pub mod socket_mapper;
+
 // Platform-specific implementations
 #[cfg(target_os = "linux")]
 mod linux;
@@ -67,14 +70,25 @@ pub use macos::MacOSProcessUtils;
 
 /// Factory function to create platform-specific ProcessUtils
 pub fn create_process_utils() -> Box<dyn ProcessUtils> {
+    create_process_utils_with_socket_mapper(None)
+}
+
+/// Factory function to create platform-specific ProcessUtils with custom socket mapper
+pub fn create_process_utils_with_socket_mapper(
+    socket_mapper_preference: Option<&str>,
+) -> Box<dyn ProcessUtils> {
     #[cfg(target_os = "linux")]
     {
-        Box::new(LinuxProcessUtils::new())
+        Box::new(LinuxProcessUtils::with_socket_mapper(
+            socket_mapper_preference,
+        ))
     }
 
     #[cfg(target_os = "macos")]
     {
-        Box::new(MacOSProcessUtils::new())
+        Box::new(MacOSProcessUtils::with_socket_mapper(
+            socket_mapper_preference,
+        ))
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]

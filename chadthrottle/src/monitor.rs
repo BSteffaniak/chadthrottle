@@ -1,4 +1,4 @@
-use crate::backends::process::{ProcessUtils, create_process_utils};
+use crate::backends::process::ProcessUtils;
 use crate::process::{InterfaceInfo, InterfaceMap, ProcessInfo, ProcessMap};
 use anyhow::{Context, Result};
 use pnet::datalink::{self, Channel, NetworkInterface};
@@ -89,6 +89,10 @@ struct ProcessInterfaceBandwidth {
 
 impl NetworkMonitor {
     pub fn new() -> Result<Self> {
+        Self::with_socket_mapper(None)
+    }
+
+    pub fn with_socket_mapper(socket_mapper_preference: Option<&str>) -> Result<Self> {
         let bandwidth_tracker = Arc::new(Mutex::new(BandwidthTracker {
             connection_map: HashMap::new(),
             socket_map: HashMap::new(),
@@ -102,7 +106,9 @@ impl NetworkMonitor {
         }));
 
         // Create platform-specific process utilities
-        let process_utils = create_process_utils();
+        let process_utils = crate::backends::process::create_process_utils_with_socket_mapper(
+            socket_mapper_preference,
+        );
 
         // Create monitor instance first (without starting capture thread yet)
         let mut monitor = Self {

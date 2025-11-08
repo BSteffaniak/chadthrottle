@@ -58,6 +58,10 @@ struct Args {
     #[arg(long, value_name = "BACKEND")]
     download_backend: Option<String>,
 
+    /// Socket mapper backend to use for network monitoring
+    #[arg(long, value_name = "BACKEND")]
+    socket_mapper: Option<String>,
+
     /// List all available backends and exit
     #[arg(long)]
     list_backends: bool,
@@ -93,7 +97,30 @@ struct Args {
 }
 
 fn print_available_backends() {
+    use crate::backends::process::socket_mapper::detect_socket_mappers;
+
     println!("ChadThrottle v0.6.0 - Available Backends\n");
+
+    // Socket mapper backends
+    println!("Socket Mapper Backends:");
+    let socket_mappers = detect_socket_mappers();
+    if socket_mappers.is_empty() {
+        println!("  (none compiled in)");
+    } else {
+        for backend in socket_mappers {
+            let status = if backend.available {
+                "✅ available"
+            } else {
+                "❌ unavailable"
+            };
+            println!(
+                "  {:20} [priority: {:?}] {}",
+                backend.name, backend.priority, status
+            );
+        }
+    }
+
+    println!();
 
     // Upload backends
     println!("Upload Backends:");
@@ -138,7 +165,9 @@ fn print_available_backends() {
     println!();
     println!("Usage:");
     println!("  TUI Mode:");
-    println!("    chadthrottle [--upload-backend <name>] [--download-backend <name>]");
+    println!(
+        "    chadthrottle [--upload-backend <name>] [--download-backend <name>] [--socket-mapper <name>]"
+    );
     println!();
     println!("  CLI Mode:");
     println!(
@@ -388,6 +417,7 @@ async fn main() -> Result<()> {
         .download_backend
         .as_deref()
         .or(config.preferred_download_backend.as_deref());
+    let socket_mapper_preference = args.socket_mapper.as_deref();
 
     // Log which preference source is being used
     if let Some(pref) = upload_preference {
@@ -403,6 +433,9 @@ async fn main() -> Result<()> {
         } else {
             log::info!("Using download backend from config: {}", pref);
         }
+    }
+    if let Some(pref) = socket_mapper_preference {
+        log::info!("Using socket mapper from CLI: {}", pref);
     }
 
     // Select and create backends with preferences
@@ -439,7 +472,7 @@ async fn main() -> Result<()> {
 
     // Create managers with selected backends
     let mut throttle_manager = ThrottleManager::new(upload_backend, download_backend);
-    let mut monitor = NetworkMonitor::new()?;
+    let mut monitor = NetworkMonitor::with_socket_mapper(socket_mapper_preference)?;
     if !args.no_restore {
         log::info!("Restoring saved throttles...");
         for (pid, saved_throttle) in config.get_throttles() {

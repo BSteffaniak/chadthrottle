@@ -1,16 +1,28 @@
 // macOS-specific process utilities
 
-use super::{ConnectionEntry, ConnectionMap, ProcessEntry, ProcessUtils};
+use super::socket_mapper::{SocketMapperBackend, select_socket_mapper};
+use super::{ConnectionMap, ProcessEntry, ProcessUtils};
 use anyhow::Result;
-use std::collections::HashMap;
 use sysinfo::{Pid, System};
 
-/// macOS process utilities using sysinfo and system APIs
-pub struct MacOSProcessUtils;
+/// macOS process utilities with pluggable socket mapping
+pub struct MacOSProcessUtils {
+    socket_mapper: Box<dyn SocketMapperBackend>,
+}
 
 impl MacOSProcessUtils {
     pub fn new() -> Self {
-        Self
+        Self::with_socket_mapper(None)
+    }
+
+    /// Create with a specific socket mapper backend
+    pub fn with_socket_mapper(backend_name: Option<&str>) -> Self {
+        let socket_mapper = select_socket_mapper(backend_name)
+            .expect("Failed to initialize socket mapper on macOS");
+
+        log::debug!("Using socket mapper backend: {}", socket_mapper.name());
+
+        Self { socket_mapper }
     }
 }
 
@@ -46,17 +58,7 @@ impl ProcessUtils for MacOSProcessUtils {
     }
 
     fn get_connection_map(&self) -> Result<ConnectionMap> {
-        // TODO: Implement socket-to-PID mapping for macOS
-        // For now, return empty map to allow compilation
-        // This will be implemented in Phase 2
-        log::warn!("macOS socket-to-PID mapping not yet implemented");
-
-        Ok(ConnectionMap {
-            socket_to_pid: HashMap::new(),
-            tcp_connections: Vec::new(),
-            tcp6_connections: Vec::new(),
-            udp_connections: Vec::new(),
-            udp6_connections: Vec::new(),
-        })
+        // Delegate to pluggable socket mapper backend
+        self.socket_mapper.get_connection_map()
     }
 }
