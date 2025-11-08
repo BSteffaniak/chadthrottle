@@ -365,6 +365,19 @@ async fn main() -> Result<()> {
     // Load config FIRST to get backend preferences
     let mut config = config::Config::load().unwrap_or_default();
 
+    // Load interface filter from config
+    if let Some(ref filters) = config.filtered_interfaces {
+        app.active_interface_filters = Some(filters.clone());
+
+        if filters.is_empty() {
+            log::info!("Loaded filter: showing no interfaces");
+            app.status_message = "Loaded filter: showing no interfaces".to_string();
+        } else {
+            log::info!("Loaded interface filter: {}", filters.join(", "));
+            app.status_message = format!("Loaded interface filter: {}", filters.join(", "));
+        }
+    }
+
     // Determine backend preferences: CLI args override config file preferences
     let upload_preference = args
         .upload_backend
@@ -472,6 +485,10 @@ async fn main() -> Result<()> {
                 },
             );
         }
+
+        // Save interface filter
+        config.filtered_interfaces = app.active_interface_filters.clone();
+
         if let Err(e) = config.save() {
             log::warn!("Failed to save config: {}", e);
         } else {
@@ -479,6 +496,11 @@ async fn main() -> Result<()> {
                 "Saved {} throttle(s) to config",
                 config.get_throttles().len()
             );
+            if let Some(ref filters) = config.filtered_interfaces {
+                if !filters.is_empty() {
+                    log::info!("Saved interface filter: {}", filters.join(", "));
+                }
+            }
         }
     }
 
@@ -740,6 +762,45 @@ async fn run_app<B: ratatui::backend::Backend>(
                             if let Some(iface) = app.get_selected_interface() {
                                 app.status_message =
                                     format!("Viewing processes on interface: {}", iface.name);
+                            }
+                        }
+                    }
+                    KeyCode::Char(' ') => {
+                        // Space bar toggles filter in interface list view
+                        if app.view_mode == ui::ViewMode::InterfaceList {
+                            if let Some(iface) = app.get_selected_interface() {
+                                let iface_name = iface.name.clone();
+                                app.toggle_interface_filter(iface_name);
+
+                                // Save to config immediately
+                                config.filtered_interfaces = app.active_interface_filters.clone();
+                                if let Err(e) = config.save() {
+                                    log::error!("Failed to save filter config: {}", e);
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char('a') | KeyCode::Char('A') => {
+                        // 'A' - Select all (clear filter) in interface list view
+                        if app.view_mode == ui::ViewMode::InterfaceList {
+                            app.clear_interface_filters();
+
+                            // Save to config immediately
+                            config.filtered_interfaces = None;
+                            if let Err(e) = config.save() {
+                                log::error!("Failed to save filter config: {}", e);
+                            }
+                        }
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') => {
+                        // 'N' - Deselect all (show nothing) in interface list view
+                        if app.view_mode == ui::ViewMode::InterfaceList {
+                            app.set_empty_filter();
+
+                            // Save to config immediately
+                            config.filtered_interfaces = Some(vec![]);
+                            if let Err(e) = config.save() {
+                                log::error!("Failed to save filter config: {}", e);
                             }
                         }
                     }

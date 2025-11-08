@@ -18,19 +18,43 @@ pub struct SavedThrottle {
 }
 
 /// Configuration file structure
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Throttles by PID
+    #[serde(default)]
     pub throttles: HashMap<i32, SavedThrottle>,
 
     /// Auto-restore throttles on startup
+    #[serde(default = "default_auto_restore")]
     pub auto_restore: bool,
 
     /// Preferred upload backend
+    #[serde(default)]
     pub preferred_upload_backend: Option<String>,
 
     /// Preferred download backend
+    #[serde(default)]
     pub preferred_download_backend: Option<String>,
+
+    /// Interface filter: None = show all, Some([]) = show nothing, Some([...]) = filter to these
+    #[serde(default)]
+    pub filtered_interfaces: Option<Vec<String>>,
+}
+
+fn default_auto_restore() -> bool {
+    true
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            throttles: HashMap::new(),
+            auto_restore: true,
+            preferred_upload_backend: None,
+            preferred_download_backend: None,
+            filtered_interfaces: None, // Show all by default
+        }
+    }
 }
 
 impl Config {

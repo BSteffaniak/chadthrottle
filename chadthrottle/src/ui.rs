@@ -36,6 +36,8 @@ pub struct AppState {
     pub interface_list_state: ListState,
     pub selected_interface_index: Option<usize>,
     pub selected_interface_name: Option<String>,
+    // Interface filter state
+    pub active_interface_filters: Option<Vec<String>>, // None = show all, Some([]) = show nothing, Some([...]) = filter
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -243,6 +245,7 @@ impl AppState {
             interface_list_state,
             selected_interface_index: None,
             selected_interface_name: None,
+            active_interface_filters: None, // Show all by default
         }
     }
 
@@ -327,8 +330,79 @@ impl AppState {
         self.selected_interface_name = None;
     }
 
+    /// Check if an interface is in the current filter (i.e., should be shown)
+    pub fn is_interface_filtered(&self, interface_name: &str) -> bool {
+        match &self.active_interface_filters {
+            None => true, // No filter = all shown
+            Some(filters) => filters.contains(&interface_name.to_string()),
+        }
+    }
+
+    /// Toggle a single interface in/out of the filter
+    pub fn toggle_interface_filter(&mut self, interface_name: String) {
+        match &mut self.active_interface_filters {
+            None => {
+                // No filter active - create one with just this interface unchecked
+                // Collect all OTHER interfaces
+                let all_others: Vec<String> = self
+                    .interface_list
+                    .iter()
+                    .filter(|i| i.name != interface_name)
+                    .map(|i| i.name.clone())
+                    .collect();
+
+                if all_others.is_empty() {
+                    self.status_message = "Filter: showing nothing".to_string();
+                } else {
+                    self.status_message = format!("Filter: hiding {}", interface_name);
+                }
+
+                self.active_interface_filters = Some(all_others);
+            }
+            Some(filters) => {
+                if filters.contains(&interface_name) {
+                    // Remove from filter (hide this interface)
+                    filters.retain(|f| f != &interface_name);
+
+                    if filters.is_empty() {
+                        self.status_message = "Filter: showing nothing".to_string();
+                    } else {
+                        self.status_message = format!("Filter: {}", filters.join(", "));
+                    }
+                } else {
+                    // Add to filter (show this interface)
+                    filters.push(interface_name.clone());
+                    filters.sort(); // Keep sorted
+
+                    // Check if all interfaces now selected
+                    if filters.len() == self.interface_list.len() {
+                        self.active_interface_filters = None;
+                        self.status_message = "Filter cleared (all selected)".to_string();
+                    } else {
+                        self.status_message = format!("Filter: {}", filters.join(", "));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Clear filter (show all)
+    pub fn clear_interface_filters(&mut self) {
+        self.active_interface_filters = None;
+        self.status_message = "Filter cleared - showing all interfaces".to_string();
+    }
+
+    /// Set empty filter (show nothing)
+    pub fn set_empty_filter(&mut self) {
+        self.active_interface_filters = Some(vec![]);
+        self.status_message = "Filter: showing no interfaces".to_string();
+    }
+
     pub fn update_processes(&mut self, process_map: ProcessMap) {
         let mut processes: Vec<ProcessInfo> = process_map.into_values().collect();
+
+        // Apply interface filter BEFORE sorting
+        processes = self.apply_process_filter(processes);
 
         if self.sort_frozen {
             // FREEZE MODE: Sort by frozen position, new processes go to bottom
@@ -470,6 +544,30 @@ impl AppState {
         } else {
             // Exiting freeze mode - clear frozen order
             self.frozen_order.clear();
+        }
+    }
+
+    /// Apply interface filter to process list
+    fn apply_process_filter(&self, mut processes: Vec<ProcessInfo>) -> Vec<ProcessInfo> {
+        match &self.active_interface_filters {
+            None => {
+                // No filter - show all processes
+                processes
+            }
+            Some(filters) if filters.is_empty() => {
+                // Empty filter - show nothing
+                vec![]
+            }
+            Some(filters) => {
+                // Filter to processes using these interfaces
+                processes.retain(|proc| {
+                    // Keep process if it uses ANY of the filtered interfaces
+                    proc.interface_stats
+                        .keys()
+                        .any(|iface_name| filters.contains(iface_name))
+                });
+                processes
+            }
         }
     }
 }
@@ -729,10 +827,50 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &AppState) {
     }
 
     spans.push(Span::raw("|  "));
-    spans.push(Span::styled(
-        &app.status_message,
-        Style::default().fg(Color::Gray),
-    ));
+
+    // Show filter status
+    match &app.active_interface_filters {
+        None => {
+            // No filter - show normal message
+            spans.push(Span::styled(
+                &app.status_message,
+                Style::default().fg(Color::Gray),
+            ));
+        }
+        Some(filters) if filters.is_empty() => {
+            // Empty filter
+            spans.push(Span::styled(
+                "FILTER: None (showing 0 processes) | ",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(
+                &app.status_message,
+                Style::default().fg(Color::Gray),
+            ));
+        }
+        Some(filters) => {
+            // Active filter
+            let filter_text = if filters.len() <= 3 {
+                format!("FILTER: {} | ", filters.join(", "))
+            } else {
+                format!(
+                    "FILTER: {} +{} more | ",
+                    filters[..2].join(", "),
+                    filters.len() - 2
+                )
+            };
+            spans.push(Span::styled(
+                filter_text,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(
+                &app.status_message,
+                Style::default().fg(Color::Gray),
+            ));
+        }
+    }
 
     let status =
         Paragraph::new(vec![Line::from(spans)]).block(Block::default().borders(Borders::ALL));
@@ -1411,6 +1549,15 @@ fn draw_interface_list(f: &mut Frame, area: Rect, app: &mut AppState) {
                 "  "
             };
 
+            // Filter checkbox
+            let is_filtered = app.is_interface_filtered(&iface.name);
+            let checkbox = if is_filtered { "[✓]" } else { "[ ]" };
+            let checkbox_style = if is_filtered {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+
             // Status indicator: up (✓), down (✗), loopback (⟲)
             let status_indicator = if iface.is_loopback {
                 "⟲"
@@ -1428,6 +1575,23 @@ fn draw_interface_list(f: &mut Frame, area: Rect, app: &mut AppState) {
                 Color::Red
             };
 
+            // Calculate visible process count (filtered or total)
+            let visible_count = if let Some(filters) = &app.active_interface_filters {
+                if filters.is_empty() {
+                    0 // Empty filter = show nothing
+                } else if filters.contains(&iface.name) {
+                    // Count processes that use this interface
+                    app.process_list
+                        .iter()
+                        .filter(|p| p.interface_stats.contains_key(&iface.name))
+                        .count()
+                } else {
+                    0 // Not in filter
+                }
+            } else {
+                iface.process_count // No filter = show total
+            };
+
             // Format IP addresses
             let ip_str = if iface.ip_addresses.is_empty() {
                 "No IP".to_string()
@@ -1443,6 +1607,8 @@ fn draw_interface_list(f: &mut Frame, area: Rect, app: &mut AppState) {
 
             let content = Line::from(vec![
                 Span::styled(selection_indicator, Style::default().fg(Color::Yellow)),
+                Span::styled(checkbox, checkbox_style),
+                Span::raw(" "),
                 Span::styled(
                     status_indicator,
                     Style::default()
@@ -1482,7 +1648,7 @@ fn draw_interface_list(f: &mut Frame, area: Rect, app: &mut AppState) {
                     Style::default().fg(Color::Yellow),
                 ),
                 Span::styled(
-                    format!("{} proc", iface.process_count),
+                    format!("{} proc", visible_count),
                     Style::default().fg(Color::Magenta),
                 ),
             ]);
@@ -1522,9 +1688,9 @@ fn draw_interface_list(f: &mut Frame, area: Rect, app: &mut AppState) {
     };
 
     // Render border and title
-    let border = Block::default()
-        .borders(Borders::ALL)
-        .title("Network Interfaces [Press 'i' for process view | Enter to view details]");
+    let border = Block::default().borders(Borders::ALL).title(
+        "Network Interfaces [Space: Filter | Enter: Details | A: All | N: None | i: Process view]",
+    );
     f.render_widget(border, area);
 
     // Render header
