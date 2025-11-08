@@ -1,7 +1,7 @@
 use crate::backends::BackendPriority;
 use crate::backends::throttle::BackendInfo;
 use crate::history::HistoryTracker;
-use crate::process::{ProcessInfo, ProcessMap};
+use crate::process::{InterfaceInfo, InterfaceMap, ProcessInfo, ProcessMap};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -30,6 +30,19 @@ pub struct AppState {
     pub show_graph: bool,
     pub sort_frozen: bool,
     frozen_order: HashMap<i32, usize>, // PID -> position index
+    // Interface view state
+    pub view_mode: ViewMode,
+    pub interface_list: Vec<InterfaceInfo>,
+    pub interface_list_state: ListState,
+    pub selected_interface_index: Option<usize>,
+    pub selected_interface_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ViewMode {
+    ProcessView,     // Show all processes
+    InterfaceList,   // Show list of interfaces
+    InterfaceDetail, // Show processes on selected interface
 }
 
 pub struct BackendSelector {
@@ -207,6 +220,9 @@ impl AppState {
         let mut list_state = ListState::default();
         list_state.select(None); // Nothing selected initially
 
+        let mut interface_list_state = ListState::default();
+        interface_list_state.select(None);
+
         Self {
             process_list: Vec::new(),
             selected_index: None, // Nothing selected initially
@@ -222,7 +238,93 @@ impl AppState {
             status_message: String::from("ChadThrottle started. Press 'h' for help."),
             sort_frozen: false,
             frozen_order: HashMap::new(),
+            view_mode: ViewMode::ProcessView,
+            interface_list: Vec::new(),
+            interface_list_state,
+            selected_interface_index: None,
+            selected_interface_name: None,
         }
+    }
+
+    pub fn update_interfaces(&mut self, interface_map: InterfaceMap) {
+        let mut interfaces: Vec<InterfaceInfo> = interface_map.into_values().collect();
+
+        // Sort by name for consistent display
+        interfaces.sort_by(|a, b| a.name.cmp(&b.name));
+
+        self.interface_list = interfaces;
+
+        // Adjust selection if out of bounds
+        if let Some(index) = self.selected_interface_index {
+            if index >= self.interface_list.len() && !self.interface_list.is_empty() {
+                self.selected_interface_index = Some(self.interface_list.len() - 1);
+                self.interface_list_state
+                    .select(Some(self.interface_list.len() - 1));
+            }
+        }
+    }
+
+    pub fn toggle_view_mode(&mut self) {
+        self.view_mode = match self.view_mode {
+            ViewMode::ProcessView => {
+                // Switch to interface list view
+                if !self.interface_list.is_empty() {
+                    self.selected_interface_index = Some(0);
+                    self.interface_list_state.select(Some(0));
+                }
+                ViewMode::InterfaceList
+            }
+            ViewMode::InterfaceList | ViewMode::InterfaceDetail => {
+                // Switch back to process view
+                ViewMode::ProcessView
+            }
+        };
+    }
+
+    pub fn select_next_interface(&mut self) {
+        if self.interface_list.is_empty() {
+            return;
+        }
+
+        let new_index = match self.selected_interface_index {
+            None => 0,
+            Some(idx) => (idx + 1) % self.interface_list.len(),
+        };
+
+        self.selected_interface_index = Some(new_index);
+        self.interface_list_state.select(Some(new_index));
+    }
+
+    pub fn select_previous_interface(&mut self) {
+        if self.interface_list.is_empty() {
+            return;
+        }
+
+        let new_index = match self.selected_interface_index {
+            None => 0,
+            Some(0) => self.interface_list.len() - 1,
+            Some(idx) => idx - 1,
+        };
+
+        self.selected_interface_index = Some(new_index);
+        self.interface_list_state.select(Some(new_index));
+    }
+
+    pub fn get_selected_interface(&self) -> Option<&InterfaceInfo> {
+        self.selected_interface_index
+            .and_then(|idx| self.interface_list.get(idx))
+    }
+
+    pub fn enter_interface_detail(&mut self) {
+        if let Some(interface) = self.get_selected_interface() {
+            self.selected_interface_name = Some(interface.name.clone());
+            self.view_mode = ViewMode::InterfaceDetail;
+        }
+    }
+
+    pub fn exit_interface_detail(&mut self) {
+        self.view_mode = ViewMode::InterfaceList;
+        self.selected_interface_name = None;
     }
 
     pub fn update_processes(&mut self, process_map: ProcessMap) {
@@ -385,7 +487,7 @@ pub fn draw_ui_with_backend_info(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Header
-            Constraint::Min(10),   // Process list
+            Constraint::Min(10),   // Main content area
             Constraint::Length(3), // Status bar
         ])
         .split(f.area());
@@ -393,8 +495,18 @@ pub fn draw_ui_with_backend_info(
     // Header
     draw_header(f, chunks[0]);
 
-    // Process list
-    draw_process_list(f, chunks[1], app);
+    // Main content area - render based on view mode
+    match app.view_mode {
+        ViewMode::ProcessView => {
+            draw_process_list(f, chunks[1], app);
+        }
+        ViewMode::InterfaceList => {
+            draw_interface_list(f, chunks[1], app);
+        }
+        ViewMode::InterfaceDetail => {
+            draw_interface_detail(f, chunks[1], app);
+        }
+    }
 
     // Status bar
     draw_status_bar(f, chunks[2], app);
@@ -1284,4 +1396,321 @@ fn draw_backend_selector(f: &mut Frame, area: Rect, app: &AppState, backend_info
     let popup_area = centered_rect(80, 60, area);
     f.render_widget(Clear, popup_area);
     f.render_widget(selector_widget, popup_area);
+}
+
+fn draw_interface_list(f: &mut Frame, area: Rect, app: &mut AppState) {
+    let items: Vec<ListItem> = app
+        .interface_list
+        .iter()
+        .enumerate()
+        .map(|(index, iface)| {
+            // Selection indicator
+            let selection_indicator = if Some(index) == app.interface_list_state.selected() {
+                "▶ "
+            } else {
+                "  "
+            };
+
+            // Status indicator: up (✓), down (✗), loopback (⟲)
+            let status_indicator = if iface.is_loopback {
+                "⟲"
+            } else if iface.is_up {
+                "✓"
+            } else {
+                "✗"
+            };
+
+            let status_color = if iface.is_loopback {
+                Color::Cyan
+            } else if iface.is_up {
+                Color::Green
+            } else {
+                Color::Red
+            };
+
+            // Format IP addresses
+            let ip_str = if iface.ip_addresses.is_empty() {
+                "No IP".to_string()
+            } else {
+                iface
+                    .ip_addresses
+                    .iter()
+                    .take(2) // Show up to 2 IPs
+                    .map(|ip| ip.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+
+            let content = Line::from(vec![
+                Span::styled(selection_indicator, Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    status_indicator,
+                    Style::default()
+                        .fg(status_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    format!("{:12} ", iface.name),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(
+                        "{:30} ",
+                        if ip_str.len() > 30 {
+                            format!("{}...", &ip_str[..27])
+                        } else {
+                            ip_str
+                        }
+                    ),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(
+                    format!(
+                        "↓{:>10} ",
+                        ProcessInfo::format_rate(iface.total_download_rate)
+                    ),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::styled(
+                    format!(
+                        "↑{:>10} ",
+                        ProcessInfo::format_rate(iface.total_upload_rate)
+                    ),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled(
+                    format!("{} proc", iface.process_count),
+                    Style::default().fg(Color::Magenta),
+                ),
+            ]);
+
+            ListItem::new(content)
+        })
+        .collect();
+
+    let header = Line::from(vec![
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            "Interface    ",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "IP Address                     ",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("DL Rate    ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("UL Rate    ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("Processes", Style::default().add_modifier(Modifier::BOLD)),
+    ]);
+
+    // Split the area for header and list
+    let header_area = Rect {
+        x: area.x + 2,
+        y: area.y + 1,
+        width: area.width - 4,
+        height: 1,
+    };
+
+    let list_area = Rect {
+        x: area.x,
+        y: area.y + 2,
+        width: area.width,
+        height: area.height.saturating_sub(2),
+    };
+
+    // Render border and title
+    let border = Block::default()
+        .borders(Borders::ALL)
+        .title("Network Interfaces [Press 'i' for process view | Enter to view details]");
+    f.render_widget(border, area);
+
+    // Render header
+    f.render_widget(Paragraph::new(header), header_area);
+
+    // Render list
+    let list = List::new(items).highlight_style(
+        Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    let inner_list_area = Rect {
+        x: list_area.x + 1,
+        y: list_area.y,
+        width: list_area.width.saturating_sub(2),
+        height: list_area.height.saturating_sub(1),
+    };
+
+    f.render_stateful_widget(list, inner_list_area, &mut app.interface_list_state);
+}
+
+fn draw_interface_detail(f: &mut Frame, area: Rect, app: &mut AppState) {
+    // Get the selected interface name
+    let interface_name = match &app.selected_interface_name {
+        Some(name) => name.clone(),
+        None => {
+            // No interface selected, show error
+            let error = Paragraph::new("No interface selected")
+                .block(Block::default().borders(Borders::ALL).title("Error"));
+            f.render_widget(error, area);
+            return;
+        }
+    };
+
+    // Filter processes to only show those using this interface
+    let filtered_processes: Vec<&ProcessInfo> = app
+        .process_list
+        .iter()
+        .filter(|p| p.interface_stats.contains_key(&interface_name))
+        .collect();
+
+    let items: Vec<ListItem> = filtered_processes
+        .iter()
+        .map(|proc| {
+            // Get interface-specific stats
+            let iface_stats = proc.interface_stats.get(&interface_name);
+
+            let (dl_rate, ul_rate, dl_total, ul_total) = if let Some(stats) = iface_stats {
+                (
+                    stats.download_rate,
+                    stats.upload_rate,
+                    stats.total_download,
+                    stats.total_upload,
+                )
+            } else {
+                (0, 0, 0, 0)
+            };
+
+            // Status indicator
+            let status_indicator = if proc.is_throttled() {
+                "⚡"
+            } else if proc.is_terminated {
+                "💀"
+            } else {
+                " "
+            };
+
+            let terminated_color = Color::Gray;
+            let name_color = if proc.is_terminated {
+                terminated_color
+            } else {
+                Color::White
+            };
+            let dl_rate_color = if proc.is_terminated {
+                terminated_color
+            } else {
+                Color::Green
+            };
+            let ul_rate_color = if proc.is_terminated {
+                terminated_color
+            } else {
+                Color::Yellow
+            };
+            let dl_total_color = if proc.is_terminated {
+                terminated_color
+            } else {
+                Color::Cyan
+            };
+            let ul_total_color = if proc.is_terminated {
+                terminated_color
+            } else {
+                Color::Magenta
+            };
+            let status_color = if proc.is_terminated {
+                terminated_color
+            } else {
+                Color::Red
+            };
+
+            let content = Line::from(vec![
+                Span::raw("  "),
+                Span::raw(format!("{:7} ", proc.pid)),
+                Span::styled(
+                    format!(
+                        "{:20} ",
+                        if proc.name.len() > 20 {
+                            format!("{}...", &proc.name[..17])
+                        } else {
+                            proc.name.clone()
+                        }
+                    ),
+                    Style::default().fg(name_color),
+                ),
+                Span::styled(
+                    format!("↓{:>10} ", ProcessInfo::format_rate(dl_rate)),
+                    Style::default().fg(dl_rate_color),
+                ),
+                Span::styled(
+                    format!("↑{:>10} ", ProcessInfo::format_rate(ul_rate)),
+                    Style::default().fg(ul_rate_color),
+                ),
+                Span::styled(
+                    format!("{:>10} ", ProcessInfo::format_bytes(dl_total)),
+                    Style::default().fg(dl_total_color),
+                ),
+                Span::styled(
+                    format!("{:>10} ", ProcessInfo::format_bytes(ul_total)),
+                    Style::default().fg(ul_total_color),
+                ),
+                Span::styled(
+                    status_indicator,
+                    Style::default()
+                        .fg(status_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]);
+
+            ListItem::new(content)
+        })
+        .collect();
+
+    let header = Line::from(vec![
+        Span::styled("PID     ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Process              ",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("DL Rate    ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("UL Rate    ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("Total DL   ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("Total UL   ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("Status", Style::default().add_modifier(Modifier::BOLD)),
+    ]);
+
+    // Split the area
+    let header_area = Rect {
+        x: area.x + 4,
+        y: area.y + 1,
+        width: area.width - 4,
+        height: 1,
+    };
+
+    let list_area = Rect {
+        x: area.x,
+        y: area.y + 2,
+        width: area.width,
+        height: area.height.saturating_sub(2),
+    };
+
+    // Render border and title
+    let title = format!("Interface: {} [Press Esc to go back]", interface_name);
+    let border = Block::default().borders(Borders::ALL).title(title);
+    f.render_widget(border, area);
+
+    // Render header
+    f.render_widget(Paragraph::new(header), header_area);
+
+    // Render list
+    let list = List::new(items);
+    let inner_list_area = Rect {
+        x: list_area.x + 1,
+        y: list_area.y,
+        width: list_area.width.saturating_sub(2),
+        height: list_area.height.saturating_sub(1),
+    };
+
+    f.render_widget(list, inner_list_area);
 }

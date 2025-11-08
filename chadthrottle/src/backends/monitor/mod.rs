@@ -1,7 +1,7 @@
 // Network monitoring backend trait and implementations
 
 use super::{BackendCapabilities, BackendPriority};
-use crate::process::ProcessMap;
+use crate::process::{InterfaceMap, ProcessMap};
 use anyhow::Result;
 
 #[cfg(feature = "monitor-pnet")]
@@ -27,7 +27,7 @@ pub trait MonitorBackend: Send + Sync {
     fn init(&mut self) -> Result<()>;
 
     /// Update network statistics (called periodically)
-    fn update(&mut self) -> Result<ProcessMap>;
+    fn update(&mut self) -> Result<(ProcessMap, InterfaceMap)>;
 
     /// Cleanup on shutdown
     fn cleanup(&mut self) -> Result<()>;

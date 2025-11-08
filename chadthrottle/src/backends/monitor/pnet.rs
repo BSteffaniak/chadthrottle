@@ -3,7 +3,7 @@
 use crate::backends::monitor::MonitorBackend;
 use crate::backends::{BackendCapabilities, BackendPriority};
 use crate::monitor::NetworkMonitor as LegacyNetworkMonitor;
-use crate::process::ProcessMap;
+use crate::process::{InterfaceMap, ProcessMap};
 use anyhow::Result;
 
 /// pnet packet capture monitoring backend
@@ -50,7 +50,7 @@ impl MonitorBackend for PnetMonitor {
         Ok(())
     }
 
-    fn update(&mut self) -> Result<ProcessMap> {
+    fn update(&mut self) -> Result<(ProcessMap, InterfaceMap)> {
         self.inner.update()
     }
 

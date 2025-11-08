@@ -1,4 +1,4 @@
-use crate::process::{ProcessInfo, ProcessMap};
+use crate::process::{InterfaceInfo, InterfaceMap, ProcessInfo, ProcessMap};
 use anyhow::{Context, Result};
 use pnet::datalink::{self, Channel, NetworkInterface};
 use pnet::packet::Packet;
@@ -38,8 +38,8 @@ enum Protocol {
 pub struct NetworkMonitor {
     // Shared state between packet capture thread and update thread
     bandwidth_tracker: Arc<Mutex<BandwidthTracker>>,
-    // Handle to packet capture thread
-    _capture_handle: Option<thread::JoinHandle<()>>,
+    // Handles to packet capture threads (one per interface)
+    _capture_handles: Vec<thread::JoinHandle<()>>,
     last_update: Instant,
 }
 
@@ -52,6 +52,10 @@ struct BandwidthTracker {
     process_bandwidth: HashMap<i32, ProcessBandwidth>,
     // PID -> termination time (for showing terminated processes temporarily)
     terminated_processes: HashMap<i32, Instant>,
+    // Interface statistics: interface_name -> InterfaceBandwidth
+    interface_bandwidth: HashMap<String, InterfaceBandwidth>,
+    // Per-process, per-interface stats: (pid, interface) -> bandwidth
+    process_interface_bandwidth: HashMap<(i32, String), ProcessInterfaceBandwidth>,
     // Packet capture statistics for debugging
     packets_captured: u64,
     packets_matched: u64,
@@ -66,6 +70,21 @@ struct ProcessBandwidth {
     last_tx_bytes: u64,
 }
 
+struct InterfaceBandwidth {
+    name: String,
+    rx_bytes: u64,
+    tx_bytes: u64,
+    last_rx_bytes: u64,
+    last_tx_bytes: u64,
+}
+
+struct ProcessInterfaceBandwidth {
+    rx_bytes: u64,
+    tx_bytes: u64,
+    last_rx_bytes: u64,
+    last_tx_bytes: u64,
+}
+
 impl NetworkMonitor {
     pub fn new() -> Result<Self> {
         let bandwidth_tracker = Arc::new(Mutex::new(BandwidthTracker {
@@ -73,6 +92,8 @@ impl NetworkMonitor {
             socket_map: HashMap::new(),
             process_bandwidth: HashMap::new(),
             terminated_processes: HashMap::new(),
+            interface_bandwidth: HashMap::new(),
+            process_interface_bandwidth: HashMap::new(),
             packets_captured: 0,
             packets_matched: 0,
             packets_unmatched: 0,
@@ -81,7 +102,7 @@ impl NetworkMonitor {
         // Create monitor instance first (without starting capture thread yet)
         let mut monitor = Self {
             bandwidth_tracker,
-            _capture_handle: None,
+            _capture_handles: Vec::new(),
             last_update: Instant::now(),
         };
 
@@ -90,28 +111,36 @@ impl NetworkMonitor {
         // Without this, all packets in the first second are lost because connection_map is empty
         monitor.update_socket_map()?;
 
-        // Now start packet capture thread with pre-populated maps
-        let tracker_clone = Arc::clone(&monitor.bandwidth_tracker);
-        let capture_handle = thread::spawn(move || {
-            if let Err(e) = Self::capture_packets(tracker_clone) {
-                log::error!("Packet capture error: {}", e);
-            }
-        });
+        // Start packet capture threads for all interfaces
+        let interfaces = Self::find_all_interfaces();
+        log::info!("Starting packet capture on {} interfaces", interfaces.len());
 
-        monitor._capture_handle = Some(capture_handle);
+        for interface in interfaces {
+            let tracker_clone = Arc::clone(&monitor.bandwidth_tracker);
+            let iface_name = interface.name.clone();
+
+            let capture_handle = thread::spawn(move || {
+                if let Err(e) = Self::capture_packets_on_interface(interface, tracker_clone) {
+                    log::error!("Packet capture error on {}: {}", iface_name, e);
+                }
+            });
+
+            monitor._capture_handles.push(capture_handle);
+        }
 
         Ok(monitor)
     }
 
-    pub fn update(&mut self) -> Result<ProcessMap> {
+    pub fn update(&mut self) -> Result<(ProcessMap, InterfaceMap)> {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_update).as_secs_f64();
 
         // Update socket inode mapping
         self.update_socket_map()?;
 
-        // Calculate rates and build process map
+        // Calculate rates and build process map and interface map
         let mut process_map = ProcessMap::new();
+        let mut interface_map = InterfaceMap::new();
         let mut tracker = self.bandwidth_tracker.lock().unwrap();
 
         // First pass: collect all data we need (to avoid multiple borrows)
@@ -179,6 +208,39 @@ impl NetworkMonitor {
                 proc_info.total_upload = tx_bytes;
                 proc_info.is_terminated = false;
 
+                // Populate per-interface stats for this process
+                proc_info.interface_stats = tracker
+                    .process_interface_bandwidth
+                    .iter()
+                    .filter(|((p, _), _)| *p == pid)
+                    .map(|((_, iface), bw)| {
+                        let rx_diff = bw.rx_bytes.saturating_sub(bw.last_rx_bytes);
+                        let tx_diff = bw.tx_bytes.saturating_sub(bw.last_tx_bytes);
+
+                        let iface_download_rate = if elapsed > 0.0 {
+                            (rx_diff as f64 / elapsed) as u64
+                        } else {
+                            0
+                        };
+
+                        let iface_upload_rate = if elapsed > 0.0 {
+                            (tx_diff as f64 / elapsed) as u64
+                        } else {
+                            0
+                        };
+
+                        (
+                            iface.clone(),
+                            crate::process::InterfaceStats {
+                                download_rate: iface_download_rate,
+                                upload_rate: iface_upload_rate,
+                                total_download: bw.rx_bytes,
+                                total_upload: bw.tx_bytes,
+                            },
+                        )
+                    })
+                    .collect();
+
                 process_map.insert(pid, proc_info);
             } else {
                 // Process terminated
@@ -226,8 +288,84 @@ impl NetworkMonitor {
             tracker.terminated_processes.remove(&pid);
         }
 
+        // Build interface map with aggregated statistics
+        let interfaces = Self::find_all_interfaces();
+        for interface in interfaces {
+            let iface_name = interface.name.clone();
+
+            // Get interface bandwidth stats
+            let iface_bandwidth = tracker.interface_bandwidth.get(&iface_name);
+
+            let (total_download_rate, total_upload_rate) = if let Some(bw) = iface_bandwidth {
+                let rx_diff = bw.rx_bytes.saturating_sub(bw.last_rx_bytes);
+                let tx_diff = bw.tx_bytes.saturating_sub(bw.last_tx_bytes);
+
+                let download_rate = if elapsed > 0.0 {
+                    (rx_diff as f64 / elapsed) as u64
+                } else {
+                    0
+                };
+
+                let upload_rate = if elapsed > 0.0 {
+                    (tx_diff as f64 / elapsed) as u64
+                } else {
+                    0
+                };
+
+                (download_rate, upload_rate)
+            } else {
+                (0, 0)
+            };
+
+            // Count processes using this interface
+            let process_count = tracker
+                .process_interface_bandwidth
+                .keys()
+                .filter(|(_, iface)| iface == &iface_name)
+                .map(|(pid, _)| pid)
+                .collect::<HashSet<_>>()
+                .len();
+
+            // Extract MAC address
+            let mac_address = interface.mac.map(|mac| {
+                format!(
+                    "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                    mac.0, mac.1, mac.2, mac.3, mac.4, mac.5
+                )
+            });
+
+            // Extract IP addresses
+            let ip_addresses: Vec<IpAddr> = interface.ips.iter().map(|ip| ip.ip()).collect();
+
+            interface_map.insert(
+                iface_name.clone(),
+                InterfaceInfo {
+                    name: iface_name,
+                    mac_address,
+                    ip_addresses,
+                    is_up: interface.is_up(),
+                    is_loopback: interface.is_loopback(),
+                    total_download_rate,
+                    total_upload_rate,
+                    process_count,
+                },
+            );
+        }
+
+        // Update last values for interface bandwidth
+        for (_, bw) in &mut tracker.interface_bandwidth {
+            bw.last_rx_bytes = bw.rx_bytes;
+            bw.last_tx_bytes = bw.tx_bytes;
+        }
+
+        // Update last values for process-interface bandwidth
+        for (_, bw) in &mut tracker.process_interface_bandwidth {
+            bw.last_rx_bytes = bw.rx_bytes;
+            bw.last_tx_bytes = bw.tx_bytes;
+        }
+
         self.last_update = now;
-        Ok(process_map)
+        Ok((process_map, interface_map))
     }
 
     /// Update socket inode -> PID mapping
@@ -378,94 +516,85 @@ impl NetworkMonitor {
         Ok(())
     }
 
-    /// Packet capture thread - runs continuously
-    fn capture_packets(tracker: Arc<Mutex<BandwidthTracker>>) -> Result<()> {
-        // Find a suitable network interface
-        let interface = Self::find_interface().context("Failed to find network interface")?;
-        log::info!(
-            "Packet capture thread started on interface: {}",
-            interface.name
-        );
+    /// Packet capture thread - runs continuously on a specific interface
+    fn capture_packets_on_interface(
+        interface: NetworkInterface,
+        tracker: Arc<Mutex<BandwidthTracker>>,
+    ) -> Result<()> {
+        let iface_name = interface.name.clone();
+        log::info!("Packet capture thread started on interface: {}", iface_name);
         log::debug!("Interface details: {:?}", interface);
 
         // Create channel for packet capture
         let (_, mut rx) = match datalink::channel(&interface, Default::default()) {
             Ok(Channel::Ethernet(tx, rx)) => {
-                log::info!("Successfully created packet capture channel");
+                log::info!(
+                    "Successfully created packet capture channel for {}",
+                    iface_name
+                );
                 (tx, rx)
             }
-            Ok(_) => return Err(anyhow::anyhow!("Unsupported channel type")),
-            Err(e) => return Err(anyhow::anyhow!("Failed to create channel: {}", e)),
+            Ok(_) => {
+                return Err(anyhow::anyhow!(
+                    "Unsupported channel type for {}",
+                    iface_name
+                ));
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Failed to create channel for {}: {}",
+                    iface_name,
+                    e
+                ));
+            }
         };
 
         // Capture packets
         loop {
             match rx.next() {
                 Ok(packet) => {
-                    if let Err(e) = Self::process_packet(packet, &tracker) {
+                    if let Err(e) = Self::process_packet(packet, &iface_name, &tracker) {
                         // Don't spam errors, just continue
                         if std::env::var("DEBUG").is_ok() {
-                            log::error!("Packet processing error: {}", e);
+                            log::error!("Packet processing error on {}: {}", iface_name, e);
                         }
                     }
                 }
                 Err(e) => {
-                    log::error!("Packet receive error: {}", e);
+                    log::error!("Packet receive error on {}: {}", iface_name, e);
                     thread::sleep(Duration::from_millis(100));
                 }
             }
         }
     }
 
-    fn find_interface() -> Option<NetworkInterface> {
+    fn find_all_interfaces() -> Vec<NetworkInterface> {
         let interfaces = datalink::interfaces();
 
-        // First priority: Interface with IPv4 address (most traffic is IPv4)
-        // This prevents selecting IPv6-only interfaces which can't capture IPv4 packets properly
-        if let Some(iface) = interfaces.iter().find(|iface| {
-            iface.is_up() && !iface.is_loopback() && iface.ips.iter().any(|ip| ip.is_ipv4())
-        }) {
-            log::info!(
-                "Selected interface with IPv4: {} ({})",
-                iface.name,
-                iface
-                    .ips
-                    .iter()
-                    .filter(|ip| ip.is_ipv4())
-                    .map(|ip| ip.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            return Some(iface.clone());
-        }
-
-        // Fallback: Any interface with IPs (even IPv6-only)
-        let fallback = interfaces
+        // Return all interfaces that are up and have IP addresses
+        // We include loopback as it can be useful for local services
+        interfaces
             .into_iter()
-            .find(|iface| iface.is_up() && !iface.is_loopback() && !iface.ips.is_empty());
-
-        if let Some(ref iface) = fallback {
-            log::warn!(
-                "No IPv4 interface found, using IPv6-only interface: {}",
-                iface.name
-            );
-        }
-
-        fallback
+            .filter(|iface| iface.is_up() && !iface.ips.is_empty())
+            .collect()
     }
 
-    fn process_packet(packet: &[u8], tracker: &Arc<Mutex<BandwidthTracker>>) -> Result<()> {
+    fn process_packet(
+        packet: &[u8],
+        interface_name: &str,
+        tracker: &Arc<Mutex<BandwidthTracker>>,
+    ) -> Result<()> {
         let ethernet = EthernetPacket::new(packet).context("Failed to parse Ethernet packet")?;
 
         match ethernet.get_ethertype() {
             EtherTypes::Ipv4 => {
                 if let Some(ipv4) = Ipv4Packet::new(ethernet.payload()) {
-                    Self::process_ipv4_packet(&ipv4, packet.len(), tracker)?;
+                    Self::process_ipv4_packet(&ipv4, packet.len(), interface_name, tracker)?;
                 }
             }
             EtherTypes::Ipv6 => {
                 if let Some(ipv6) = Ipv6Packet::new(ethernet.payload()) {
-                    Self::process_ipv6_packet(&ipv6, packet.len(), tracker)?;
+                    Self::process_ipv6_packet(&ipv6, packet.len(), interface_name, tracker)?;
                 }
             }
             _ => {}
@@ -477,6 +606,7 @@ impl NetworkMonitor {
     fn process_ipv4_packet(
         ipv4: &Ipv4Packet,
         packet_len: usize,
+        interface_name: &str,
         tracker: &Arc<Mutex<BandwidthTracker>>,
     ) -> Result<()> {
         let src_addr = IpAddr::V4(ipv4.get_source());
@@ -492,6 +622,7 @@ impl NetworkMonitor {
                         tcp.get_destination(),
                         Protocol::Tcp,
                         packet_len,
+                        interface_name,
                         tracker,
                     );
                 }
@@ -505,6 +636,7 @@ impl NetworkMonitor {
                         udp.get_destination(),
                         Protocol::Udp,
                         packet_len,
+                        interface_name,
                         tracker,
                     );
                 }
@@ -518,6 +650,7 @@ impl NetworkMonitor {
     fn process_ipv6_packet(
         ipv6: &Ipv6Packet,
         packet_len: usize,
+        interface_name: &str,
         tracker: &Arc<Mutex<BandwidthTracker>>,
     ) -> Result<()> {
         let src_addr = IpAddr::V6(ipv6.get_source());
@@ -533,6 +666,7 @@ impl NetworkMonitor {
                         tcp.get_destination(),
                         Protocol::Tcp,
                         packet_len,
+                        interface_name,
                         tracker,
                     );
                 }
@@ -546,6 +680,7 @@ impl NetworkMonitor {
                         udp.get_destination(),
                         Protocol::Udp,
                         packet_len,
+                        interface_name,
                         tracker,
                     );
                 }
@@ -563,6 +698,7 @@ impl NetworkMonitor {
         dst_port: u16,
         protocol: Protocol,
         packet_len: usize,
+        interface_name: &str,
         tracker: &Arc<Mutex<BandwidthTracker>>,
     ) {
         let mut tracker = tracker.lock().unwrap();
@@ -631,6 +767,7 @@ impl NetworkMonitor {
                 .map(|(_, n)| n.clone())
                 .unwrap_or_else(|| format!("PID {}", pid));
 
+            // Track overall process bandwidth
             let bandwidth = tracker
                 .process_bandwidth
                 .entry(pid)
@@ -647,8 +784,58 @@ impl NetworkMonitor {
             } else {
                 bandwidth.rx_bytes += packet_len as u64;
             }
+
+            // Track per-process, per-interface bandwidth
+            let proc_iface_bandwidth = tracker
+                .process_interface_bandwidth
+                .entry((pid, interface_name.to_string()))
+                .or_insert(ProcessInterfaceBandwidth {
+                    rx_bytes: 0,
+                    tx_bytes: 0,
+                    last_rx_bytes: 0,
+                    last_tx_bytes: 0,
+                });
+
+            if is_outbound {
+                proc_iface_bandwidth.tx_bytes += packet_len as u64;
+            } else {
+                proc_iface_bandwidth.rx_bytes += packet_len as u64;
+            }
+
+            // Track interface-level bandwidth
+            let iface_bandwidth = tracker
+                .interface_bandwidth
+                .entry(interface_name.to_string())
+                .or_insert(InterfaceBandwidth {
+                    name: interface_name.to_string(),
+                    rx_bytes: 0,
+                    tx_bytes: 0,
+                    last_rx_bytes: 0,
+                    last_tx_bytes: 0,
+                });
+
+            if is_outbound {
+                iface_bandwidth.tx_bytes += packet_len as u64;
+            } else {
+                iface_bandwidth.rx_bytes += packet_len as u64;
+            }
         } else {
             tracker.packets_unmatched += 1;
+
+            // Still track interface bandwidth even if we can't match to a process
+            // This is important for seeing total interface utilization
+            // We'll count it as RX since we don't know the direction
+            let iface_bandwidth = tracker
+                .interface_bandwidth
+                .entry(interface_name.to_string())
+                .or_insert(InterfaceBandwidth {
+                    name: interface_name.to_string(),
+                    rx_bytes: 0,
+                    tx_bytes: 0,
+                    last_rx_bytes: 0,
+                    last_tx_bytes: 0,
+                });
+            iface_bandwidth.rx_bytes += packet_len as u64;
 
             // Log first few unmatched packets for debugging
             if tracker.packets_unmatched <= 10 {

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::IpAddr;
 
 #[derive(Debug, Clone)]
 pub struct ProcessInfo {
@@ -10,6 +11,27 @@ pub struct ProcessInfo {
     pub total_upload: u64,   // total bytes
     pub throttle_limit: Option<ThrottleLimit>,
     pub is_terminated: bool, // whether the process has terminated
+    pub interface_stats: HashMap<String, InterfaceStats>, // per-interface statistics
+}
+
+#[derive(Debug, Clone)]
+pub struct InterfaceStats {
+    pub download_rate: u64,
+    pub upload_rate: u64,
+    pub total_download: u64,
+    pub total_upload: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct InterfaceInfo {
+    pub name: String,
+    pub mac_address: Option<String>,
+    pub ip_addresses: Vec<IpAddr>,
+    pub is_up: bool,
+    pub is_loopback: bool,
+    pub total_download_rate: u64,
+    pub total_upload_rate: u64,
+    pub process_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +51,7 @@ impl ProcessInfo {
             total_upload: 0,
             throttle_limit: None,
             is_terminated: false,
+            interface_stats: HashMap::new(),
         }
     }
 
@@ -65,3 +88,4 @@ impl ProcessInfo {
 }
 
 pub type ProcessMap = HashMap<i32, ProcessInfo>;
+pub type InterfaceMap = HashMap<String, InterfaceInfo>;

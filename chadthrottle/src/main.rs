@@ -681,7 +681,13 @@ async fn run_app<B: ratatui::backend::Backend>(
 
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => {
-                        return Ok(());
+                        // Special handling for interface detail view
+                        if app.view_mode == ui::ViewMode::InterfaceDetail {
+                            app.exit_interface_detail();
+                            app.status_message = "Back to interface list".to_string();
+                        } else {
+                            return Ok(());
+                        }
                     }
                     KeyCode::Char('h') | KeyCode::Char('?') => {
                         app.show_help = true;
@@ -702,10 +708,40 @@ async fn run_app<B: ratatui::backend::Backend>(
                         app.show_graph = !app.show_graph;
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
-                        app.select_next();
+                        match app.view_mode {
+                            ui::ViewMode::ProcessView => app.select_next(),
+                            ui::ViewMode::InterfaceList => app.select_next_interface(),
+                            ui::ViewMode::InterfaceDetail => {} // No selection in detail view
+                        }
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
-                        app.select_previous();
+                        match app.view_mode {
+                            ui::ViewMode::ProcessView => app.select_previous(),
+                            ui::ViewMode::InterfaceList => app.select_previous_interface(),
+                            ui::ViewMode::InterfaceDetail => {} // No selection in detail view
+                        }
+                    }
+                    KeyCode::Char('i') => {
+                        app.toggle_view_mode();
+                        app.status_message = match app.view_mode {
+                            ui::ViewMode::ProcessView => "Switched to process view".to_string(),
+                            ui::ViewMode::InterfaceList => format!(
+                                "Switched to interface view ({} interfaces)",
+                                app.interface_list.len()
+                            ),
+                            ui::ViewMode::InterfaceDetail => {
+                                "Viewing interface details".to_string()
+                            }
+                        };
+                    }
+                    KeyCode::Enter => {
+                        if app.view_mode == ui::ViewMode::InterfaceList {
+                            app.enter_interface_detail();
+                            if let Some(iface) = app.get_selected_interface() {
+                                app.status_message =
+                                    format!("Viewing processes on interface: {}", iface.name);
+                            }
+                        }
                     }
                     KeyCode::Char('t') => {
                         if let Some(process) = app.get_selected_process() {
@@ -749,7 +785,7 @@ async fn run_app<B: ratatui::backend::Backend>(
             .is_ok()
         {
             match monitor.update() {
-                Ok(mut process_map) => {
+                Ok((mut process_map, interface_map)) => {
                     // Increment bandwidth log counter
                     bandwidth_log_counter += 1;
                     let should_log_bandwidth = bandwidth_log_counter % 5 == 0; // Log every 5 seconds
@@ -804,13 +840,15 @@ async fn run_app<B: ratatui::backend::Backend>(
                     }
 
                     app.update_processes(process_map);
+                    app.update_interfaces(interface_map);
                     // Update status with process count
                     if !app.status_message.starts_with("Throttle")
                         && !app.status_message.starts_with("Failed")
                     {
                         app.status_message = format!(
-                            "Monitoring {} process(es) with network activity",
-                            app.process_list.len()
+                            "Monitoring {} process(es) on {} interface(s)",
+                            app.process_list.len(),
+                            app.interface_list.len()
                         );
                     }
                 }

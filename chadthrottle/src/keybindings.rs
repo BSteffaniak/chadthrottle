@@ -39,6 +39,16 @@ pub fn get_all_keybindings() -> Vec<KeyBinding> {
             description: "Move selection down",
             category: KeyCategory::Navigation,
         },
+        KeyBinding {
+            key: "i",
+            description: "Toggle interface view",
+            category: KeyCategory::Navigation,
+        },
+        KeyBinding {
+            key: "Enter",
+            description: "View interface details (in interface list)",
+            category: KeyCategory::Navigation,
+        },
         // Actions
         KeyBinding {
             key: "t",
@@ -88,6 +98,7 @@ pub fn get_all_keybindings() -> Vec<KeyBinding> {
 pub fn get_status_bar_keybindings() -> Vec<(&'static str, &'static str)> {
     vec![
         ("↑↓", "Navigate"),
+        ("i", "Interfaces"),
         ("t", "Throttle"),
         ("f", "Freeze"),
         ("b", "Backends"),
