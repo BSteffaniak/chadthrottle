@@ -32,6 +32,7 @@ struct AttachedProgram {
     cgroup_path: PathBuf,
     attach_type: CgroupSkbAttachType,
     program_fd: i32, // Required for detaching with BPF_F_ALLOW_MULTI
+    cgroup_id: u64,  // Required to find this entry without querying /proc
 }
 
 #[cfg(feature = "throttle-ebpf")]
@@ -372,6 +373,7 @@ impl DownloadThrottleBackend for EbpfDownload {
                         cgroup_path: cgroup_path.clone(),
                         attach_type: CgroupSkbAttachType::Ingress,
                         program_fd,
+                        cgroup_id,
                     });
                 }
             }
@@ -453,15 +455,6 @@ impl DownloadThrottleBackend for EbpfDownload {
                     cgroup_id
                 );
 
-                // Get cgroup path for this PID to find which program to detach
-                let cgroup_path = match get_cgroup_path(pid) {
-                    Ok(path) => Some(path),
-                    Err(e) => {
-                        log::warn!("Could not get cgroup path for PID {}: {}", pid, e);
-                        None
-                    }
-                };
-
                 // Decrement reference count for this cgroup
                 if let Some(refcount) = self.cgroup_refcount.get_mut(&cgroup_id) {
                     *refcount -= 1;
@@ -496,36 +489,41 @@ impl DownloadThrottleBackend for EbpfDownload {
                             log::debug!("Removed stats from map[{}]", MAP_KEY);
                         }
 
-                        // Detach BPF program from this cgroup
-                        if let Some(ref path) = cgroup_path {
-                            // Find and remove the attached program for this cgroup path
-                            if let Some(pos) = self
-                                .attached_programs
-                                .iter()
-                                .position(|p| &p.cgroup_path == path)
-                            {
-                                let attached = self.attached_programs.remove(pos);
-                                log::info!(
-                                    "Detaching BPF program from cgroup: {:?} (fd: {})",
+                        // Detach BPF program using stored cgroup info (works even if process terminated)
+                        // Find by cgroup_id instead of querying /proc
+                        if let Some(pos) = self
+                            .attached_programs
+                            .iter()
+                            .position(|p| p.cgroup_id == cgroup_id)
+                        {
+                            let attached = self.attached_programs.remove(pos);
+                            log::info!(
+                                "Detaching BPF program from cgroup: {:?} (id: {}, fd: {})",
+                                attached.cgroup_path,
+                                attached.cgroup_id,
+                                attached.program_fd
+                            );
+                            if let Err(e) = detach_cgroup_skb_legacy(
+                                &attached.cgroup_path,
+                                attached.attach_type,
+                                attached.program_fd,
+                            ) {
+                                log::error!(
+                                    "Failed to detach program from {:?}: {}",
                                     attached.cgroup_path,
-                                    attached.program_fd
+                                    e
                                 );
-                                if let Err(e) = detach_cgroup_skb_legacy(
-                                    &attached.cgroup_path,
-                                    attached.attach_type,
-                                    attached.program_fd,
-                                ) {
-                                    log::warn!(
-                                        "Failed to detach program from {:?}: {}",
-                                        attached.cgroup_path,
-                                        e
-                                    );
-                                } else {
-                                    log::info!("✅ Successfully detached BPF program");
-                                }
-                                // Remove from attached_cgroups set too
-                                self.attached_cgroups.remove(&attached.cgroup_path);
+                                // Don't return error - continue cleanup
+                            } else {
+                                log::info!("✅ Successfully detached BPF program");
                             }
+                            // Remove from attached_cgroups set too
+                            self.attached_cgroups.remove(&attached.cgroup_path);
+                        } else {
+                            log::warn!(
+                                "Could not find attached program for cgroup_id {} - may have already been cleaned up",
+                                cgroup_id
+                            );
                         }
 
                         // Remove reference count entry
@@ -557,41 +555,41 @@ impl DownloadThrottleBackend for EbpfDownload {
         {
             log::info!("Cleaning up eBPF download backend");
 
-            // Remove all throttles (clears BPF maps)
+            // Remove all throttles (clears BPF maps and detaches programs)
             let pids: Vec<i32> = self.active_throttles.keys().copied().collect();
             for pid in pids {
-                let _ = self.remove_download_throttle(pid);
-            }
-
-            // Detach all attached programs (CRITICAL for legacy attach method)
-            // Modern bpf_link_create auto-detaches when FD is dropped, but legacy
-            // bpf_prog_attach requires explicit detach via bpf_prog_detach syscall
-            log::debug!(
-                "Detaching {} attached programs",
-                self.attached_programs.len()
-            );
-            for attached in &self.attached_programs {
-                log::debug!(
-                    "Detaching program from cgroup: {:?} (type: {:?}, fd: {})",
-                    attached.cgroup_path,
-                    attached.attach_type,
-                    attached.program_fd
-                );
-                if let Err(e) = detach_cgroup_skb_legacy(
-                    &attached.cgroup_path,
-                    attached.attach_type,
-                    attached.program_fd,
-                ) {
-                    log::warn!(
-                        "Failed to detach program from {:?}: {}",
-                        attached.cgroup_path,
-                        e
-                    );
+                if let Err(e) = self.remove_download_throttle(pid) {
+                    log::warn!("Error removing throttle for PID {}: {}", pid, e);
                 }
             }
-            self.attached_programs.clear();
 
-            // Drop the eBPF instance
+            // Check for orphaned programs (shouldn't happen after proper remove, but be defensive)
+            if !self.attached_programs.is_empty() {
+                log::warn!(
+                    "Found {} orphaned attached programs during cleanup - detaching them now",
+                    self.attached_programs.len()
+                );
+
+                // Detach any remaining programs
+                for attached in &self.attached_programs {
+                    log::warn!(
+                        "Detaching orphaned program: {:?} (id: {}, fd: {})",
+                        attached.cgroup_path,
+                        attached.cgroup_id,
+                        attached.program_fd
+                    );
+                    if let Err(e) = detach_cgroup_skb_legacy(
+                        &attached.cgroup_path,
+                        attached.attach_type,
+                        attached.program_fd,
+                    ) {
+                        log::error!("Failed to detach orphaned program: {}", e);
+                    }
+                }
+            }
+
+            // Final cleanup
+            self.attached_programs.clear();
             self.ebpf = None;
             self.pid_to_cgroup.clear();
             self.cgroup_refcount.clear();

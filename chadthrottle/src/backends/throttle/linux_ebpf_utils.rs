@@ -333,28 +333,27 @@ pub fn detach_cgroup_skb_legacy(
         CgroupSkbAttachType::Egress => BPF_CGROUP_INET_EGRESS,
     };
 
-    // BPF_PROG_DETACH with BPF_F_ALLOW_MULTI requires the program FD
-    // to specify which program to detach (since multiple can be attached)
+    // BPF_PROG_DETACH to detach a specific program by FD
+    // When detaching a specific program (attach_bpf_fd != 0), attach_flags MUST be 0
+    // The BPF_F_ALLOW_MULTI flag is only used during BPF_PROG_ATTACH, not detach!
     #[repr(C)]
     #[derive(Copy, Clone)]
     struct bpf_attr_detach {
         target_fd: u32,
-        attach_bpf_fd: u32, // REQUIRED when using BPF_F_ALLOW_MULTI
+        attach_bpf_fd: u32, // Specify which program to detach by FD
         attach_type: u32,
-        attach_flags: u32,
+        attach_flags: u32, // MUST be 0 when detaching specific program
     }
-
-    const BPF_F_ALLOW_MULTI: u32 = 1 << 1; // = 2
 
     let attr = bpf_attr_detach {
         target_fd: cgroup_fd_raw as u32,
         attach_bpf_fd: program_fd as u32, // Specify which program to detach
         attach_type: bpf_attach_type,
-        attach_flags: BPF_F_ALLOW_MULTI, // Must match the flags used during attach
+        attach_flags: 0, // CRITICAL: Must be 0, not BPF_F_ALLOW_MULTI
     };
 
     log::debug!(
-        "Calling bpf_prog_detach with: target_fd={}, program_fd={}, attach_type={}, flags=BPF_F_ALLOW_MULTI",
+        "Calling bpf_prog_detach with: target_fd={}, program_fd={}, attach_type={}, flags=0",
         cgroup_fd_raw,
         program_fd,
         bpf_attach_type
