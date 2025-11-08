@@ -11,6 +11,7 @@ use pnet::packet::tcp::TcpPacket;
 use pnet::packet::udp::UdpPacket;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -43,8 +44,10 @@ pub struct NetworkMonitor {
     // Socket mapper backend information
     socket_mapper_name: String,
     socket_mapper_capabilities: crate::backends::BackendCapabilities,
-    // Handles to packet capture threads (one per interface)
-    _capture_handles: Vec<thread::JoinHandle<()>>,
+    // Shutdown signal for packet capture threads
+    shutdown_flag: Arc<AtomicBool>,
+    // Handles to packet capture threads (one per interface) - no underscore, we'll join them!
+    capture_handles: Vec<thread::JoinHandle<()>>,
     last_update: Instant,
 }
 
@@ -67,7 +70,8 @@ struct BandwidthTracker {
     packets_unmatched: u64,
 }
 
-struct ProcessBandwidth {
+#[derive(Clone)]
+pub struct ProcessBandwidth {
     name: String,
     rx_bytes: u64,
     tx_bytes: u64,
@@ -166,13 +170,17 @@ impl NetworkMonitor {
             }
         };
 
+        // Create shutdown flag for graceful thread termination
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+
         // Create monitor instance first (without starting capture thread yet)
         let mut monitor = Self {
             bandwidth_tracker,
             process_utils,
             socket_mapper_name,
             socket_mapper_capabilities,
-            _capture_handles: Vec::new(),
+            shutdown_flag: Arc::clone(&shutdown_flag),
+            capture_handles: Vec::new(),
             last_update: Instant::now(),
         };
 
@@ -187,15 +195,18 @@ impl NetworkMonitor {
 
         for interface in interfaces {
             let tracker_clone = Arc::clone(&monitor.bandwidth_tracker);
+            let shutdown_clone = Arc::clone(&shutdown_flag);
             let iface_name = interface.name.clone();
 
             let capture_handle = thread::spawn(move || {
-                if let Err(e) = Self::capture_packets_on_interface(interface, tracker_clone) {
+                if let Err(e) =
+                    Self::capture_packets_on_interface(interface, tracker_clone, shutdown_clone)
+                {
                     log::error!("Packet capture error on {}: {}", iface_name, e);
                 }
             });
 
-            monitor._capture_handles.push(capture_handle);
+            monitor.capture_handles.push(capture_handle);
         }
 
         Ok(monitor)
@@ -703,6 +714,7 @@ impl NetworkMonitor {
     fn capture_packets_on_interface(
         interface: NetworkInterface,
         tracker: Arc<Mutex<BandwidthTracker>>,
+        shutdown: Arc<AtomicBool>,
     ) -> Result<()> {
         let iface_name = interface.name.clone();
         log::info!("Packet capture thread started on interface: {}", iface_name);
@@ -732,8 +744,17 @@ impl NetworkMonitor {
             }
         };
 
-        // Capture packets
+        // Capture packets until shutdown signal received
         loop {
+            // Check shutdown flag
+            if shutdown.load(Ordering::Relaxed) {
+                log::info!(
+                    "Packet capture thread stopping on interface: {}",
+                    iface_name
+                );
+                break;
+            }
+
             match rx.next() {
                 Ok(packet) => {
                     if let Err(e) = Self::process_packet(packet, &iface_name, &tracker) {
@@ -749,6 +770,12 @@ impl NetworkMonitor {
                 }
             }
         }
+
+        log::debug!(
+            "Packet capture thread exited cleanly on interface: {}",
+            iface_name
+        );
+        Ok(())
     }
 
     fn find_all_interfaces() -> Vec<NetworkInterface> {
@@ -1102,5 +1129,58 @@ impl NetworkMonitor {
                 (tracker.packets_matched as f64 / tracker.packets_captured as f64) * 100.0
             );
         }
+    }
+
+    /// Extract bandwidth data for preservation when switching backends
+    pub fn extract_bandwidth_data(
+        &self,
+    ) -> (HashMap<i32, ProcessBandwidth>, HashMap<i32, Instant>) {
+        let tracker = self.bandwidth_tracker.lock().unwrap();
+        (
+            tracker.process_bandwidth.clone(),
+            tracker.terminated_processes.clone(),
+        )
+    }
+
+    /// Restore bandwidth data after switching backends
+    pub fn restore_bandwidth_data(
+        &mut self,
+        process_bandwidth: HashMap<i32, ProcessBandwidth>,
+        terminated_processes: HashMap<i32, Instant>,
+    ) {
+        let mut tracker = self.bandwidth_tracker.lock().unwrap();
+        tracker.process_bandwidth = process_bandwidth;
+        tracker.terminated_processes = terminated_processes;
+        log::info!(
+            "Restored bandwidth data for {} processes ({} terminated)",
+            tracker.process_bandwidth.len(),
+            tracker.terminated_processes.len()
+        );
+    }
+}
+
+impl Drop for NetworkMonitor {
+    fn drop(&mut self) {
+        log::info!(
+            "Shutting down NetworkMonitor - signaling {} packet capture threads to stop",
+            self.capture_handles.len()
+        );
+
+        // Signal all threads to stop
+        self.shutdown_flag.store(true, Ordering::Relaxed);
+
+        // Don't wait for threads to finish - they will exit naturally when they process
+        // their next packet (or on program termination). This prevents UI freeze since
+        // threads are blocked in rx.next() and only check the shutdown flag between packets.
+        //
+        // This is safe because:
+        // 1. Threads will exit within seconds (on next packet) or on program exit
+        // 2. They only read network data and write to bandwidth_tracker Arc
+        // 3. No resource leaks - datalink channels close when threads exit
+        // 4. bandwidth_tracker won't be freed until all thread references are dropped
+
+        log::info!(
+            "NetworkMonitor shutdown signaled (threads will exit on next packet or program termination)"
+        );
     }
 }

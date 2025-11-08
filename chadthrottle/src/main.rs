@@ -627,18 +627,48 @@ async fn run_app<B: ratatui::backend::Backend>(
                                         // Only switch if different from current
                                         let (current_sm, _) = monitor.get_socket_mapper_info();
                                         if name != current_sm {
+                                            log::info!(
+                                                "Switching socket mapper: {} → {}",
+                                                current_sm,
+                                                name
+                                            );
+
+                                            // Extract bandwidth data BEFORE dropping old monitor
+                                            let (process_bandwidth, terminated_processes) =
+                                                monitor.extract_bandwidth_data();
+                                            let process_count = process_bandwidth.len();
+                                            let terminated_count = terminated_processes.len();
+
+                                            // Create new monitor (old one will be dropped, cleaning up threads)
                                             match NetworkMonitor::with_socket_mapper(Some(name)) {
-                                                Ok(new_monitor) => {
+                                                Ok(mut new_monitor) => {
+                                                    // Restore bandwidth data in new monitor
+                                                    new_monitor.restore_bandwidth_data(
+                                                        process_bandwidth,
+                                                        terminated_processes,
+                                                    );
+
+                                                    // Replace monitor (old one drops here, threads cleaned up)
                                                     *monitor = new_monitor;
+
                                                     config.preferred_socket_mapper =
                                                         Some(name.to_string());
                                                     let _ = config.save();
-                                                    app.status_message =
-                                                        format!("✅ Socket mapper → {}", name);
+                                                    app.status_message = format!(
+                                                        "✅ Socket mapper → {} (preserved {} processes, {} terminated)",
+                                                        name, process_count, terminated_count
+                                                    );
+                                                    log::info!(
+                                                        "Socket mapper switched successfully, bandwidth data preserved"
+                                                    );
                                                 }
                                                 Err(e) => {
                                                     app.status_message =
                                                         format!("❌ Socket mapper: {}", e);
+                                                    log::error!(
+                                                        "Failed to switch socket mapper: {}",
+                                                        e
+                                                    );
                                                 }
                                             }
                                         } else {
