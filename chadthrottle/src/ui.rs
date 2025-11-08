@@ -736,7 +736,7 @@ fn draw_bandwidth_graph(f: &mut Frame, area: Rect, app: &AppState) {
     f.render_widget(chart, graph_area);
 
     // Draw instructions at bottom
-    let instructions = Paragraph::new("Press 'g' to close graph")
+    let instructions = Paragraph::new("Press 'g', 'q', or 'Esc' to close graph")
         .style(Style::default().fg(Color::DarkGray))
         .alignment(ratatui::layout::Alignment::Center);
 

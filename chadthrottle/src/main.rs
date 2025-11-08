@@ -504,6 +504,17 @@ async fn run_app<B: ratatui::backend::Backend>(
                     continue;
                 }
 
+                // If graph is shown, g/Esc/q closes it
+                if app.show_graph {
+                    match key.code {
+                        KeyCode::Char('g') | KeyCode::Char('q') | KeyCode::Esc => {
+                            app.show_graph = false;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 // Handle throttle dialog input
                 if app.show_throttle_dialog {
                     match key.code {

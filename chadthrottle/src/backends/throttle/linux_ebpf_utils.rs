@@ -308,6 +308,7 @@ pub fn attach_cgroup_skb_legacy(
 pub fn detach_cgroup_skb_legacy(
     cgroup_path: &Path,
     attach_type: CgroupSkbAttachType,
+    program_fd: i32,
 ) -> Result<()> {
     use std::os::fd::AsRawFd;
 
@@ -317,9 +318,10 @@ pub fn detach_cgroup_skb_legacy(
     let cgroup_fd_raw = cgroup_file.as_raw_fd();
 
     log::debug!(
-        "Detaching from cgroup: {:?} (fd: {})",
+        "Detaching from cgroup: {:?} (fd: {}), program_fd: {}",
         cgroup_path,
-        cgroup_fd_raw
+        cgroup_fd_raw,
+        program_fd
     );
 
     // Convert attach type to BPF constant
@@ -331,27 +333,30 @@ pub fn detach_cgroup_skb_legacy(
         CgroupSkbAttachType::Egress => BPF_CGROUP_INET_EGRESS,
     };
 
-    // BPF_PROG_DETACH uses the same struct as BPF_PROG_ATTACH
-    // but we don't need attach_bpf_fd or attach_flags for detach
+    // BPF_PROG_DETACH with BPF_F_ALLOW_MULTI requires the program FD
+    // to specify which program to detach (since multiple can be attached)
     #[repr(C)]
     #[derive(Copy, Clone)]
     struct bpf_attr_detach {
         target_fd: u32,
-        attach_bpf_fd: u32, // Not used for detach, but required for struct layout
+        attach_bpf_fd: u32, // REQUIRED when using BPF_F_ALLOW_MULTI
         attach_type: u32,
-        attach_flags: u32, // Not used for detach
+        attach_flags: u32,
     }
+
+    const BPF_F_ALLOW_MULTI: u32 = 1 << 1; // = 2
 
     let attr = bpf_attr_detach {
         target_fd: cgroup_fd_raw as u32,
-        attach_bpf_fd: 0, // Not used for detach
+        attach_bpf_fd: program_fd as u32, // Specify which program to detach
         attach_type: bpf_attach_type,
-        attach_flags: 0, // Not used for detach
+        attach_flags: BPF_F_ALLOW_MULTI, // Must match the flags used during attach
     };
 
     log::debug!(
-        "Calling bpf_prog_detach with: target_fd={}, attach_type={}",
+        "Calling bpf_prog_detach with: target_fd={}, program_fd={}, attach_type={}, flags=BPF_F_ALLOW_MULTI",
         cgroup_fd_raw,
+        program_fd,
         bpf_attach_type
     );
 
@@ -366,16 +371,23 @@ pub fn detach_cgroup_skb_legacy(
 
     if ret < 0 {
         let errno = std::io::Error::last_os_error();
-        log::warn!(
-            "bpf_prog_detach failed: {} (errno: {:?}) - program may have already been detached",
+        log::error!(
+            "bpf_prog_detach failed: {} (errno: {:?})",
             errno,
             errno.raw_os_error()
         );
-        // Don't return error - program might already be detached, which is fine
-        return Ok(());
+        return Err(anyhow::anyhow!(
+            "Failed to detach BPF program (fd={}) from cgroup {:?}: {}",
+            program_fd,
+            cgroup_path,
+            errno
+        ));
     }
 
-    log::debug!("✅ Successfully detached using legacy method");
+    log::info!(
+        "✅ Successfully detached BPF program (fd={}) using legacy method",
+        program_fd
+    );
     Ok(())
 }
 

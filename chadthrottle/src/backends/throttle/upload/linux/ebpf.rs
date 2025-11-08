@@ -33,6 +33,7 @@ use std::path::PathBuf;
 struct AttachedProgram {
     cgroup_path: PathBuf,
     attach_type: CgroupSkbAttachType,
+    program_fd: i32, // Required for detaching with BPF_F_ALLOW_MULTI
 }
 
 #[cfg(feature = "throttle-ebpf")]
@@ -265,10 +266,27 @@ impl UploadThrottleBackend for EbpfUpload {
                     );
                     self.attached_cgroups.insert(cgroup_path.clone());
 
+                    // Get the program FD for tracking (needed for detachment with BPF_F_ALLOW_MULTI)
+                    let program_fd = {
+                        use std::os::fd::{AsFd, AsRawFd};
+                        let program: &CgroupSkb = ebpf
+                            .program("chadthrottle_egress")
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("Program chadthrottle_egress not found")
+                            })?
+                            .try_into()
+                            .context("Program is not a CgroupSkb program")?;
+                        let prog_fd = program.fd().context("Program not loaded")?;
+                        prog_fd.as_fd().as_raw_fd()
+                    };
+
+                    log::debug!("Tracking program FD {} for cleanup", program_fd);
+
                     // Track this attachment for cleanup
                     self.attached_programs.push(AttachedProgram {
                         cgroup_path: cgroup_path.clone(),
                         attach_type: CgroupSkbAttachType::Egress,
+                        program_fd,
                     });
                 }
             }
@@ -403,12 +421,14 @@ impl UploadThrottleBackend for EbpfUpload {
                             {
                                 let attached = self.attached_programs.remove(pos);
                                 log::info!(
-                                    "Detaching BPF program from cgroup: {:?}",
-                                    attached.cgroup_path
+                                    "Detaching BPF program from cgroup: {:?} (fd: {})",
+                                    attached.cgroup_path,
+                                    attached.program_fd
                                 );
                                 if let Err(e) = detach_cgroup_skb_legacy(
                                     &attached.cgroup_path,
                                     attached.attach_type,
+                                    attached.program_fd,
                                 ) {
                                     log::warn!(
                                         "Failed to detach program from {:?}: {}",
@@ -467,15 +487,18 @@ impl UploadThrottleBackend for EbpfUpload {
             );
             for attached in &self.attached_programs {
                 log::debug!(
-                    "Detaching program from cgroup: {:?} (type: {:?})",
+                    "Detaching program from cgroup: {:?} (type: {:?}, fd: {})",
                     attached.cgroup_path,
-                    attached.attach_type
+                    attached.attach_type,
+                    attached.program_fd
                 );
-                if let Err(e) =
-                    detach_cgroup_skb_legacy(&attached.cgroup_path, attached.attach_type)
-                {
+                if let Err(e) = detach_cgroup_skb_legacy(
+                    &attached.cgroup_path,
+                    attached.attach_type,
+                    attached.program_fd,
+                ) {
                     log::warn!(
-                        "Failed to detach program from {:?}: {} (may already be detached)",
+                        "Failed to detach program from {:?}: {}",
                         attached.cgroup_path,
                         e
                     );
