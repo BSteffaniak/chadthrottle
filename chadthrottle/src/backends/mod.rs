@@ -3,6 +3,7 @@
 pub mod capability;
 pub mod cgroup;
 pub mod monitor;
+pub mod process;
 pub mod throttle;
 
 use anyhow::Result;

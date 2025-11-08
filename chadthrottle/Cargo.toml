@@ -7,26 +7,18 @@ description = "A TUI network monitor and throttler for Linux - like NetLimiter b
 license = "MIT"
 
 [features]
-default = [
-  "monitor-pnet",
-  "throttle-tc-htb",
-  "throttle-ifb-tc",
-  "throttle-tc-police",
-  "throttle-nftables",
-  "throttle-ebpf",      # Disabled: Requires building eBPF programs with 'cargo xtask build-ebpf'
-  "cgroup-v1",
-  "cgroup-v2-nftables",
-]
+# Default: Basic monitoring works on all platforms
+default = ["monitor-pnet"]
 
-# Monitor backends
-monitor-pnet = ["pnet", "pnet_datalink", "pnet_packet"]
+# Monitor backends (cross-platform)
+monitor-pnet = ["dep:pnet", "dep:pnet_datalink", "dep:pnet_packet"]
 
-# Cgroup backends (used by throttle backends for per-process isolation)
+# Cgroup backends (Linux-only, used by throttle backends for per-process isolation)
 cgroup-v1 = []          # Cgroup v1 net_cls controller (legacy, fallback)
 cgroup-v2-nftables = [] # Cgroup v2 with nftables socket matching (modern)
 cgroup-v2-ebpf = []     # Cgroup v2 with eBPF TC classifier (future)
 
-# Throttle backends (Linux)
+# Linux-specific throttle backends (user must explicitly enable these)
 throttle-tc-htb = [] # TC HTB upload (always available on Linux)
 throttle-ifb-tc = [] # IFB+TC download (needs IFB module)
 throttle-tc-police = [] # TC Police download (no IFB needed, fallback)
@@ -37,23 +29,49 @@ throttle-ebpf = [
   "chadthrottle-common/userspace",
 ] # eBPF cgroup throttling (best performance)
 
+# Convenience feature bundles for full platform support
+linux-full = [
+  "monitor-pnet",
+  "throttle-tc-htb",
+  "throttle-ifb-tc",
+  "throttle-tc-police",
+  "throttle-nftables",
+  "throttle-ebpf",
+  "cgroup-v1",
+  "cgroup-v2-nftables",
+]
+
+macos-full = ["monitor-pnet"]
+
 [dependencies]
+# Core dependencies (cross-platform)
 ratatui = "0.28"
 crossterm = "0.28"
 tokio = { version = "1", features = ["full"] }
 pretty_env_logger = "0.5.0"
 sysinfo = "0.31"
-procfs = "0.16"
-nix = { version = "0.29", features = ["process", "signal"] }
 anyhow = "1.0"
 log = { version = "0.4.28", features = ["release_max_level_trace"] }
 clap = { version = "4", features = ["derive"] }
 chrono = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+libc = "0.2"
+
+# Network monitoring (optional, cross-platform)
 pnet = { version = "0.35.0", optional = true }
 pnet_datalink = { version = "0.35.0", optional = true }
 pnet_packet = { version = "0.35.0", optional = true }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+
+# eBPF support (optional, Linux-only)
 aya = { workspace = true, optional = true }
 chadthrottle-common = { workspace = true, optional = true, default-features = true }
-libc = "0.2"
+
+# Linux-specific dependencies (always available on Linux)
+[target.'cfg(target_os = "linux")'.dependencies]
+procfs = "0.16"                                              # Always needed for LinuxProcessUtils
+nix = { version = "0.29", features = ["process", "signal"] }
+
+# macOS-specific dependencies (always available on macOS)
+[target.'cfg(target_os = "macos")'.dependencies]
+# No extra required dependencies - sysinfo is already in core deps

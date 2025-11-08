@@ -1,3 +1,4 @@
+use crate::backends::process::{ProcessUtils, create_process_utils};
 use crate::process::{InterfaceInfo, InterfaceMap, ProcessInfo, ProcessMap};
 use anyhow::{Context, Result};
 use pnet::datalink::{self, Channel, NetworkInterface};
@@ -8,7 +9,6 @@ use pnet::packet::ipv4::Ipv4Packet;
 use pnet::packet::ipv6::Ipv6Packet;
 use pnet::packet::tcp::TcpPacket;
 use pnet::packet::udp::UdpPacket;
-use procfs::process::{FDTarget, all_processes};
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
@@ -38,6 +38,8 @@ enum Protocol {
 pub struct NetworkMonitor {
     // Shared state between packet capture thread and update thread
     bandwidth_tracker: Arc<Mutex<BandwidthTracker>>,
+    // Platform-specific process utilities
+    process_utils: Box<dyn ProcessUtils>,
     // Handles to packet capture threads (one per interface)
     _capture_handles: Vec<thread::JoinHandle<()>>,
     last_update: Instant,
@@ -99,9 +101,13 @@ impl NetworkMonitor {
             packets_unmatched: 0,
         }));
 
+        // Create platform-specific process utilities
+        let process_utils = create_process_utils();
+
         // Create monitor instance first (without starting capture thread yet)
         let mut monitor = Self {
             bandwidth_tracker,
+            process_utils,
             _capture_handles: Vec::new(),
             last_update: Instant::now(),
         };
@@ -162,7 +168,7 @@ impl NetworkMonitor {
                 0
             };
 
-            let process_exists = procfs::process::Process::new(pid).is_ok();
+            let process_exists = self.process_utils.process_exists(pid);
             let term_time = tracker.terminated_processes.get(&pid).copied();
 
             process_data.push((
@@ -375,93 +381,66 @@ impl NetworkMonitor {
     fn update_socket_map(&self) -> Result<()> {
         // Phase 1: Build new maps WITHOUT holding the lock
         // This allows packet capture to continue using old maps
-        let mut new_socket_map = HashMap::new();
+
+        // Get connection map from platform-specific process utils
+        let conn_map = self.process_utils.get_connection_map()?;
+
+        let mut new_socket_map = conn_map.socket_to_pid;
         let mut new_connection_map = HashMap::new();
 
-        // Build socket inode -> PID map
-        let all_procs = all_processes()?;
-
-        for proc_result in all_procs {
-            if let Ok(process) = proc_result {
-                let pid = process.pid();
-
-                let name = if let Ok(stat) = process.stat() {
-                    stat.comm
-                } else {
-                    format!("PID {}", pid)
+        // Map TCP connections to PIDs via socket inodes
+        for entry in conn_map.tcp_connections {
+            if let Some(&(pid, _)) = new_socket_map.get(&entry.inode) {
+                let key = ConnectionKey {
+                    local_addr: entry.local_addr,
+                    local_port: entry.local_port,
+                    remote_addr: entry.remote_addr,
+                    remote_port: entry.remote_port,
+                    protocol: Protocol::Tcp,
                 };
-
-                // Scan file descriptors for sockets
-                if let Ok(fds) = process.fd() {
-                    for fd_result in fds {
-                        if let Ok(fd_info) = fd_result {
-                            if let FDTarget::Socket(inode) = fd_info.target {
-                                new_socket_map.insert(inode, (pid, name.clone()));
-                            }
-                        }
-                    }
-                }
+                new_connection_map.insert(key, pid);
             }
         }
 
-        // Map connections to PIDs via socket inodes
-        if let Ok(tcp_entries) = procfs::net::tcp() {
-            for entry in tcp_entries {
-                if let Some(&(pid, _)) = new_socket_map.get(&entry.inode) {
-                    let key = ConnectionKey {
-                        local_addr: entry.local_address.ip(),
-                        local_port: entry.local_address.port(),
-                        remote_addr: entry.remote_address.ip(),
-                        remote_port: entry.remote_address.port(),
-                        protocol: Protocol::Tcp,
-                    };
-                    new_connection_map.insert(key, pid);
-                }
+        // Map TCP6 connections
+        for entry in conn_map.tcp6_connections {
+            if let Some(&(pid, _)) = new_socket_map.get(&entry.inode) {
+                let key = ConnectionKey {
+                    local_addr: entry.local_addr,
+                    local_port: entry.local_port,
+                    remote_addr: entry.remote_addr,
+                    remote_port: entry.remote_port,
+                    protocol: Protocol::Tcp,
+                };
+                new_connection_map.insert(key, pid);
             }
         }
 
-        if let Ok(tcp6_entries) = procfs::net::tcp6() {
-            for entry in tcp6_entries {
-                if let Some(&(pid, _)) = new_socket_map.get(&entry.inode) {
-                    let key = ConnectionKey {
-                        local_addr: entry.local_address.ip(),
-                        local_port: entry.local_address.port(),
-                        remote_addr: entry.remote_address.ip(),
-                        remote_port: entry.remote_address.port(),
-                        protocol: Protocol::Tcp,
-                    };
-                    new_connection_map.insert(key, pid);
-                }
+        // Map UDP connections
+        for entry in conn_map.udp_connections {
+            if let Some(&(pid, _)) = new_socket_map.get(&entry.inode) {
+                let key = ConnectionKey {
+                    local_addr: entry.local_addr,
+                    local_port: entry.local_port,
+                    remote_addr: entry.remote_addr,
+                    remote_port: entry.remote_port,
+                    protocol: Protocol::Udp,
+                };
+                new_connection_map.insert(key, pid);
             }
         }
 
-        if let Ok(udp_entries) = procfs::net::udp() {
-            for entry in udp_entries {
-                if let Some(&(pid, _)) = new_socket_map.get(&entry.inode) {
-                    let key = ConnectionKey {
-                        local_addr: entry.local_address.ip(),
-                        local_port: entry.local_address.port(),
-                        remote_addr: entry.remote_address.ip(),
-                        remote_port: entry.remote_address.port(),
-                        protocol: Protocol::Udp,
-                    };
-                    new_connection_map.insert(key, pid);
-                }
-            }
-        }
-
-        if let Ok(udp6_entries) = procfs::net::udp6() {
-            for entry in udp6_entries {
-                if let Some(&(pid, _)) = new_socket_map.get(&entry.inode) {
-                    let key = ConnectionKey {
-                        local_addr: entry.local_address.ip(),
-                        local_port: entry.local_address.port(),
-                        remote_addr: entry.remote_address.ip(),
-                        remote_port: entry.remote_address.port(),
-                        protocol: Protocol::Udp,
-                    };
-                    new_connection_map.insert(key, pid);
-                }
+        // Map UDP6 connections
+        for entry in conn_map.udp6_connections {
+            if let Some(&(pid, _)) = new_socket_map.get(&entry.inode) {
+                let key = ConnectionKey {
+                    local_addr: entry.local_addr,
+                    local_port: entry.local_port,
+                    remote_addr: entry.remote_addr,
+                    remote_port: entry.remote_port,
+                    protocol: Protocol::Udp,
+                };
+                new_connection_map.insert(key, pid);
             }
         }
 

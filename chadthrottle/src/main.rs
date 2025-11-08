@@ -226,11 +226,12 @@ async fn run_cli_mode(args: &Args) -> Result<()> {
         ));
     }
 
-    // Get process name
-    let process_name = std::fs::read_to_string(format!("/proc/{}/comm", pid))
-        .unwrap_or_else(|_| format!("PID {}", pid))
-        .trim()
-        .to_string();
+    // Get process name using platform-specific utils
+    use crate::backends::process::create_process_utils;
+    let process_utils = create_process_utils();
+    let process_name = process_utils
+        .get_process_name(pid)
+        .unwrap_or_else(|_| format!("PID {}", pid));
 
     println!("ChadThrottle v0.6.0 - CLI Mode");
     println!();
