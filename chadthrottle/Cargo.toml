@@ -63,6 +63,11 @@ pnet = { version = "0.35.0", optional = true }
 pnet_datalink = { version = "0.35.0", optional = true }
 pnet_packet = { version = "0.35.0", optional = true }
 
+# Process information library (cross-platform)
+# macOS: wraps native libproc API for socket enumeration
+# Linux: provides process listing API (complements procfs)
+libproc = "0.14"
+
 # eBPF support (optional, Linux-only)
 aya = { workspace = true, optional = true }
 chadthrottle-common = { workspace = true, optional = true, default-features = true }
