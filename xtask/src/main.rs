@@ -13,18 +13,28 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Build options parsed from command line
+#[derive(Debug)]
+struct BuildOptions {
+    features: Option<String>,
+    no_default_features: bool,
+}
+
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+
+    // Parse build options
+    let build_opts = parse_build_args(&args);
 
     match args.get(0).map(|s| s.as_str()) {
         Some("build-ebpf") => build_ebpf(false)?,
         Some("build") => {
             build_ebpf(false)?;
-            build_main(false)?;
+            build_main(false, &build_opts)?;
         }
         Some("build-release") => {
             build_ebpf(true)?;
-            build_main(true)?;
+            build_main(true, &build_opts)?;
         }
         Some("clean") => clean()?,
         Some("help") | Some("--help") | Some("-h") => print_help(),
@@ -35,6 +45,56 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Parse build-related arguments from command line
+fn parse_build_args(args: &[String]) -> BuildOptions {
+    let mut features = None;
+    let mut no_default_features = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--features" => {
+                if let Some(feat) = args.get(i + 1) {
+                    features = Some(feat.clone());
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            "--no-default-features" => {
+                no_default_features = true;
+                i += 1;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+
+    BuildOptions {
+        features,
+        no_default_features,
+    }
+}
+
+/// Build feature list ensuring throttle-ebpf is ALWAYS included
+fn build_feature_list(opts: &BuildOptions) -> String {
+    let mut features = vec!["throttle-ebpf".to_string()];
+
+    if let Some(user_features) = &opts.features {
+        // Parse user features (could be comma-separated)
+        for feat in user_features.split(',') {
+            let feat = feat.trim().to_string();
+            // Don't duplicate throttle-ebpf if user specified it
+            if feat != "throttle-ebpf" && !feat.is_empty() {
+                features.push(feat);
+            }
+        }
+    }
+
+    features.join(",")
 }
 
 fn workspace_root() -> PathBuf {
@@ -269,15 +329,28 @@ fn build_ebpf(release: bool) -> Result<()> {
     Ok(())
 }
 
-fn build_main(release: bool) -> Result<()> {
+fn build_main(release: bool, opts: &BuildOptions) -> Result<()> {
     let root = workspace_root();
 
     println!("🔨 Building main crate...");
 
+    // Build feature list with throttle-ebpf ALWAYS included
+    let features = build_feature_list(opts);
+
     let mut cmd = Command::new("cargo");
-    cmd.current_dir(&root)
-        .args(&["build"])
-        .args(&["--features", "throttle-ebpf"]);
+    cmd.current_dir(&root).args(&["build"]);
+
+    // Apply no-default-features if requested
+    if opts.no_default_features {
+        cmd.arg("--no-default-features");
+        println!("  → Disabling default features");
+    }
+
+    // Apply features (throttle-ebpf always included)
+    if !features.is_empty() {
+        cmd.args(&["--features", &features]);
+        println!("  → Using features: {}", features);
+    }
 
     if release {
         cmd.arg("--release");
@@ -321,17 +394,34 @@ fn clean() -> Result<()> {
 fn print_help() {
     println!("ChadThrottle Build Tasks\n");
     println!("USAGE:");
-    println!("  cargo xtask <COMMAND>\n");
+    println!("  cargo xtask <COMMAND> [OPTIONS]\n");
     println!("COMMANDS:");
     println!("  build-ebpf       Build eBPF programs only (requires nightly + bpf-linker)");
     println!("  build            Build everything (eBPF + main crate) in debug mode");
     println!("  build-release    Build everything in release mode");
     println!("  clean            Clean all build artifacts");
     println!("  help             Show this help message\n");
+    println!("OPTIONS:");
+    println!("  --features <FEATURES>      Enable specific features (comma-separated)");
+    println!("  --no-default-features      Disable default features\n");
     println!("EXAMPLES:");
-    println!("  cargo xtask build              # Quick dev build");
-    println!("  cargo xtask build-release      # Production build");
-    println!("  cargo xtask build-ebpf         # Just rebuild eBPF programs\n");
+    println!("  cargo xtask build");
+    println!("    → Default build with monitor-pnet + throttle-ebpf\n");
+    println!("  cargo xtask build --features linux-full");
+    println!("    → Build with all Linux backends enabled\n");
+    println!("  cargo xtask build --features \"throttle-tc-htb,throttle-ifb-tc\"");
+    println!("    → Build with specific throttle backends\n");
+    println!("  cargo xtask build --no-default-features --features throttle-tc-htb");
+    println!("    → Build without monitor-pnet, but with TC HTB backend\n");
+    println!("  cargo xtask build-release --features linux-full");
+    println!("    → Production build with all Linux features\n");
+    println!("  cargo xtask build-ebpf");
+    println!("    → Just rebuild eBPF programs\n");
+    println!("NOTES:");
+    println!("  - throttle-ebpf is ALWAYS included (required for eBPF programs)");
+    println!("  - Default features: monitor-pnet (can disable with --no-default-features)");
+    println!("  - Feature bundles: linux-full, macos-full");
+    println!("  - See chadthrottle/Cargo.toml for all available features\n");
     println!("REQUIREMENTS:");
     println!("  - Rust nightly (auto-detected or auto-installed)");
     println!("  - bpf-linker: cargo install bpf-linker");
