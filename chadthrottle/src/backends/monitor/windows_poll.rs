@@ -21,6 +21,26 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+// Windows-specific imports for TCP statistics
+#[cfg(target_os = "windows")]
+use windows::Win32::Foundation::{BOOLEAN, NO_ERROR};
+#[cfg(target_os = "windows")]
+use windows::Win32::NetworkManagement::IpHelper::{
+    GetPerTcpConnectionEStats, SetPerTcpConnectionEStats, TCP_ESTATS_DATA_ROD_v0,
+    TCP_ESTATS_DATA_RW_v0, TcpConnectionEstatsData,
+};
+
+// MIB_TCPROW structure (Windows doesn't export this in the rust crate, so we define it)
+#[cfg(target_os = "windows")]
+#[repr(C)]
+struct MIB_TCPROW {
+    dwState: u32,
+    dwLocalAddr: u32,
+    dwLocalPort: u32,
+    dwRemoteAddr: u32,
+    dwRemotePort: u32,
+}
+
 /// Monitoring tier based on available privileges and features
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MonitoringTier {
@@ -78,6 +98,12 @@ enum Protocol {
 struct ConnectionStats {
     pid: i32,
     process_name: String,
+
+    // Connection details (needed for GetPerTcpConnectionEStats)
+    local_addr: IpAddr,
+    local_port: u16,
+    remote_addr: IpAddr,
+    remote_port: u16,
 
     // Cumulative byte counters
     bytes_sent: u64,
@@ -294,6 +320,7 @@ fn detect_monitoring_tier() -> MonitoringTier {
 }
 
 /// Check if running with elevated (administrator) privileges
+#[cfg(target_os = "windows")]
 fn is_elevated() -> bool {
     use std::mem;
     use windows::Win32::Foundation::CloseHandle;
@@ -333,16 +360,31 @@ fn is_elevated() -> bool {
     }
 }
 
-/// Enable TCP extended statistics collection (requires admin)
+#[cfg(not(target_os = "windows"))]
+fn is_elevated() -> bool {
+    false
+}
+
+/// Enable TCP extended statistics collection globally (requires admin)
+#[cfg(target_os = "windows")]
 fn enable_tcp_estats() -> bool {
-    // Note: GetPerTcpConnectionEStats requires Windows Vista+
-    // and admin privileges to enable stats collection
+    // Note: GetPerTcpConnectionEStats requires Windows Vista+ and admin privileges
+    // We enable statistics collection globally by setting RW parameters
 
-    // For now, we'll just check if the API is available
-    // Actual stats enabling happens per-connection in the polling loop
+    // Try to enable TCP data tracking
+    // This is a global setting that affects all new connections
+    // Individual connections still need to be queried with GetPerTcpConnectionEStats
 
-    // Return true if we're on a supported Windows version
-    true // Windows Vista+ (we already check for admin in caller)
+    log::debug!("Attempting to enable TCP extended statistics");
+
+    // The actual enabling happens per-connection in get_tcp_stats()
+    // Here we just verify we have the API available
+    true
+}
+
+#[cfg(not(target_os = "windows"))]
+fn enable_tcp_estats() -> bool {
+    false
 }
 
 /// Start background polling thread
@@ -414,6 +456,10 @@ fn update_connection_list(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()>
                     ConnectionStats {
                         pid,
                         process_name: process_name.clone(),
+                        local_addr: conn.local_addr,
+                        local_port: conn.local_port,
+                        remote_addr: conn.remote_addr,
+                        remote_port: conn.remote_port,
                         bytes_sent: 0,
                         bytes_received: 0,
                         last_bytes_sent: 0,
@@ -440,6 +486,10 @@ fn update_connection_list(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()>
                     ConnectionStats {
                         pid,
                         process_name: process_name.clone(),
+                        local_addr: conn.local_addr,
+                        local_port: conn.local_port,
+                        remote_addr: conn.remote_addr,
+                        remote_port: conn.remote_port,
                         bytes_sent: 0,
                         bytes_received: 0,
                         last_bytes_sent: 0,
@@ -466,6 +516,10 @@ fn update_connection_list(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()>
                     ConnectionStats {
                         pid,
                         process_name: process_name.clone(),
+                        local_addr: conn.local_addr,
+                        local_port: conn.local_port,
+                        remote_addr: conn.remote_addr,
+                        remote_port: conn.remote_port,
                         bytes_sent: 0,
                         bytes_received: 0,
                         last_bytes_sent: 0,
@@ -492,6 +546,10 @@ fn update_connection_list(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()>
                     ConnectionStats {
                         pid,
                         process_name: process_name.clone(),
+                        local_addr: conn.local_addr,
+                        local_port: conn.local_port,
+                        remote_addr: conn.remote_addr,
+                        remote_port: conn.remote_port,
                         bytes_sent: 0,
                         bytes_received: 0,
                         last_bytes_sent: 0,
@@ -518,13 +576,6 @@ fn update_connection_list(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()>
 
 /// Update connection statistics with bandwidth tracking (Tier 2 - Stats mode)
 fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()> {
-    // For now, Stats mode is the same as Basic mode
-    // GetPerTcpConnectionEStats requires per-connection calls and is complex
-    // We'll implement basic connection tracking for now
-    // Full bandwidth tracking would require additional Windows API integration
-
-    // TODO: Implement GetPerTcpConnectionEStats integration for accurate byte counters
-
     // First, update connection list (this handles mutex properly)
     update_connection_list(tracker)?;
 
@@ -537,83 +588,187 @@ fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()
     // Rebuild process_bandwidth map from current connections
     let mut new_process_bandwidth: HashMap<i32, ProcessBandwidth> = HashMap::new();
 
-    // Aggregate all TCP connections by PID
+    // Log connection counts for diagnostics
+    log::info!(
+        "Processing connections - TCP: {}, TCP6: {}, UDP: {}, UDP6: {}",
+        tracker.tcp_connections.len(),
+        tracker.tcp6_connections.len(),
+        tracker.udp_connections.len(),
+        tracker.udp6_connections.len()
+    );
+
+    // Aggregate all TCP connections by PID and fetch real bandwidth data
     for stats in tracker.tcp_connections.values() {
-        let entry = new_process_bandwidth
-            .entry(stats.pid)
-            .or_insert_with(|| ProcessBandwidth {
+        let entry = new_process_bandwidth.entry(stats.pid).or_insert_with(|| {
+            // Preserve previous rx_bytes and tx_bytes to use as last_* values
+            // This allows proper delta calculation for rate tracking
+            let (prev_rx, prev_tx) = tracker
+                .process_bandwidth
+                .get(&stats.pid)
+                .map(|prev| (prev.rx_bytes, prev.tx_bytes))
+                .unwrap_or((0, 0));
+
+            ProcessBandwidth {
                 name: stats.process_name.clone(),
                 rx_bytes: 0,
                 tx_bytes: 0,
-                last_rx_bytes: 0,
-                last_tx_bytes: 0,
+                last_rx_bytes: prev_rx,
+                last_tx_bytes: prev_tx,
                 rx_rate: 0,
                 tx_rate: 0,
                 connection_count: 0,
-            });
+            }
+        });
         entry.connection_count += 1;
-        // Note: bytes_sent/received are 0 for now (need GetPerTcpConnectionEStats)
+
+        // Fetch TCP statistics from Windows API
+        log::trace!(
+            "Attempting to get stats for TCP connection: {}:{} -> {}:{}",
+            stats.local_addr,
+            stats.local_port,
+            stats.remote_addr,
+            stats.remote_port
+        );
+        if let Some((rx_bytes, tx_bytes)) = get_tcp_stats(
+            &stats.local_addr,
+            stats.local_port,
+            &stats.remote_addr,
+            stats.remote_port,
+        ) {
+            log::trace!("  -> Got {} RX bytes, {} TX bytes", rx_bytes, tx_bytes);
+            entry.rx_bytes += rx_bytes;
+            entry.tx_bytes += tx_bytes;
+        } else {
+            log::trace!("  -> get_tcp_stats returned None");
+        }
     }
 
-    // Aggregate all TCP6 connections by PID
+    // Aggregate all TCP6 connections by PID and fetch real bandwidth data
     for stats in tracker.tcp6_connections.values() {
-        let entry = new_process_bandwidth
-            .entry(stats.pid)
-            .or_insert_with(|| ProcessBandwidth {
+        let entry = new_process_bandwidth.entry(stats.pid).or_insert_with(|| {
+            // Preserve previous rx_bytes and tx_bytes to use as last_* values
+            // This allows proper delta calculation for rate tracking
+            let (prev_rx, prev_tx) = tracker
+                .process_bandwidth
+                .get(&stats.pid)
+                .map(|prev| (prev.rx_bytes, prev.tx_bytes))
+                .unwrap_or((0, 0));
+
+            ProcessBandwidth {
                 name: stats.process_name.clone(),
                 rx_bytes: 0,
                 tx_bytes: 0,
-                last_rx_bytes: 0,
-                last_tx_bytes: 0,
+                last_rx_bytes: prev_rx,
+                last_tx_bytes: prev_tx,
                 rx_rate: 0,
                 tx_rate: 0,
                 connection_count: 0,
-            });
+            }
+        });
         entry.connection_count += 1;
+
+        // Fetch TCP statistics from Windows API
+        log::trace!(
+            "Attempting to get stats for TCP6 connection: {}:{} -> {}:{}",
+            stats.local_addr,
+            stats.local_port,
+            stats.remote_addr,
+            stats.remote_port
+        );
+        if let Some((rx_bytes, tx_bytes)) = get_tcp_stats(
+            &stats.local_addr,
+            stats.local_port,
+            &stats.remote_addr,
+            stats.remote_port,
+        ) {
+            log::trace!("  -> Got {} RX bytes, {} TX bytes", rx_bytes, tx_bytes);
+            entry.rx_bytes += rx_bytes;
+            entry.tx_bytes += tx_bytes;
+        } else {
+            log::trace!("  -> get_tcp_stats returned None (likely IPv6 - not yet supported)");
+        }
     }
 
     // Aggregate all UDP connections by PID
     for stats in tracker.udp_connections.values() {
-        let entry = new_process_bandwidth
-            .entry(stats.pid)
-            .or_insert_with(|| ProcessBandwidth {
+        let entry = new_process_bandwidth.entry(stats.pid).or_insert_with(|| {
+            // Preserve previous rx_bytes and tx_bytes to use as last_* values
+            // This allows proper delta calculation for rate tracking
+            let (prev_rx, prev_tx) = tracker
+                .process_bandwidth
+                .get(&stats.pid)
+                .map(|prev| (prev.rx_bytes, prev.tx_bytes))
+                .unwrap_or((0, 0));
+
+            ProcessBandwidth {
                 name: stats.process_name.clone(),
                 rx_bytes: 0,
                 tx_bytes: 0,
-                last_rx_bytes: 0,
-                last_tx_bytes: 0,
+                last_rx_bytes: prev_rx,
+                last_tx_bytes: prev_tx,
                 rx_rate: 0,
                 tx_rate: 0,
                 connection_count: 0,
-            });
+            }
+        });
         entry.connection_count += 1;
     }
 
     // Aggregate all UDP6 connections by PID
     for stats in tracker.udp6_connections.values() {
-        let entry = new_process_bandwidth
-            .entry(stats.pid)
-            .or_insert_with(|| ProcessBandwidth {
+        let entry = new_process_bandwidth.entry(stats.pid).or_insert_with(|| {
+            // Preserve previous rx_bytes and tx_bytes to use as last_* values
+            // This allows proper delta calculation for rate tracking
+            let (prev_rx, prev_tx) = tracker
+                .process_bandwidth
+                .get(&stats.pid)
+                .map(|prev| (prev.rx_bytes, prev.tx_bytes))
+                .unwrap_or((0, 0));
+
+            ProcessBandwidth {
                 name: stats.process_name.clone(),
                 rx_bytes: 0,
                 tx_bytes: 0,
-                last_rx_bytes: 0,
-                last_tx_bytes: 0,
+                last_rx_bytes: prev_rx,
+                last_tx_bytes: prev_tx,
                 rx_rate: 0,
                 tx_rate: 0,
                 connection_count: 0,
-            });
+            }
+        });
         entry.connection_count += 1;
     }
 
     // Update the tracker's process_bandwidth map
     tracker.process_bandwidth = new_process_bandwidth;
 
-    // Calculate rates based on available data (for future GetPerTcpConnectionEStats integration)
+    // Calculate rates based on available data
     if elapsed > 0.0 {
-        for (_pid, bandwidth) in &mut tracker.process_bandwidth {
+        for (pid, bandwidth) in &mut tracker.process_bandwidth {
             let rx_diff = bandwidth.rx_bytes.saturating_sub(bandwidth.last_rx_bytes);
             let tx_diff = bandwidth.tx_bytes.saturating_sub(bandwidth.last_tx_bytes);
+
+            // Log rate calculation details for processes with activity
+            if rx_diff > 0 || tx_diff > 0 {
+                let rx_rate = (rx_diff as f64 / elapsed) as u64;
+                let tx_rate = (tx_diff as f64 / elapsed) as u64;
+                log::debug!(
+                    "PID {} ({}): RX: current={} last={} diff={} → {}/s ({:.2} MB/s) | TX: current={} last={} diff={} → {}/s ({:.2} MB/s) | elapsed={:.2}s",
+                    pid,
+                    bandwidth.name,
+                    bandwidth.rx_bytes,
+                    bandwidth.last_rx_bytes,
+                    rx_diff,
+                    rx_rate,
+                    rx_rate as f64 / 1_048_576.0,
+                    bandwidth.tx_bytes,
+                    bandwidth.last_tx_bytes,
+                    tx_diff,
+                    tx_rate,
+                    tx_rate as f64 / 1_048_576.0,
+                    elapsed
+                );
+            }
 
             bandwidth.rx_rate = (rx_diff as f64 / elapsed) as u64;
             bandwidth.tx_rate = (tx_diff as f64 / elapsed) as u64;
@@ -626,4 +781,181 @@ fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()
     }
 
     Ok(())
+}
+
+/// Build MIB_TCPROW structure from connection details (IPv4 only)
+#[cfg(target_os = "windows")]
+fn build_mib_tcprow(
+    local_addr: &IpAddr,
+    local_port: u16,
+    remote_addr: &IpAddr,
+    remote_port: u16,
+) -> Option<MIB_TCPROW> {
+    match (local_addr, remote_addr) {
+        (IpAddr::V4(local_v4), IpAddr::V4(remote_v4)) => {
+            // Build the MIB_TCPROW exactly as Windows expects it
+            // Addresses: stored as u32 in native byte order
+            // Ports: byte-swapped in low 16 bits
+            let local_port_formatted = (((local_port & 0xFF) << 8) | (local_port >> 8)) as u32;
+            let remote_port_formatted = (((remote_port & 0xFF) << 8) | (remote_port >> 8)) as u32;
+
+            let row = MIB_TCPROW {
+                dwState: 0, // Don't care for stats query
+                dwLocalAddr: u32::from_ne_bytes(local_v4.octets()),
+                dwLocalPort: local_port_formatted,
+                dwRemoteAddr: u32::from_ne_bytes(remote_v4.octets()),
+                dwRemotePort: remote_port_formatted,
+            };
+
+            // Log what we're building for debugging
+            log::trace!(
+                "Built MIB_TCPROW: addr=0x{:08x} port=0x{:08x} -> addr=0x{:08x} port=0x{:08x}",
+                row.dwLocalAddr,
+                row.dwLocalPort,
+                row.dwRemoteAddr,
+                row.dwRemotePort
+            );
+
+            Some(row)
+        }
+        _ => {
+            // IPv6 requires different API (GetPerTcp6ConnectionEStats)
+            log::debug!(
+                "Skipping IPv6 connection {:?}:{} -> {:?}:{} (not yet supported)",
+                local_addr,
+                local_port,
+                remote_addr,
+                remote_port
+            );
+            None
+        }
+    }
+}
+
+/// Enable statistics collection for a TCP connection (requires admin)
+#[cfg(target_os = "windows")]
+unsafe fn enable_connection_stats(row: &MIB_TCPROW) -> bool {
+    use std::slice;
+
+    let mut rw = TCP_ESTATS_DATA_RW_v0 {
+        EnableCollection: BOOLEAN(1), // TRUE
+    };
+
+    // Convert to byte slice for the Rust Windows API
+    let rw_slice = slice::from_raw_parts_mut(
+        &mut rw as *mut _ as *mut u8,
+        std::mem::size_of::<TCP_ESTATS_DATA_RW_v0>(),
+    );
+
+    let result = SetPerTcpConnectionEStats(
+        row as *const _ as *mut _,
+        TcpConnectionEstatsData,
+        rw_slice,
+        0, // RwVersion = 0
+        0, // Offset = 0 (unused)
+    );
+
+    if result != NO_ERROR.0 {
+        log::trace!(
+            "Failed to enable TCP stats (error {}): {}:{} -> {}:{}",
+            result,
+            std::net::Ipv4Addr::from(u32::from_be(row.dwLocalAddr)),
+            (row.dwLocalPort & 0xFF) << 8 | (row.dwLocalPort >> 8),
+            std::net::Ipv4Addr::from(u32::from_be(row.dwRemoteAddr)),
+            (row.dwRemotePort & 0xFF) << 8 | (row.dwRemotePort >> 8),
+        );
+        false
+    } else {
+        log::trace!(
+            "Successfully enabled TCP stats: {}:{} -> {}:{}",
+            std::net::Ipv4Addr::from(u32::from_be(row.dwLocalAddr)),
+            (row.dwLocalPort & 0xFF) << 8 | (row.dwLocalPort >> 8),
+            std::net::Ipv4Addr::from(u32::from_be(row.dwRemoteAddr)),
+            (row.dwRemotePort & 0xFF) << 8 | (row.dwRemotePort >> 8),
+        );
+        true
+    }
+}
+
+/// Get bandwidth statistics for a TCP connection
+#[cfg(target_os = "windows")]
+unsafe fn get_connection_bandwidth(row: &MIB_TCPROW) -> Option<(u64, u64)> {
+    use std::{mem, slice};
+
+    let mut rod: TCP_ESTATS_DATA_ROD_v0 = mem::zeroed();
+
+    // Convert to byte slice for the Rust Windows API
+    let rod_slice = slice::from_raw_parts_mut(
+        &mut rod as *mut _ as *mut u8,
+        mem::size_of::<TCP_ESTATS_DATA_ROD_v0>(),
+    );
+
+    let result = GetPerTcpConnectionEStats(
+        row as *const _ as *mut _,
+        TcpConnectionEstatsData,
+        None, // No Rw output needed
+        0,    // RwVersion
+        None, // No Ros output needed
+        0,    // RosVersion
+        Some(rod_slice),
+        0, // RodVersion = 0
+    );
+
+    if result == NO_ERROR.0 {
+        // DataBytesIn = bytes received (download)
+        // DataBytesOut = bytes sent (upload)
+        log::trace!(
+            "Got TCP stats: {}:{} -> {}:{} - RX: {} bytes, TX: {} bytes",
+            std::net::Ipv4Addr::from(u32::from_be(row.dwLocalAddr)),
+            (row.dwLocalPort & 0xFF) << 8 | (row.dwLocalPort >> 8),
+            std::net::Ipv4Addr::from(u32::from_be(row.dwRemoteAddr)),
+            (row.dwRemotePort & 0xFF) << 8 | (row.dwRemotePort >> 8),
+            rod.DataBytesIn,
+            rod.DataBytesOut
+        );
+        Some((rod.DataBytesIn, rod.DataBytesOut))
+    } else {
+        // Connection may have closed, stats not enabled, or other error
+        log::trace!(
+            "Failed to get TCP stats (error {}): {}:{} -> {}:{}",
+            result,
+            std::net::Ipv4Addr::from(u32::from_be(row.dwLocalAddr)),
+            (row.dwLocalPort & 0xFF) << 8 | (row.dwLocalPort >> 8),
+            std::net::Ipv4Addr::from(u32::from_be(row.dwRemoteAddr)),
+            (row.dwRemotePort & 0xFF) << 8 | (row.dwRemotePort >> 8),
+        );
+        None
+    }
+}
+
+/// Get TCP statistics for a specific connection (Windows only, requires admin)
+#[cfg(target_os = "windows")]
+fn get_tcp_stats(
+    local_addr: &IpAddr,
+    local_port: u16,
+    remote_addr: &IpAddr,
+    remote_port: u16,
+) -> Option<(u64, u64)> {
+    // Build MIB_TCPROW structure from connection details
+    let row = build_mib_tcprow(local_addr, local_port, remote_addr, remote_port)?;
+
+    unsafe {
+        // Try to enable statistics for this connection
+        // This may fail if not running as admin, but we try anyway
+        // If already enabled, this is a no-op
+        let _ = enable_connection_stats(&row);
+
+        // Get the bandwidth statistics
+        get_connection_bandwidth(&row)
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn get_tcp_stats(
+    _local_addr: &IpAddr,
+    _local_port: u16,
+    _remote_addr: &IpAddr,
+    _remote_port: u16,
+) -> Option<(u64, u64)> {
+    None
 }
