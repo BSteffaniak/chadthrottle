@@ -31,6 +31,7 @@ pub struct AppState {
     pub show_graph: bool,
     pub sort_frozen: bool,
     frozen_order: HashMap<i32, usize>, // PID -> position index
+    frozen_process_snapshot: Vec<ProcessInfo>, // Frozen snapshot of process list
     // Interface view state
     pub view_mode: ViewMode,
     pub interface_list: Vec<InterfaceInfo>,
@@ -292,6 +293,7 @@ impl AppState {
             status_message: String::from("ChadThrottle started. Press 'h' for help."),
             sort_frozen: false,
             frozen_order: HashMap::new(),
+            frozen_process_snapshot: Vec::new(),
             view_mode: ViewMode::ProcessView,
             interface_list: Vec::new(),
             interface_list_state,
@@ -526,37 +528,73 @@ impl AppState {
     }
 
     pub fn update_processes(&mut self, process_map: ProcessMap) {
-        let mut processes: Vec<ProcessInfo> = process_map.into_values().collect();
+        let mut processes: Vec<ProcessInfo>;
 
         // Sort first (applies to both filtered and unfiltered lists)
         if self.sort_frozen {
-            // FREEZE MODE: Sort by frozen position, new processes go to bottom
-            let next_position = self.frozen_order.values().max().copied().unwrap_or(0) + 1;
+            // FREEZE MODE: Use frozen snapshot, only update stats
 
-            processes.sort_by(|a, b| {
-                let a_pos = self
-                    .frozen_order
-                    .get(&a.pid)
-                    .copied()
-                    .unwrap_or(next_position);
-                let b_pos = self
-                    .frozen_order
-                    .get(&b.pid)
-                    .copied()
-                    .unwrap_or(next_position);
-                a_pos.cmp(&b_pos)
-            });
+            // Start with the frozen snapshot
+            let mut frozen_processes = self.frozen_process_snapshot.clone();
 
-            // Add any new processes to frozen_order map at the end
-            let current_max = self.frozen_order.values().max().copied().unwrap_or(0);
-            let mut next_pos = current_max + 1;
-            for process in &processes {
-                if !self.frozen_order.contains_key(&process.pid) {
-                    self.frozen_order.insert(process.pid, next_pos);
-                    next_pos += 1;
+            // Update existing processes with new data from process_map
+            for frozen_proc in &mut frozen_processes {
+                if let Some(updated_proc) = process_map.get(&frozen_proc.pid) {
+                    // Process still exists - update its stats
+                    frozen_proc.download_rate = updated_proc.download_rate;
+                    frozen_proc.upload_rate = updated_proc.upload_rate;
+                    frozen_proc.total_download = updated_proc.total_download;
+                    frozen_proc.total_upload = updated_proc.total_upload;
+                    frozen_proc.internet_download_rate = updated_proc.internet_download_rate;
+                    frozen_proc.internet_upload_rate = updated_proc.internet_upload_rate;
+                    frozen_proc.internet_total_download = updated_proc.internet_total_download;
+                    frozen_proc.internet_total_upload = updated_proc.internet_total_upload;
+                    frozen_proc.local_download_rate = updated_proc.local_download_rate;
+                    frozen_proc.local_upload_rate = updated_proc.local_upload_rate;
+                    frozen_proc.local_total_download = updated_proc.local_total_download;
+                    frozen_proc.local_total_upload = updated_proc.local_total_upload;
+                    frozen_proc.throttle_limit = updated_proc.throttle_limit.clone();
+                    frozen_proc.interface_stats = updated_proc.interface_stats.clone();
+                    frozen_proc.connections = updated_proc.connections.clone();
+                    frozen_proc.is_terminated = false; // Still running
+                } else {
+                    // Process no longer exists - mark as terminated but keep in list
+                    frozen_proc.is_terminated = true;
+                    frozen_proc.download_rate = 0;
+                    frozen_proc.upload_rate = 0;
+                    frozen_proc.internet_download_rate = 0;
+                    frozen_proc.internet_upload_rate = 0;
+                    frozen_proc.local_download_rate = 0;
+                    frozen_proc.local_upload_rate = 0;
                 }
             }
+
+            // Find and add any NEW processes (not in snapshot) to the end
+            use std::collections::HashSet;
+            let frozen_pids: HashSet<i32> = frozen_processes.iter().map(|p| p.pid).collect();
+            let mut new_processes: Vec<ProcessInfo> = process_map
+                .into_values()
+                .filter(|p| !frozen_pids.contains(&p.pid))
+                .collect();
+
+            // Add new processes to frozen_order map
+            let current_max = self.frozen_order.values().max().copied().unwrap_or(0);
+            let mut next_pos = current_max + 1;
+            for process in &new_processes {
+                self.frozen_order.insert(process.pid, next_pos);
+                next_pos += 1;
+            }
+
+            // Append new processes to the end
+            frozen_processes.append(&mut new_processes);
+
+            // Update the frozen snapshot
+            self.frozen_process_snapshot = frozen_processes.clone();
+
+            processes = frozen_processes;
         } else {
+            // NORMAL MODE: Use fresh data from process_map
+            processes = process_map.into_values().collect();
             // NORMAL MODE: Deterministic multi-level sort to prevent UI jumping
             // Priority: terminated status -> DL rate -> total DL -> UL rate -> total UL -> throttle status -> name -> PID
             processes.sort_by(|a, b| {
@@ -671,14 +709,18 @@ impl AppState {
         self.sort_frozen = !self.sort_frozen;
 
         if self.sort_frozen {
-            // Entering freeze mode - capture current order
+            // Entering freeze mode - capture current process list as snapshot
             self.frozen_order.clear();
             for (index, process) in self.process_list.iter().enumerate() {
                 self.frozen_order.insert(process.pid, index);
             }
+
+            // Store complete snapshot of current process list
+            self.frozen_process_snapshot = self.process_list.clone();
         } else {
-            // Exiting freeze mode - clear frozen order
+            // Exiting freeze mode - clear frozen data
             self.frozen_order.clear();
+            self.frozen_process_snapshot.clear();
         }
     }
 
