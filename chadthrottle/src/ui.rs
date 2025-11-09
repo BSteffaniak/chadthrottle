@@ -1048,6 +1048,26 @@ impl AppState {
         let max_scroll = content_lines.saturating_sub(usable_height);
         scroll_offset.min(max_scroll)
     }
+
+    /// Adjust scroll offset to ensure a specific line is visible
+    /// Returns the adjusted scroll offset
+    pub fn scroll_to_line(current_scroll: usize, target_line: usize, visible_height: u16) -> usize {
+        let usable_height = visible_height.saturating_sub(3) as usize;
+
+        // If target is above visible area, scroll up to show it
+        if target_line < current_scroll {
+            return target_line;
+        }
+
+        // If target is below visible area, scroll down to show it
+        let last_visible_line = current_scroll + usable_height.saturating_sub(1);
+        if target_line > last_visible_line {
+            return target_line.saturating_sub(usable_height.saturating_sub(1));
+        }
+
+        // Target is already visible
+        current_scroll
+    }
 }
 
 pub fn draw_ui(f: &mut Frame, app: &mut AppState) {
@@ -1834,6 +1854,10 @@ fn draw_backend_info(f: &mut Frame, area: Rect, app: &mut AppState, backend_info
     // Get backend stats from backend_info
     let backend_stats = &backend_info.backend_stats;
 
+    // Track line numbers for auto-scroll
+    let mut current_line = text.len();
+    let mut selected_line: Option<usize> = None;
+
     // Render all items (group headers and backends) with radio buttons
     for (index, item) in app.backend_items.iter().enumerate() {
         match item {
@@ -1841,6 +1865,7 @@ fn draw_backend_info(f: &mut Frame, area: Rect, app: &mut AppState, backend_info
                 // Add spacing before groups (except first)
                 if index > 0 {
                     text.push(Line::from(""));
+                    current_line += 1;
                 }
 
                 let header = match group {
@@ -1854,15 +1879,21 @@ fn draw_backend_info(f: &mut Frame, area: Rect, app: &mut AppState, backend_info
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
                 )));
+                current_line += 1;
             }
             BackendSelectorItem::Backend {
                 name,
-                group,
+                group: _,
                 priority,
                 available,
                 is_current_default,
             } => {
                 let is_selected = index == app.backend_selected_index;
+
+                // Track this line if it's selected
+                if is_selected {
+                    selected_line = Some(current_line);
+                }
 
                 // Radio button shows active backend (not pending, since Space applies immediately)
                 let is_active = *is_current_default;
@@ -1936,6 +1967,7 @@ fn draw_backend_info(f: &mut Frame, area: Rect, app: &mut AppState, backend_info
                 }
 
                 text.push(Line::from(line_spans));
+                current_line += 1;
             }
         }
     }
@@ -2324,6 +2356,12 @@ fn draw_backend_info(f: &mut Frame, area: Rect, app: &mut AppState, backend_info
     )));
 
     let backend_area = centered_rect(80, 80, area);
+
+    // Auto-scroll to keep selected backend visible
+    if let Some(line) = selected_line {
+        app.backend_info_scroll_offset =
+            AppState::scroll_to_line(app.backend_info_scroll_offset, line, backend_area.height);
+    }
 
     // Clamp scroll offset to content bounds
     let content_lines = text.len();
@@ -2779,6 +2817,18 @@ fn draw_interface_modal(f: &mut Frame, area: Rect, app: &mut AppState) {
     )));
 
     let modal_area = centered_rect(70, 60, area);
+
+    // Auto-scroll to keep selected interface visible
+    // Header lines: blank + title + blank + filter state + blank + "Select interfaces..." + blank = 7 lines
+    let header_lines = 7;
+    if let Some(selected_idx) = app.selected_interface_index {
+        let selected_line = header_lines + selected_idx;
+        app.interface_modal_scroll_offset = AppState::scroll_to_line(
+            app.interface_modal_scroll_offset,
+            selected_line,
+            modal_area.height,
+        );
+    }
 
     // Clamp scroll offset to content bounds
     let content_lines = text.len();
