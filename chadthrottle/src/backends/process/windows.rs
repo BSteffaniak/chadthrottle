@@ -1,23 +1,43 @@
-// Windows ProcessUtils implementation using sysinfo
+// Windows ProcessUtils implementation using sysinfo and IP Helper API
 //
-// Windows networking monitoring is not yet fully implemented.
-// This provides basic process enumeration for monitoring-only mode.
+// This provides process enumeration and socket-to-PID mapping for Windows.
 
+use super::socket_mapper::{SocketMapperBackend, select_socket_mapper};
 use super::{ConnectionMap, ProcessEntry, ProcessUtils};
 use anyhow::Result;
-use std::collections::HashMap;
 use sysinfo::{Pid, System};
 
-pub struct WindowsProcessUtils;
+pub struct WindowsProcessUtils {
+    socket_mapper: Box<dyn SocketMapperBackend>,
+    socket_mapper_name: String,
+}
 
 impl WindowsProcessUtils {
     pub fn new() -> Self {
-        WindowsProcessUtils
+        Self::with_socket_mapper(None)
     }
 
-    pub fn with_socket_mapper(_socket_mapper_preference: Option<&str>) -> Self {
-        // Socket mapper not yet implemented for Windows
-        Self::new()
+    pub fn with_socket_mapper(socket_mapper_preference: Option<&str>) -> Self {
+        let socket_mapper = select_socket_mapper(socket_mapper_preference)
+            .expect("Failed to initialize socket mapper on Windows");
+
+        let socket_mapper_name = socket_mapper.name().to_string();
+        log::debug!("Using socket mapper backend: {}", socket_mapper_name);
+
+        Self {
+            socket_mapper,
+            socket_mapper_name,
+        }
+    }
+
+    /// Get the name of the socket mapper backend
+    pub fn socket_mapper_name(&self) -> &str {
+        &self.socket_mapper_name
+    }
+
+    /// Get capabilities of the socket mapper backend
+    pub fn socket_mapper_capabilities(&self) -> crate::backends::BackendCapabilities {
+        self.socket_mapper.capabilities()
     }
 }
 
@@ -53,19 +73,7 @@ impl ProcessUtils for WindowsProcessUtils {
     }
 
     fn get_connection_map(&self) -> Result<ConnectionMap> {
-        // TODO: Implement socket-to-PID mapping for Windows
-        // Could use:
-        // - GetExtendedTcpTable / GetExtendedUdpTable from iphlpapi.dll
-        // - netstat parsing
-        // For now, return empty map
-        log::warn!("Socket-to-PID mapping not yet implemented for Windows");
-
-        Ok(ConnectionMap {
-            socket_to_pid: HashMap::new(),
-            tcp_connections: Vec::new(),
-            tcp6_connections: Vec::new(),
-            udp_connections: Vec::new(),
-            udp6_connections: Vec::new(),
-        })
+        // Delegate to pluggable socket mapper backend
+        self.socket_mapper.get_connection_map()
     }
 }

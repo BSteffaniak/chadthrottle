@@ -1,69 +1,42 @@
 // Windows socket-to-PID mapping backends
 //
-// This module will provide Windows-specific socket mapping implementations
-// using GetExtendedTcpTable/GetExtendedUdpTable APIs or netstat parsing.
-//
-// For now, this is a stub that returns an empty mapper.
+// This module provides Windows-specific socket mapping implementations
+// using GetExtendedTcpTable/GetExtendedUdpTable APIs from IP Helper.
 
-use crate::backends::process::ConnectionMap;
+mod iphelper;
+
+pub use iphelper::IpHelperSocketMapper;
+
+use crate::backends::BackendPriority;
 use crate::backends::process::socket_mapper::{SocketMapperBackend, SocketMapperInfo};
-use crate::backends::{BackendCapabilities, BackendPriority};
 use anyhow::Result;
-use std::collections::HashMap;
-
-/// Stub socket mapper for Windows (to be implemented)
-pub struct WindowsStubMapper;
-
-impl SocketMapperBackend for WindowsStubMapper {
-    fn name(&self) -> &'static str {
-        "windows-stub"
-    }
-
-    fn priority(&self) -> BackendPriority {
-        BackendPriority::Fallback
-    }
-
-    fn is_available() -> bool {
-        true // Stub is always "available" but returns empty data
-    }
-
-    fn capabilities(&self) -> BackendCapabilities {
-        BackendCapabilities {
-            ipv4_support: false,
-            ipv6_support: false,
-            per_process: false,
-            per_connection: false,
-        }
-    }
-
-    fn get_connection_map(&self) -> Result<ConnectionMap> {
-        log::warn!("Windows socket-to-PID mapping not yet implemented");
-        Ok(ConnectionMap {
-            socket_to_pid: HashMap::new(),
-            tcp_connections: Vec::new(),
-            tcp6_connections: Vec::new(),
-            udp_connections: Vec::new(),
-            udp6_connections: Vec::new(),
-        })
-    }
-}
 
 /// Detect available socket mapper backends on Windows
 pub fn detect_socket_mappers() -> Vec<SocketMapperInfo> {
     vec![SocketMapperInfo {
-        name: "windows-stub",
-        priority: BackendPriority::Fallback,
-        available: true,
+        name: "iphelper",
+        priority: BackendPriority::Best,
+        available: IpHelperSocketMapper::is_available(),
     }]
 }
 
-/// Select best socket mapper backend for Windows
-pub fn select_socket_mapper(preference: Option<&str>) -> Box<dyn SocketMapperBackend> {
+/// Select socket mapper backend for Windows
+///
+/// Currently only supports IP Helper API (iphelper).
+pub fn select_socket_mapper(preference: Option<&str>) -> Result<Box<dyn SocketMapperBackend>> {
     if let Some(name) = preference {
-        log::warn!(
-            "Windows socket mapper preference '{}' ignored - only stub available",
-            name
-        );
+        match name {
+            "iphelper" => Ok(Box::new(IpHelperSocketMapper::new()?)),
+            _ => Err(anyhow::anyhow!("Unknown socket mapper: {}", name)),
+        }
+    } else {
+        // Auto-select: IP Helper is the only available backend
+        if IpHelperSocketMapper::is_available() {
+            Ok(Box::new(IpHelperSocketMapper::new()?))
+        } else {
+            Err(anyhow::anyhow!(
+                "No socket mapper backends available on Windows"
+            ))
+        }
     }
-    Box::new(WindowsStubMapper)
 }
