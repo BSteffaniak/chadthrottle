@@ -71,6 +71,7 @@ use clap::Parser;
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -675,144 +676,552 @@ async fn run_app<B: ratatui::backend::Backend>(
 
         // Handle input with timeout
         if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                // Only handle key press events (ignore release and repeat)
-                // This prevents modals from closing immediately on Windows
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
+            match event::read()? {
+                Event::Key(key) => {
+                    // Only handle key press events (ignore release and repeat)
+                    // This prevents modals from closing immediately on Windows
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
 
-                // ALWAYS check Ctrl+C first - force quit regardless of modal state
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                    return Ok(());
-                }
+                    // ALWAYS check Ctrl+C first - force quit regardless of modal state
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && key.code == KeyCode::Char('c')
+                    {
+                        return Ok(());
+                    }
 
-                // If help is shown, handle scroll or close it
-                if app.show_help {
-                    match key.code {
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            app.scroll_help_up();
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            app.scroll_help_down();
-                        }
-                        KeyCode::PageUp => {
-                            // Scroll up by 10 lines
-                            for _ in 0..10 {
+                    // If help is shown, handle scroll or close it
+                    if app.show_help {
+                        match key.code {
+                            KeyCode::Up | KeyCode::Char('k') => {
                                 app.scroll_help_up();
                             }
-                        }
-                        KeyCode::PageDown => {
-                            // Scroll down by 10 lines
-                            for _ in 0..10 {
+                            KeyCode::Down | KeyCode::Char('j') => {
                                 app.scroll_help_down();
                             }
+                            KeyCode::PageUp => {
+                                // Scroll up by 10 lines
+                                for _ in 0..10 {
+                                    app.scroll_help_up();
+                                }
+                            }
+                            KeyCode::PageDown => {
+                                // Scroll down by 10 lines
+                                for _ in 0..10 {
+                                    app.scroll_help_down();
+                                }
+                            }
+                            _ => {
+                                app.show_help = false;
+                                app.reset_help_scroll();
+                            }
                         }
-                        _ => {
-                            app.show_help = false;
-                            app.reset_help_scroll();
-                        }
+                        continue;
                     }
-                    continue;
-                }
 
-                // If backend info is shown, Enter switches to selector, Esc/q closes it
-                if app.show_backend_info {
-                    match key.code {
-                        KeyCode::Char(' ') => {
-                            // Space bar - immediately apply backend selection
-                            if let Some((name, group)) = app.get_selected_backend() {
-                                match group {
-                                    ui::BackendGroup::SocketMapper => {
-                                        // Only switch if different from current
-                                        let (current_sm, _) = monitor.get_socket_mapper_info();
-                                        if name != current_sm {
-                                            log::info!(
-                                                "Switching socket mapper: {} → {}",
-                                                current_sm,
-                                                name
-                                            );
+                    // If backend info is shown, Enter switches to selector, Esc/q closes it
+                    if app.show_backend_info {
+                        match key.code {
+                            KeyCode::Char(' ') => {
+                                // Space bar - immediately apply backend selection
+                                if let Some((name, group)) = app.get_selected_backend() {
+                                    match group {
+                                        ui::BackendGroup::SocketMapper => {
+                                            // Only switch if different from current
+                                            let (current_sm, _) = monitor.get_socket_mapper_info();
+                                            if name != current_sm {
+                                                log::info!(
+                                                    "Switching socket mapper: {} → {}",
+                                                    current_sm,
+                                                    name
+                                                );
 
-                                            // Extract bandwidth data BEFORE dropping old monitor
-                                            let (process_bandwidth, terminated_processes) =
-                                                monitor.extract_bandwidth_data();
-                                            let process_count = process_bandwidth.len();
-                                            let terminated_count = terminated_processes.len();
+                                                // Extract bandwidth data BEFORE dropping old monitor
+                                                let (process_bandwidth, terminated_processes) =
+                                                    monitor.extract_bandwidth_data();
+                                                let process_count = process_bandwidth.len();
+                                                let terminated_count = terminated_processes.len();
 
-                                            // Create new monitor (old one will be dropped, cleaning up threads)
-                                            match NetworkMonitor::with_socket_mapper(Some(name)) {
-                                                Ok(mut new_monitor) => {
-                                                    // Restore bandwidth data in new monitor
-                                                    new_monitor.restore_bandwidth_data(
-                                                        process_bandwidth,
-                                                        terminated_processes,
-                                                    );
+                                                // Create new monitor (old one will be dropped, cleaning up threads)
+                                                match NetworkMonitor::with_socket_mapper(Some(name))
+                                                {
+                                                    Ok(mut new_monitor) => {
+                                                        // Restore bandwidth data in new monitor
+                                                        new_monitor.restore_bandwidth_data(
+                                                            process_bandwidth,
+                                                            terminated_processes,
+                                                        );
 
-                                                    // Replace monitor (old one drops here, threads cleaned up)
-                                                    *monitor = new_monitor;
+                                                        // Replace monitor (old one drops here, threads cleaned up)
+                                                        *monitor = new_monitor;
 
-                                                    config.preferred_socket_mapper =
+                                                        config.preferred_socket_mapper =
+                                                            Some(name.to_string());
+                                                        let _ = config.save();
+                                                        app.status_message = format!(
+                                                            "✅ Socket mapper → {} (preserved {} processes, {} terminated)",
+                                                            name, process_count, terminated_count
+                                                        );
+                                                        log::info!(
+                                                            "Socket mapper switched successfully, bandwidth data preserved"
+                                                        );
+                                                    }
+                                                    Err(e) => {
+                                                        app.status_message =
+                                                            format!("❌ Socket mapper: {}", e);
+                                                        log::error!(
+                                                            "Failed to switch socket mapper: {}",
+                                                            e
+                                                        );
+                                                    }
+                                                }
+                                            } else {
+                                                app.status_message =
+                                                    format!("'{}' is already active", name);
+                                            }
+                                        }
+                                        ui::BackendGroup::Upload => {
+                                            match throttle_manager.set_default_upload_backend(name)
+                                            {
+                                                Ok(_) => {
+                                                    config.preferred_upload_backend =
                                                         Some(name.to_string());
                                                     let _ = config.save();
-                                                    app.status_message = format!(
-                                                        "✅ Socket mapper → {} (preserved {} processes, {} terminated)",
-                                                        name, process_count, terminated_count
-                                                    );
-                                                    log::info!(
-                                                        "Socket mapper switched successfully, bandwidth data preserved"
-                                                    );
+                                                    app.status_message =
+                                                        format!("✅ Upload backend → {}", name);
                                                 }
                                                 Err(e) => {
                                                     app.status_message =
-                                                        format!("❌ Socket mapper: {}", e);
-                                                    log::error!(
-                                                        "Failed to switch socket mapper: {}",
-                                                        e
-                                                    );
+                                                        format!("❌ Upload backend: {}", e);
                                                 }
                                             }
-                                        } else {
-                                            app.status_message =
-                                                format!("'{}' is already active", name);
+                                        }
+                                        ui::BackendGroup::Download => {
+                                            match throttle_manager
+                                                .set_default_download_backend(name)
+                                            {
+                                                Ok(_) => {
+                                                    config.preferred_download_backend =
+                                                        Some(name.to_string());
+                                                    let _ = config.save();
+                                                    app.status_message =
+                                                        format!("✅ Download backend → {}", name);
+                                                }
+                                                Err(e) => {
+                                                    app.status_message =
+                                                        format!("❌ Download backend: {}", e);
+                                                }
+                                            }
                                         }
                                     }
-                                    ui::BackendGroup::Upload => {
-                                        match throttle_manager.set_default_upload_backend(name) {
-                                            Ok(_) => {
-                                                config.preferred_upload_backend =
-                                                    Some(name.to_string());
-                                                let _ = config.save();
+
+                                    // Rebuild backend items to reflect new state
+                                    let mut backend_info = throttle_manager.get_backend_info(
+                                        config.preferred_upload_backend.clone(),
+                                        config.preferred_download_backend.clone(),
+                                    );
+                                    {
+                                        use crate::backends::process::socket_mapper::detect_socket_mappers;
+                                        let socket_mappers = detect_socket_mappers();
+                                        backend_info.available_socket_mappers = socket_mappers
+                                            .iter()
+                                            .map(|sm| {
+                                                (sm.name.to_string(), sm.priority, sm.available)
+                                            })
+                                            .collect();
+                                        let (active_sm, capabilities) =
+                                            monitor.get_socket_mapper_info();
+                                        backend_info.active_socket_mapper =
+                                            Some(active_sm.to_string());
+                                        backend_info.socket_mapper_capabilities =
+                                            Some(capabilities.clone());
+                                        backend_info.preferred_socket_mapper =
+                                            config.preferred_socket_mapper.clone();
+                                    }
+                                    app.build_backend_items(&backend_info);
+                                }
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                app.select_previous_backend();
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                app.select_next_backend();
+                            }
+                            KeyCode::PageUp => {
+                                // Scroll up by 10 lines
+                                for _ in 0..10 {
+                                    app.scroll_backend_info_up();
+                                }
+                            }
+                            KeyCode::PageDown => {
+                                // Scroll down by 10 lines
+                                for _ in 0..10 {
+                                    app.scroll_backend_info_down();
+                                }
+                            }
+                            KeyCode::Enter
+                            | KeyCode::Char('b')
+                            | KeyCode::Char('q')
+                            | KeyCode::Esc => {
+                                app.show_backend_info = false;
+                                app.reset_backend_info_scroll();
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    // If graph is shown, g/Esc/q closes it
+                    if app.show_graph {
+                        match key.code {
+                            KeyCode::Char('g') | KeyCode::Char('q') | KeyCode::Esc => {
+                                app.show_graph = false;
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    // Handle backend compatibility dialog (highest priority)
+                    if app.show_backend_compatibility_dialog {
+                        match key.code {
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                if let Some(dialog) = &mut app.backend_compatibility_dialog {
+                                    dialog.select_previous();
+                                }
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                if let Some(dialog) = &mut app.backend_compatibility_dialog {
+                                    dialog.select_next();
+                                }
+                            }
+                            KeyCode::PageUp => {
+                                // Scroll up by 10 lines
+                                for _ in 0..10 {
+                                    app.scroll_backend_compat_up();
+                                }
+                            }
+                            KeyCode::PageDown => {
+                                // Scroll down by 10 lines
+                                for _ in 0..10 {
+                                    app.scroll_backend_compat_down();
+                                }
+                            }
+                            KeyCode::Enter => {
+                                // Process the selected action
+                                if let Some(dialog) = &app.backend_compatibility_dialog {
+                                    let action = dialog.get_action();
+                                    let is_upload = dialog.is_upload;
+
+                                    // Get throttle info before we consume dialog
+                                    let (download, upload) =
+                                        app.throttle_dialog.parse_limits().unwrap_or((None, None));
+                                    let pid = app.throttle_dialog.target_pid;
+                                    let process_name = app.throttle_dialog.target_name.clone();
+                                    let traffic_type = app.throttle_dialog.get_traffic_type();
+
+                                    match &action {
+                                        ui::BackendCompatibilityAction::Cancel => {
+                                            // Just close the modal, keep throttle dialog open
+                                            app.show_backend_compatibility_dialog = false;
+                                            app.backend_compatibility_dialog = None;
+                                        }
+                                        ui::BackendCompatibilityAction::SwitchTemporary(
+                                            backend_name,
+                                        )
+                                        | ui::BackendCompatibilityAction::SwitchAndMakeDefault(
+                                            backend_name,
+                                        ) => {
+                                            let make_default = matches!(
+                                            &action,
+                                            ui::BackendCompatibilityAction::SwitchAndMakeDefault(_)
+                                        );
+
+                                            // Store original backend
+                                            let (original_upload, original_download) =
+                                                throttle_manager.get_default_backends();
+
+                                            // Switch to compatible backend
+                                            let switch_result = if is_upload {
+                                                throttle_manager
+                                                    .set_default_upload_backend(&backend_name)
+                                            } else {
+                                                throttle_manager
+                                                    .set_default_download_backend(&backend_name)
+                                            };
+
+                                            if let Err(e) = switch_result {
                                                 app.status_message =
-                                                    format!("✅ Upload backend → {}", name);
+                                                    format!("Failed to switch backend: {}", e);
+                                                app.show_backend_compatibility_dialog = false;
+                                                app.backend_compatibility_dialog = None;
+                                                continue;
                                             }
-                                            Err(e) => {
-                                                app.status_message =
-                                                    format!("❌ Upload backend: {}", e);
+
+                                            // Apply throttle
+                                            if let (Some(pid), Some(name)) = (pid, process_name) {
+                                                let limit = crate::process::ThrottleLimit {
+                                                    download_limit: download,
+                                                    upload_limit: upload,
+                                                    traffic_type,
+                                                };
+
+                                                match throttle_manager.throttle_process(
+                                                    pid,
+                                                    name.clone(),
+                                                    &limit,
+                                                ) {
+                                                    Ok(_) => {
+                                                        app.status_message = format!(
+                                                            "Throttle applied to {} using {} backend{}",
+                                                            name,
+                                                            backend_name,
+                                                            if make_default {
+                                                                " (now default)"
+                                                            } else {
+                                                                ""
+                                                            }
+                                                        );
+
+                                                        // Update config if making default
+                                                        if make_default {
+                                                            if is_upload {
+                                                                config.preferred_upload_backend =
+                                                                    Some(backend_name.clone());
+                                                            } else {
+                                                                config.preferred_download_backend =
+                                                                    Some(backend_name.clone());
+                                                            }
+                                                            let _ = config.save();
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        app.status_message = format!(
+                                                            "Failed to apply throttle: {}",
+                                                            e
+                                                        );
+                                                    }
+                                                }
                                             }
+
+                                            // Switch back if not making default
+                                            if !make_default {
+                                                if is_upload {
+                                                    if let Some(orig) = original_upload {
+                                                        let _ = throttle_manager
+                                                            .set_default_upload_backend(&orig);
+                                                    }
+                                                } else {
+                                                    if let Some(orig) = original_download {
+                                                        let _ = throttle_manager
+                                                            .set_default_download_backend(&orig);
+                                                    }
+                                                }
+                                            }
+
+                                            // Close both dialogs
+                                            app.show_backend_compatibility_dialog = false;
+                                            app.backend_compatibility_dialog = None;
+                                            app.show_throttle_dialog = false;
+                                            app.throttle_dialog.reset();
+                                        }
+                                        ui::BackendCompatibilityAction::ConvertToAll => {
+                                            // Apply throttle with All traffic type
+                                            if let (Some(pid), Some(name)) = (pid, process_name) {
+                                                let limit = crate::process::ThrottleLimit {
+                                                    download_limit: download,
+                                                    upload_limit: upload,
+                                                    traffic_type: crate::process::TrafficType::All,
+                                                };
+
+                                                match throttle_manager.throttle_process(
+                                                    pid,
+                                                    name.clone(),
+                                                    &limit,
+                                                ) {
+                                                    Ok(_) => {
+                                                        app.status_message = format!(
+                                                            "Throttle applied to {} as 'All Traffic'",
+                                                            name
+                                                        );
+                                                    }
+                                                    Err(e) => {
+                                                        app.status_message = format!(
+                                                            "Failed to apply throttle: {}",
+                                                            e
+                                                        );
+                                                    }
+                                                }
+                                            }
+
+                                            // Close both dialogs
+                                            app.show_backend_compatibility_dialog = false;
+                                            app.backend_compatibility_dialog = None;
+                                            app.show_throttle_dialog = false;
+                                            app.throttle_dialog.reset();
                                         }
                                     }
-                                    ui::BackendGroup::Download => {
-                                        match throttle_manager.set_default_download_backend(name) {
+                                }
+                            }
+                            KeyCode::Esc | KeyCode::Char('q') => {
+                                // Cancel - close modal, keep throttle dialog open
+                                app.show_backend_compatibility_dialog = false;
+                                app.backend_compatibility_dialog = None;
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    // Handle throttle dialog input
+                    if app.show_throttle_dialog {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') => {
+                                app.show_throttle_dialog = false;
+                                app.throttle_dialog.reset();
+                            }
+                            KeyCode::Tab => {
+                                app.throttle_dialog.toggle_field();
+                            }
+                            KeyCode::Char('t') => {
+                                app.throttle_dialog.cycle_traffic_type();
+                            }
+                            KeyCode::Char(c) if c.is_numeric() => {
+                                app.throttle_dialog.handle_char(c);
+                            }
+                            KeyCode::Backspace => {
+                                app.throttle_dialog.handle_backspace();
+                            }
+                            KeyCode::Enter => {
+                                // Apply throttle
+                                if let Some((download, upload)) = app.throttle_dialog.parse_limits()
+                                {
+                                    if let Some(pid) = app.throttle_dialog.target_pid {
+                                        let process_name = app
+                                            .throttle_dialog
+                                            .target_name
+                                            .clone()
+                                            .unwrap_or_default();
+                                        let limit = crate::process::ThrottleLimit {
+                                            download_limit: download,
+                                            upload_limit: upload,
+                                            traffic_type: app.throttle_dialog.get_traffic_type(),
+                                        };
+
+                                        // Check if backend compatibility dialog is needed
+                                        let needs_upload_compat = limit.upload_limit.is_some()
+                                            && !throttle_manager.current_upload_backend_supports(
+                                                limit.traffic_type,
+                                            );
+                                        let needs_download_compat = limit.download_limit.is_some()
+                                            && !throttle_manager.current_download_backend_supports(
+                                                limit.traffic_type,
+                                            );
+
+                                        if needs_upload_compat {
+                                            // Show upload backend compatibility dialog
+                                            let compatible = throttle_manager
+                                                .find_compatible_upload_backends(
+                                                    limit.traffic_type,
+                                                );
+                                            let (current_backend, _) =
+                                                throttle_manager.get_default_backends();
+                                            app.backend_compatibility_dialog =
+                                                Some(ui::BackendCompatibilityDialog::new(
+                                                    current_backend.unwrap_or("none".to_string()),
+                                                    limit.traffic_type,
+                                                    compatible,
+                                                    true, // is_upload
+                                                ));
+                                            app.reset_backend_compat_scroll();
+                                            app.show_backend_compatibility_dialog = true;
+                                            // DON'T close throttle dialog - keep it in background
+                                            continue; // Skip applying throttle for now
+                                        } else if needs_download_compat {
+                                            // Show download backend compatibility dialog
+                                            let compatible = throttle_manager
+                                                .find_compatible_download_backends(
+                                                    limit.traffic_type,
+                                                );
+                                            let (_, current_backend) =
+                                                throttle_manager.get_default_backends();
+                                            app.backend_compatibility_dialog =
+                                                Some(ui::BackendCompatibilityDialog::new(
+                                                    current_backend.unwrap_or("none".to_string()),
+                                                    limit.traffic_type,
+                                                    compatible,
+                                                    false, // is_upload=false
+                                                ));
+                                            app.reset_backend_compat_scroll();
+                                            app.show_backend_compatibility_dialog = true;
+                                            // DON'T close throttle dialog - keep it in background
+                                            continue; // Skip applying throttle for now
+                                        }
+
+                                        // No compatibility issues or no compatible backends available
+                                        // Proceed with throttle attempt
+                                        match throttle_manager.throttle_process(
+                                            pid,
+                                            process_name.clone(),
+                                            &limit,
+                                        ) {
                                             Ok(_) => {
-                                                config.preferred_download_backend =
-                                                    Some(name.to_string());
-                                                let _ = config.save();
-                                                app.status_message =
-                                                    format!("✅ Download backend → {}", name);
+                                                app.status_message = format!(
+                                                    "Throttle applied to {} (PID {})",
+                                                    process_name, pid
+                                                );
                                             }
                                             Err(e) => {
+                                                log::warn!("Failed to apply throttle: {e}");
                                                 app.status_message =
-                                                    format!("❌ Download backend: {}", e);
+                                                    format!("Failed to apply throttle: {}", e);
                                             }
                                         }
                                     }
                                 }
+                                app.show_throttle_dialog = false;
+                                app.throttle_dialog.reset();
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
 
-                                // Rebuild backend items to reflect new state
+                    match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc => {
+                            // Special handling for interface views and process detail
+                            match app.view_mode {
+                                ui::ViewMode::InterfaceDetail => {
+                                    app.exit_interface_detail();
+                                    app.status_message = "Back to interface list".to_string();
+                                }
+                                ui::ViewMode::InterfaceList => {
+                                    app.view_mode = ui::ViewMode::ProcessView;
+                                    app.status_message =
+                                        "Closed interface modal - filter still active".to_string();
+                                }
+                                ui::ViewMode::ProcessDetail => {
+                                    app.exit_process_detail();
+                                    app.status_message = "Back to process list".to_string();
+                                }
+                                ui::ViewMode::ProcessView => {
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        KeyCode::Char('h') | KeyCode::Char('?') => {
+                            app.reset_help_scroll();
+                            app.show_help = true;
+                        }
+                        KeyCode::Char('b') => {
+                            if !app.show_backend_info {
+                                // Build backend items when opening modal
                                 let mut backend_info = throttle_manager.get_backend_info(
                                     config.preferred_upload_backend.clone(),
                                     config.preferred_download_backend.clone(),
                                 );
+                                // Populate socket mapper info
                                 {
                                     use crate::backends::process::socket_mapper::detect_socket_mappers;
                                     let socket_mappers = detect_socket_mappers();
@@ -829,543 +1238,179 @@ async fn run_app<B: ratatui::backend::Backend>(
                                         config.preferred_socket_mapper.clone();
                                 }
                                 app.build_backend_items(&backend_info);
+                                app.reset_backend_info_scroll();
+                                app.show_backend_info = true;
+                            } else {
+                                app.show_backend_info = false;
+                                app.reset_backend_info_scroll();
+                            }
+                        }
+                        KeyCode::Char('f') => {
+                            app.toggle_sort_freeze();
+                            app.status_message = if app.sort_frozen {
+                                "Sort order frozen ❄️ - Stats continue updating, order preserved"
+                                    .to_string()
+                            } else {
+                                "Sort order unfrozen - Dynamic sorting re-enabled".to_string()
+                            };
+                        }
+                        KeyCode::Char('g') => {
+                            app.show_graph = !app.show_graph;
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            match app.view_mode {
+                                ui::ViewMode::ProcessView => app.select_next(),
+                                ui::ViewMode::InterfaceList => app.select_next_interface(),
+                                ui::ViewMode::InterfaceDetail => {} // No selection in detail view
+                                ui::ViewMode::ProcessDetail => app.scroll_detail_down(),
                             }
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
-                            app.select_previous_backend();
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            app.select_next_backend();
-                        }
-                        KeyCode::PageUp => {
-                            // Scroll up by 10 lines
-                            for _ in 0..10 {
-                                app.scroll_backend_info_up();
-                            }
-                        }
-                        KeyCode::PageDown => {
-                            // Scroll down by 10 lines
-                            for _ in 0..10 {
-                                app.scroll_backend_info_down();
-                            }
-                        }
-                        KeyCode::Enter | KeyCode::Char('b') | KeyCode::Char('q') | KeyCode::Esc => {
-                            app.show_backend_info = false;
-                            app.reset_backend_info_scroll();
-                        }
-                        _ => {}
-                    }
-                    continue;
-                }
-
-                // If graph is shown, g/Esc/q closes it
-                if app.show_graph {
-                    match key.code {
-                        KeyCode::Char('g') | KeyCode::Char('q') | KeyCode::Esc => {
-                            app.show_graph = false;
-                        }
-                        _ => {}
-                    }
-                    continue;
-                }
-
-                // Handle backend compatibility dialog (highest priority)
-                if app.show_backend_compatibility_dialog {
-                    match key.code {
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            if let Some(dialog) = &mut app.backend_compatibility_dialog {
-                                dialog.select_previous();
-                            }
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            if let Some(dialog) = &mut app.backend_compatibility_dialog {
-                                dialog.select_next();
+                            match app.view_mode {
+                                ui::ViewMode::ProcessView => app.select_previous(),
+                                ui::ViewMode::InterfaceList => app.select_previous_interface(),
+                                ui::ViewMode::InterfaceDetail => {} // No selection in detail view
+                                ui::ViewMode::ProcessDetail => app.scroll_detail_up(),
                             }
                         }
                         KeyCode::PageUp => {
-                            // Scroll up by 10 lines
-                            for _ in 0..10 {
-                                app.scroll_backend_compat_up();
-                            }
-                        }
-                        KeyCode::PageDown => {
-                            // Scroll down by 10 lines
-                            for _ in 0..10 {
-                                app.scroll_backend_compat_down();
-                            }
-                        }
-                        KeyCode::Enter => {
-                            // Process the selected action
-                            if let Some(dialog) = &app.backend_compatibility_dialog {
-                                let action = dialog.get_action();
-                                let is_upload = dialog.is_upload;
-
-                                // Get throttle info before we consume dialog
-                                let (download, upload) =
-                                    app.throttle_dialog.parse_limits().unwrap_or((None, None));
-                                let pid = app.throttle_dialog.target_pid;
-                                let process_name = app.throttle_dialog.target_name.clone();
-                                let traffic_type = app.throttle_dialog.get_traffic_type();
-
-                                match &action {
-                                    ui::BackendCompatibilityAction::Cancel => {
-                                        // Just close the modal, keep throttle dialog open
-                                        app.show_backend_compatibility_dialog = false;
-                                        app.backend_compatibility_dialog = None;
+                            match app.view_mode {
+                                ui::ViewMode::ProcessView => {
+                                    // Select previous by 10
+                                    for _ in 0..10 {
+                                        app.select_previous();
                                     }
-                                    ui::BackendCompatibilityAction::SwitchTemporary(
-                                        backend_name,
-                                    )
-                                    | ui::BackendCompatibilityAction::SwitchAndMakeDefault(
-                                        backend_name,
-                                    ) => {
-                                        let make_default = matches!(
-                                            &action,
-                                            ui::BackendCompatibilityAction::SwitchAndMakeDefault(_)
-                                        );
-
-                                        // Store original backend
-                                        let (original_upload, original_download) =
-                                            throttle_manager.get_default_backends();
-
-                                        // Switch to compatible backend
-                                        let switch_result = if is_upload {
-                                            throttle_manager
-                                                .set_default_upload_backend(&backend_name)
-                                        } else {
-                                            throttle_manager
-                                                .set_default_download_backend(&backend_name)
-                                        };
-
-                                        if let Err(e) = switch_result {
-                                            app.status_message =
-                                                format!("Failed to switch backend: {}", e);
-                                            app.show_backend_compatibility_dialog = false;
-                                            app.backend_compatibility_dialog = None;
-                                            continue;
-                                        }
-
-                                        // Apply throttle
-                                        if let (Some(pid), Some(name)) = (pid, process_name) {
-                                            let limit = crate::process::ThrottleLimit {
-                                                download_limit: download,
-                                                upload_limit: upload,
-                                                traffic_type,
-                                            };
-
-                                            match throttle_manager.throttle_process(
-                                                pid,
-                                                name.clone(),
-                                                &limit,
-                                            ) {
-                                                Ok(_) => {
-                                                    app.status_message = format!(
-                                                        "Throttle applied to {} using {} backend{}",
-                                                        name,
-                                                        backend_name,
-                                                        if make_default {
-                                                            " (now default)"
-                                                        } else {
-                                                            ""
-                                                        }
-                                                    );
-
-                                                    // Update config if making default
-                                                    if make_default {
-                                                        if is_upload {
-                                                            config.preferred_upload_backend =
-                                                                Some(backend_name.clone());
-                                                        } else {
-                                                            config.preferred_download_backend =
-                                                                Some(backend_name.clone());
-                                                        }
-                                                        let _ = config.save();
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    app.status_message =
-                                                        format!("Failed to apply throttle: {}", e);
-                                                }
-                                            }
-                                        }
-
-                                        // Switch back if not making default
-                                        if !make_default {
-                                            if is_upload {
-                                                if let Some(orig) = original_upload {
-                                                    let _ = throttle_manager
-                                                        .set_default_upload_backend(&orig);
-                                                }
-                                            } else {
-                                                if let Some(orig) = original_download {
-                                                    let _ = throttle_manager
-                                                        .set_default_download_backend(&orig);
-                                                }
-                                            }
-                                        }
-
-                                        // Close both dialogs
-                                        app.show_backend_compatibility_dialog = false;
-                                        app.backend_compatibility_dialog = None;
-                                        app.show_throttle_dialog = false;
-                                        app.throttle_dialog.reset();
+                                }
+                                ui::ViewMode::InterfaceList => {
+                                    // Scroll interface modal up
+                                    for _ in 0..10 {
+                                        app.scroll_interface_modal_up();
                                     }
-                                    ui::BackendCompatibilityAction::ConvertToAll => {
-                                        // Apply throttle with All traffic type
-                                        if let (Some(pid), Some(name)) = (pid, process_name) {
-                                            let limit = crate::process::ThrottleLimit {
-                                                download_limit: download,
-                                                upload_limit: upload,
-                                                traffic_type: crate::process::TrafficType::All,
-                                            };
-
-                                            match throttle_manager.throttle_process(
-                                                pid,
-                                                name.clone(),
-                                                &limit,
-                                            ) {
-                                                Ok(_) => {
-                                                    app.status_message = format!(
-                                                        "Throttle applied to {} as 'All Traffic'",
-                                                        name
-                                                    );
-                                                }
-                                                Err(e) => {
-                                                    app.status_message =
-                                                        format!("Failed to apply throttle: {}", e);
-                                                }
-                                            }
-                                        }
-
-                                        // Close both dialogs
-                                        app.show_backend_compatibility_dialog = false;
-                                        app.backend_compatibility_dialog = None;
-                                        app.show_throttle_dialog = false;
-                                        app.throttle_dialog.reset();
+                                }
+                                ui::ViewMode::InterfaceDetail => {}
+                                ui::ViewMode::ProcessDetail => {
+                                    // Scroll detail view up by 10 lines
+                                    for _ in 0..10 {
+                                        app.scroll_detail_up();
                                     }
                                 }
                             }
                         }
-                        KeyCode::Esc | KeyCode::Char('q') => {
-                            // Cancel - close modal, keep throttle dialog open
-                            app.show_backend_compatibility_dialog = false;
-                            app.backend_compatibility_dialog = None;
+                        KeyCode::PageDown => {
+                            match app.view_mode {
+                                ui::ViewMode::ProcessView => {
+                                    // Select next by 10
+                                    for _ in 0..10 {
+                                        app.select_next();
+                                    }
+                                }
+                                ui::ViewMode::InterfaceList => {
+                                    // Scroll interface modal down
+                                    for _ in 0..10 {
+                                        app.scroll_interface_modal_down();
+                                    }
+                                }
+                                ui::ViewMode::InterfaceDetail => {}
+                                ui::ViewMode::ProcessDetail => {
+                                    // Scroll detail view down by 10 lines
+                                    for _ in 0..10 {
+                                        app.scroll_detail_down();
+                                    }
+                                }
+                            }
                         }
-                        _ => {}
-                    }
-                    continue;
-                }
+                        KeyCode::Char('i') => {
+                            app.toggle_view_mode();
+                            app.status_message = match app.view_mode {
+                                ui::ViewMode::ProcessView => "Switched to process view".to_string(),
+                                ui::ViewMode::InterfaceList => format!(
+                                    "Switched to interface view ({} interfaces)",
+                                    app.interface_list.len()
+                                ),
+                                ui::ViewMode::InterfaceDetail => {
+                                    "Viewing interface details".to_string()
+                                }
+                                ui::ViewMode::ProcessDetail => "Back to process list".to_string(),
+                            };
+                        }
+                        KeyCode::Char('l') => {
+                            app.toggle_traffic_view_mode();
+                            // status_message is set by toggle_traffic_view_mode()
 
-                // Handle throttle dialog input
-                if app.show_throttle_dialog {
-                    match key.code {
-                        KeyCode::Esc | KeyCode::Char('q') => {
-                            app.show_throttle_dialog = false;
-                            app.throttle_dialog.reset();
+                            // Save traffic view mode to config
+                            config.traffic_view_mode = Some(match app.traffic_view_mode {
+                                ui::TrafficViewMode::All => crate::process::TrafficType::All,
+                                ui::TrafficViewMode::Internet => {
+                                    crate::process::TrafficType::Internet
+                                }
+                                ui::TrafficViewMode::Local => crate::process::TrafficType::Local,
+                            });
+                            if let Err(e) = config.save() {
+                                log::warn!("Failed to save traffic view mode to config: {}", e);
+                            }
                         }
+                        KeyCode::Enter => match app.view_mode {
+                            ui::ViewMode::InterfaceList => {
+                                app.enter_interface_detail();
+                                if let Some(iface) = app.get_selected_interface() {
+                                    app.status_message =
+                                        format!("Viewing processes on interface: {}", iface.name);
+                                }
+                            }
+                            ui::ViewMode::ProcessView => {
+                                if app.get_selected_process().is_some() {
+                                    app.enter_process_detail();
+                                    app.status_message = "Viewing process details".to_string();
+                                }
+                            }
+                            _ => {}
+                        },
                         KeyCode::Tab => {
-                            app.throttle_dialog.toggle_field();
+                            // Tab switches tabs in process detail view
+                            if app.view_mode == ui::ViewMode::ProcessDetail {
+                                app.next_detail_tab();
+                                let tab_name = match app.detail_tab {
+                                    ui::ProcessDetailTab::Overview => "Overview",
+                                    ui::ProcessDetailTab::Connections => "Connections",
+                                    ui::ProcessDetailTab::Traffic => "Traffic",
+                                    ui::ProcessDetailTab::System => "System",
+                                };
+                                app.status_message = format!("Switched to {} tab", tab_name);
+                            }
                         }
-                        KeyCode::Char('t') => {
-                            app.throttle_dialog.cycle_traffic_type();
+                        KeyCode::BackTab => {
+                            // Shift+Tab switches tabs backwards in process detail view
+                            if app.view_mode == ui::ViewMode::ProcessDetail {
+                                app.previous_detail_tab();
+                                let tab_name = match app.detail_tab {
+                                    ui::ProcessDetailTab::Overview => "Overview",
+                                    ui::ProcessDetailTab::Connections => "Connections",
+                                    ui::ProcessDetailTab::Traffic => "Traffic",
+                                    ui::ProcessDetailTab::System => "System",
+                                };
+                                app.status_message = format!("Switched to {} tab", tab_name);
+                            }
                         }
-                        KeyCode::Char(c) if c.is_numeric() => {
-                            app.throttle_dialog.handle_char(c);
-                        }
-                        KeyCode::Backspace => {
-                            app.throttle_dialog.handle_backspace();
-                        }
-                        KeyCode::Enter => {
-                            // Apply throttle
-                            if let Some((download, upload)) = app.throttle_dialog.parse_limits() {
-                                if let Some(pid) = app.throttle_dialog.target_pid {
-                                    let process_name =
-                                        app.throttle_dialog.target_name.clone().unwrap_or_default();
-                                    let limit = crate::process::ThrottleLimit {
-                                        download_limit: download,
-                                        upload_limit: upload,
-                                        traffic_type: app.throttle_dialog.get_traffic_type(),
-                                    };
+                        KeyCode::Char(' ') => {
+                            // Space bar toggles filter in interface list view
+                            if app.view_mode == ui::ViewMode::InterfaceList {
+                                if let Some(iface) = app.get_selected_interface() {
+                                    let iface_name = iface.name.clone();
+                                    app.toggle_interface_filter(iface_name);
 
-                                    // Check if backend compatibility dialog is needed
-                                    let needs_upload_compat = limit.upload_limit.is_some()
-                                        && !throttle_manager
-                                            .current_upload_backend_supports(limit.traffic_type);
-                                    let needs_download_compat = limit.download_limit.is_some()
-                                        && !throttle_manager
-                                            .current_download_backend_supports(limit.traffic_type);
-
-                                    if needs_upload_compat {
-                                        // Show upload backend compatibility dialog
-                                        let compatible = throttle_manager
-                                            .find_compatible_upload_backends(limit.traffic_type);
-                                        let (current_backend, _) =
-                                            throttle_manager.get_default_backends();
-                                        app.backend_compatibility_dialog =
-                                            Some(ui::BackendCompatibilityDialog::new(
-                                                current_backend.unwrap_or("none".to_string()),
-                                                limit.traffic_type,
-                                                compatible,
-                                                true, // is_upload
-                                            ));
-                                        app.reset_backend_compat_scroll();
-                                        app.show_backend_compatibility_dialog = true;
-                                        // DON'T close throttle dialog - keep it in background
-                                        continue; // Skip applying throttle for now
-                                    } else if needs_download_compat {
-                                        // Show download backend compatibility dialog
-                                        let compatible = throttle_manager
-                                            .find_compatible_download_backends(limit.traffic_type);
-                                        let (_, current_backend) =
-                                            throttle_manager.get_default_backends();
-                                        app.backend_compatibility_dialog =
-                                            Some(ui::BackendCompatibilityDialog::new(
-                                                current_backend.unwrap_or("none".to_string()),
-                                                limit.traffic_type,
-                                                compatible,
-                                                false, // is_upload=false
-                                            ));
-                                        app.reset_backend_compat_scroll();
-                                        app.show_backend_compatibility_dialog = true;
-                                        // DON'T close throttle dialog - keep it in background
-                                        continue; // Skip applying throttle for now
-                                    }
-
-                                    // No compatibility issues or no compatible backends available
-                                    // Proceed with throttle attempt
-                                    match throttle_manager.throttle_process(
-                                        pid,
-                                        process_name.clone(),
-                                        &limit,
-                                    ) {
-                                        Ok(_) => {
-                                            app.status_message = format!(
-                                                "Throttle applied to {} (PID {})",
-                                                process_name, pid
-                                            );
-                                        }
-                                        Err(e) => {
-                                            log::warn!("Failed to apply throttle: {e}");
-                                            app.status_message =
-                                                format!("Failed to apply throttle: {}", e);
-                                        }
+                                    // Save to config immediately
+                                    config.filtered_interfaces =
+                                        app.active_interface_filters.clone();
+                                    if let Err(e) = config.save() {
+                                        log::error!("Failed to save filter config: {}", e);
                                     }
                                 }
                             }
-                            app.show_throttle_dialog = false;
-                            app.throttle_dialog.reset();
                         }
-                        _ => {}
-                    }
-                    continue;
-                }
-
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => {
-                        // Special handling for interface views and process detail
-                        match app.view_mode {
-                            ui::ViewMode::InterfaceDetail => {
-                                app.exit_interface_detail();
-                                app.status_message = "Back to interface list".to_string();
-                            }
-                            ui::ViewMode::InterfaceList => {
-                                app.view_mode = ui::ViewMode::ProcessView;
-                                app.status_message =
-                                    "Closed interface modal - filter still active".to_string();
-                            }
-                            ui::ViewMode::ProcessDetail => {
-                                app.exit_process_detail();
-                                app.status_message = "Back to process list".to_string();
-                            }
-                            ui::ViewMode::ProcessView => {
-                                return Ok(());
-                            }
-                        }
-                    }
-                    KeyCode::Char('h') | KeyCode::Char('?') => {
-                        app.reset_help_scroll();
-                        app.show_help = true;
-                    }
-                    KeyCode::Char('b') => {
-                        if !app.show_backend_info {
-                            // Build backend items when opening modal
-                            let mut backend_info = throttle_manager.get_backend_info(
-                                config.preferred_upload_backend.clone(),
-                                config.preferred_download_backend.clone(),
-                            );
-                            // Populate socket mapper info
-                            {
-                                use crate::backends::process::socket_mapper::detect_socket_mappers;
-                                let socket_mappers = detect_socket_mappers();
-                                backend_info.available_socket_mappers = socket_mappers
-                                    .iter()
-                                    .map(|sm| (sm.name.to_string(), sm.priority, sm.available))
-                                    .collect();
-                                let (active_sm, capabilities) = monitor.get_socket_mapper_info();
-                                backend_info.active_socket_mapper = Some(active_sm.to_string());
-                                backend_info.socket_mapper_capabilities =
-                                    Some(capabilities.clone());
-                                backend_info.preferred_socket_mapper =
-                                    config.preferred_socket_mapper.clone();
-                            }
-                            app.build_backend_items(&backend_info);
-                            app.reset_backend_info_scroll();
-                            app.show_backend_info = true;
-                        } else {
-                            app.show_backend_info = false;
-                            app.reset_backend_info_scroll();
-                        }
-                    }
-                    KeyCode::Char('f') => {
-                        app.toggle_sort_freeze();
-                        app.status_message = if app.sort_frozen {
-                            "Sort order frozen ❄️ - Stats continue updating, order preserved"
-                                .to_string()
-                        } else {
-                            "Sort order unfrozen - Dynamic sorting re-enabled".to_string()
-                        };
-                    }
-                    KeyCode::Char('g') => {
-                        app.show_graph = !app.show_graph;
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        match app.view_mode {
-                            ui::ViewMode::ProcessView => app.select_next(),
-                            ui::ViewMode::InterfaceList => app.select_next_interface(),
-                            ui::ViewMode::InterfaceDetail => {} // No selection in detail view
-                            ui::ViewMode::ProcessDetail => app.scroll_detail_down(),
-                        }
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        match app.view_mode {
-                            ui::ViewMode::ProcessView => app.select_previous(),
-                            ui::ViewMode::InterfaceList => app.select_previous_interface(),
-                            ui::ViewMode::InterfaceDetail => {} // No selection in detail view
-                            ui::ViewMode::ProcessDetail => app.scroll_detail_up(),
-                        }
-                    }
-                    KeyCode::PageUp => {
-                        match app.view_mode {
-                            ui::ViewMode::ProcessView => {
-                                // Select previous by 10
-                                for _ in 0..10 {
-                                    app.select_previous();
-                                }
-                            }
-                            ui::ViewMode::InterfaceList => {
-                                // Scroll interface modal up
-                                for _ in 0..10 {
-                                    app.scroll_interface_modal_up();
-                                }
-                            }
-                            ui::ViewMode::InterfaceDetail => {}
-                            ui::ViewMode::ProcessDetail => {
-                                // Scroll detail view up by 10 lines
-                                for _ in 0..10 {
-                                    app.scroll_detail_up();
-                                }
-                            }
-                        }
-                    }
-                    KeyCode::PageDown => {
-                        match app.view_mode {
-                            ui::ViewMode::ProcessView => {
-                                // Select next by 10
-                                for _ in 0..10 {
-                                    app.select_next();
-                                }
-                            }
-                            ui::ViewMode::InterfaceList => {
-                                // Scroll interface modal down
-                                for _ in 0..10 {
-                                    app.scroll_interface_modal_down();
-                                }
-                            }
-                            ui::ViewMode::InterfaceDetail => {}
-                            ui::ViewMode::ProcessDetail => {
-                                // Scroll detail view down by 10 lines
-                                for _ in 0..10 {
-                                    app.scroll_detail_down();
-                                }
-                            }
-                        }
-                    }
-                    KeyCode::Char('i') => {
-                        app.toggle_view_mode();
-                        app.status_message = match app.view_mode {
-                            ui::ViewMode::ProcessView => "Switched to process view".to_string(),
-                            ui::ViewMode::InterfaceList => format!(
-                                "Switched to interface view ({} interfaces)",
-                                app.interface_list.len()
-                            ),
-                            ui::ViewMode::InterfaceDetail => {
-                                "Viewing interface details".to_string()
-                            }
-                            ui::ViewMode::ProcessDetail => "Back to process list".to_string(),
-                        };
-                    }
-                    KeyCode::Char('l') => {
-                        app.toggle_traffic_view_mode();
-                        // status_message is set by toggle_traffic_view_mode()
-
-                        // Save traffic view mode to config
-                        config.traffic_view_mode = Some(match app.traffic_view_mode {
-                            ui::TrafficViewMode::All => crate::process::TrafficType::All,
-                            ui::TrafficViewMode::Internet => crate::process::TrafficType::Internet,
-                            ui::TrafficViewMode::Local => crate::process::TrafficType::Local,
-                        });
-                        if let Err(e) = config.save() {
-                            log::warn!("Failed to save traffic view mode to config: {}", e);
-                        }
-                    }
-                    KeyCode::Enter => match app.view_mode {
-                        ui::ViewMode::InterfaceList => {
-                            app.enter_interface_detail();
-                            if let Some(iface) = app.get_selected_interface() {
-                                app.status_message =
-                                    format!("Viewing processes on interface: {}", iface.name);
-                            }
-                        }
-                        ui::ViewMode::ProcessView => {
-                            if app.get_selected_process().is_some() {
-                                app.enter_process_detail();
-                                app.status_message = "Viewing process details".to_string();
-                            }
-                        }
-                        _ => {}
-                    },
-                    KeyCode::Tab => {
-                        // Tab switches tabs in process detail view
-                        if app.view_mode == ui::ViewMode::ProcessDetail {
-                            app.next_detail_tab();
-                            let tab_name = match app.detail_tab {
-                                ui::ProcessDetailTab::Overview => "Overview",
-                                ui::ProcessDetailTab::Connections => "Connections",
-                                ui::ProcessDetailTab::Traffic => "Traffic",
-                                ui::ProcessDetailTab::System => "System",
-                            };
-                            app.status_message = format!("Switched to {} tab", tab_name);
-                        }
-                    }
-                    KeyCode::BackTab => {
-                        // Shift+Tab switches tabs backwards in process detail view
-                        if app.view_mode == ui::ViewMode::ProcessDetail {
-                            app.previous_detail_tab();
-                            let tab_name = match app.detail_tab {
-                                ui::ProcessDetailTab::Overview => "Overview",
-                                ui::ProcessDetailTab::Connections => "Connections",
-                                ui::ProcessDetailTab::Traffic => "Traffic",
-                                ui::ProcessDetailTab::System => "System",
-                            };
-                            app.status_message = format!("Switched to {} tab", tab_name);
-                        }
-                    }
-                    KeyCode::Char(' ') => {
-                        // Space bar toggles filter in interface list view
-                        if app.view_mode == ui::ViewMode::InterfaceList {
-                            if let Some(iface) = app.get_selected_interface() {
-                                let iface_name = iface.name.clone();
-                                app.toggle_interface_filter(iface_name);
+                        KeyCode::Char('a') | KeyCode::Char('A') => {
+                            // 'A' - Toggle all/none in interface list view
+                            if app.view_mode == ui::ViewMode::InterfaceList {
+                                app.toggle_all_interface_filters();
 
                                 // Save to config immediately
                                 config.filtered_interfaces = app.active_interface_filters.clone();
@@ -1374,51 +1419,114 @@ async fn run_app<B: ratatui::backend::Backend>(
                                 }
                             }
                         }
-                    }
-                    KeyCode::Char('a') | KeyCode::Char('A') => {
-                        // 'A' - Toggle all/none in interface list view
-                        if app.view_mode == ui::ViewMode::InterfaceList {
-                            app.toggle_all_interface_filters();
+                        KeyCode::Char('t') => {
+                            if let Some(process) = app.get_selected_process() {
+                                // Clone the values we need
+                                let pid = process.pid;
+                                let name = process.name.clone();
 
-                            // Save to config immediately
-                            config.filtered_interfaces = app.active_interface_filters.clone();
-                            if let Err(e) = config.save() {
-                                log::error!("Failed to save filter config: {}", e);
+                                // Open throttle dialog
+                                app.throttle_dialog.target_pid = Some(pid);
+                                app.throttle_dialog.target_name = Some(name);
+                                app.show_throttle_dialog = true;
+                            } else {
+                                app.status_message = "No process selected".to_string();
                             }
                         }
-                    }
-                    KeyCode::Char('t') => {
-                        if let Some(process) = app.get_selected_process() {
-                            // Clone the values we need
-                            let pid = process.pid;
-                            let name = process.name.clone();
-
-                            // Open throttle dialog
-                            app.throttle_dialog.target_pid = Some(pid);
-                            app.throttle_dialog.target_name = Some(name);
-                            app.show_throttle_dialog = true;
-                        } else {
-                            app.status_message = "No process selected".to_string();
-                        }
-                    }
-                    KeyCode::Char('r') => {
-                        if let Some(process) = app.get_selected_process() {
-                            // Remove throttle
-                            match throttle_manager.remove_throttle(process.pid) {
-                                Ok(_) => {
-                                    app.status_message = format!(
-                                        "Throttle removed from {} (PID {})",
-                                        process.name, process.pid
-                                    );
-                                }
-                                Err(e) => {
-                                    app.status_message =
-                                        format!("Failed to remove throttle: {}", e);
+                        KeyCode::Char('r') => {
+                            if let Some(process) = app.get_selected_process() {
+                                // Remove throttle
+                                match throttle_manager.remove_throttle(process.pid) {
+                                    Ok(_) => {
+                                        app.status_message = format!(
+                                            "Throttle removed from {} (PID {})",
+                                            process.name, process.pid
+                                        );
+                                    }
+                                    Err(e) => {
+                                        app.status_message =
+                                            format!("Failed to remove throttle: {}", e);
+                                    }
                                 }
                             }
                         }
+                        _ => {}
                     }
-                    _ => {}
+                }
+                Event::Mouse(mouse) => {
+                    // Handle mouse scroll events
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            // Handle scroll up based on current state (priority: modals first, then view modes)
+                            if app.show_help {
+                                app.scroll_help_up();
+                            } else if app.show_backend_info {
+                                app.scroll_backend_info_up();
+                            } else if app.show_backend_compatibility_dialog {
+                                app.scroll_backend_compat_up();
+                            } else {
+                                // Handle based on view mode
+                                match app.view_mode {
+                                    ui::ViewMode::ProcessView => {
+                                        // Don't scroll lists with mouse - would change selection
+                                        // Use arrow keys or PageUp/PageDown instead
+                                    }
+                                    ui::ViewMode::InterfaceList => {
+                                        // Interface modal uses Paragraph widget, so scroll it
+                                        // (auto-scroll keeps selection visible)
+                                        app.scroll_interface_modal_up();
+                                    }
+                                    ui::ViewMode::ProcessDetail => {
+                                        // Scroll detail view up (3 lines)
+                                        for _ in 0..3 {
+                                            app.scroll_detail_up();
+                                        }
+                                    }
+                                    ui::ViewMode::InterfaceDetail => {
+                                        // No scrolling needed for interface detail
+                                    }
+                                }
+                            }
+                        }
+                        MouseEventKind::ScrollDown => {
+                            // Handle scroll down based on current state (priority: modals first, then view modes)
+                            if app.show_help {
+                                app.scroll_help_down();
+                            } else if app.show_backend_info {
+                                app.scroll_backend_info_down();
+                            } else if app.show_backend_compatibility_dialog {
+                                app.scroll_backend_compat_down();
+                            } else {
+                                // Handle based on view mode
+                                match app.view_mode {
+                                    ui::ViewMode::ProcessView => {
+                                        // Don't scroll lists with mouse - would change selection
+                                        // Use arrow keys or PageUp/PageDown instead
+                                    }
+                                    ui::ViewMode::InterfaceList => {
+                                        // Interface modal uses Paragraph widget, so scroll it
+                                        // (auto-scroll keeps selection visible)
+                                        app.scroll_interface_modal_down();
+                                    }
+                                    ui::ViewMode::ProcessDetail => {
+                                        // Scroll detail view down (3 lines)
+                                        for _ in 0..3 {
+                                            app.scroll_detail_down();
+                                        }
+                                    }
+                                    ui::ViewMode::InterfaceDetail => {
+                                        // No scrolling needed for interface detail
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            // Ignore other mouse events (clicks, moves, etc.)
+                        }
+                    }
+                }
+                _ => {
+                    // Ignore other event types
                 }
             }
         }
