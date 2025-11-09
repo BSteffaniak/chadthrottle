@@ -99,6 +99,7 @@ impl SocketMapperBackend for LibprocSocketMapper {
                     remote_addr: entry.remote_address.ip(),
                     remote_port: entry.remote_address.port(),
                     inode: entry.inode,
+                    state: format!("{:?}", entry.state),
                 });
             }
         }
@@ -112,6 +113,7 @@ impl SocketMapperBackend for LibprocSocketMapper {
                     remote_addr: entry.remote_address.ip(),
                     remote_port: entry.remote_address.port(),
                     inode: entry.inode,
+                    state: format!("{:?}", entry.state),
                 });
             }
         }
@@ -125,6 +127,7 @@ impl SocketMapperBackend for LibprocSocketMapper {
                     remote_addr: entry.remote_address.ip(),
                     remote_port: entry.remote_address.port(),
                     inode: entry.inode,
+                    state: format!("{:?}", entry.state),
                 });
             }
         }
@@ -138,6 +141,7 @@ impl SocketMapperBackend for LibprocSocketMapper {
                     remote_addr: entry.remote_address.ip(),
                     remote_port: entry.remote_address.port(),
                     inode: entry.inode,
+                    state: format!("{:?}", entry.state),
                 });
             }
         }

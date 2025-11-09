@@ -14,6 +14,7 @@ use ratatui::{
     },
 };
 use std::collections::HashMap;
+use std::net::IpAddr;
 
 pub struct AppState {
     pub process_list: Vec<ProcessInfo>,
@@ -2964,40 +2965,135 @@ fn draw_detail_overview(
     f.render_widget(paragraph, area);
 }
 
-fn draw_detail_connections(
-    f: &mut Frame,
-    area: Rect,
-    process: &ProcessInfo,
-    _scroll_offset: usize,
-) {
-    // For now, show a placeholder. We'll implement connection tracking later
-    let text = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            "Connection tracking coming soon!",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from("This will show:"),
-        Line::from("  • Active TCP/UDP connections"),
-        Line::from("  • Remote addresses and ports"),
-        Line::from("  • Connection states"),
-        Line::from("  • Per-connection traffic (if available)"),
-        Line::from(""),
-        Line::from(format!("Process: {} (PID {})", process.name, process.pid)),
-        Line::from(""),
-        Line::from(""),
-        Line::from(Span::styled(
-            "[Tab] Switch tab  [Esc] Back",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
+fn draw_detail_connections(f: &mut Frame, area: Rect, process: &ProcessInfo, scroll_offset: usize) {
+    let mut text = vec![];
+
+    text.push(Line::from(""));
+    text.push(Line::from(vec![Span::styled(
+        format!("Active Network Connections ({})", process.connections.len()),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )]));
+    text.push(Line::from(""));
+
+    if process.connections.is_empty() {
+        text.push(Line::from("  No active connections"));
+    } else {
+        // Header
+        text.push(Line::from(vec![
+            Span::styled(
+                "  Protocol  ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Local Address            ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Remote Address           ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("State     ", Style::default().add_modifier(Modifier::BOLD)),
+        ]));
+        text.push(Line::from(
+            "  ──────────────────────────────────────────────────────────────────────",
+        ));
+
+        // Sort connections: ESTABLISHED first, then LISTEN, then others
+        let mut sorted_conns = process.connections.clone();
+        sorted_conns.sort_by(|a, b| {
+            let order_a = match a.state.as_str() {
+                "Established" => 0,
+                "Listen" => 1,
+                _ => 2,
+            };
+            let order_b = match b.state.as_str() {
+                "Established" => 0,
+                "Listen" => 1,
+                _ => 2,
+            };
+            order_a.cmp(&order_b)
+        });
+
+        // Calculate visible window based on scroll offset
+        let visible_height = (area.height as usize).saturating_sub(10); // Account for header/footer
+        let start_idx = scroll_offset.min(sorted_conns.len().saturating_sub(1));
+        let end_idx = (start_idx + visible_height).min(sorted_conns.len());
+
+        // Render visible connections
+        for conn in &sorted_conns[start_idx..end_idx] {
+            let local = format!("{}:{}", format_ip_addr(&conn.local_addr), conn.local_port);
+            let remote = if conn.remote_port == 0 {
+                "*:*".to_string()
+            } else {
+                format!("{}:{}", format_ip_addr(&conn.remote_addr), conn.remote_port)
+            };
+
+            let state_display = match conn.state.as_str() {
+                "Established" => "ESTAB",
+                "Listen" => "LISTEN",
+                "TimeWait" => "TIMEWT",
+                "CloseWait" => "CLOSWT",
+                "FinWait1" => "FIN1",
+                "FinWait2" => "FIN2",
+                "Closing" => "CLOSNG",
+                "SynSent" => "SYNSNT",
+                "SynRecv" => "SYNRCV",
+                s => s,
+            };
+
+            let proto_style = match conn.protocol.as_str() {
+                "TCP" | "TCP6" => Style::default().fg(Color::Green),
+                "UDP" | "UDP6" => Style::default().fg(Color::Yellow),
+                _ => Style::default(),
+            };
+
+            let state_style = match conn.state.as_str() {
+                "Established" => Style::default().fg(Color::Green),
+                "Listen" => Style::default().fg(Color::Cyan),
+                _ => Style::default().fg(Color::Gray),
+            };
+
+            text.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(format!("{:8}  ", conn.protocol), proto_style),
+                Span::raw(format!("{:24} ", local)),
+                Span::raw(format!("{:24} ", remote)),
+                Span::styled(format!("{:8}", state_display), state_style),
+            ]));
+        }
+
+        // Show scroll indicator if needed
+        if sorted_conns.len() > visible_height {
+            text.push(Line::from(""));
+            text.push(Line::from(format!(
+                "  Showing {}-{} of {} connections (scroll with ↑↓)",
+                start_idx + 1,
+                end_idx,
+                sorted_conns.len()
+            )));
+        }
+    }
+
+    text.push(Line::from(""));
+    text.push(Line::from(""));
+    text.push(Line::from(Span::styled(
+        "[↑↓] Scroll  [Tab] Switch tab  [Esc] Back",
+        Style::default().fg(Color::DarkGray),
+    )));
 
     let paragraph =
         Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("Connections"));
     f.render_widget(paragraph, area);
+}
+
+fn format_ip_addr(addr: &IpAddr) -> String {
+    match addr {
+        IpAddr::V4(ipv4) if ipv4.is_unspecified() => "0.0.0.0".to_string(),
+        IpAddr::V6(ipv6) if ipv6.is_unspecified() => "::".to_string(),
+        _ => addr.to_string(),
+    }
 }
 
 fn draw_detail_traffic(f: &mut Frame, area: Rect, process: &ProcessInfo) {

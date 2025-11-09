@@ -42,6 +42,7 @@ pub struct ProcessInfo {
     pub throttle_limit: Option<ThrottleLimit>,
     pub is_terminated: bool, // whether the process has terminated
     pub interface_stats: HashMap<String, InterfaceStats>, // per-interface statistics
+    pub connections: Vec<ConnectionDetail>, // active network connections
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +99,7 @@ impl ProcessInfo {
             throttle_limit: None,
             is_terminated: false,
             interface_stats: HashMap::new(),
+            connections: Vec::new(),
         }
     }
 
@@ -130,6 +132,39 @@ impl ProcessInfo {
 
     pub fn is_throttled(&self) -> bool {
         self.throttle_limit.is_some()
+    }
+
+    /// Populate connections for this process from the connection map
+    pub fn populate_connections(
+        &mut self,
+        connection_map: &crate::backends::process::ConnectionMap,
+        socket_to_pid: &HashMap<u64, (i32, String)>,
+    ) {
+        self.connections.clear();
+
+        // Helper closure to add connections from a list
+        let mut add_connections = |entries: &[crate::backends::process::ConnectionEntry],
+                                   protocol: &str| {
+            for entry in entries {
+                if let Some((pid, _name)) = socket_to_pid.get(&entry.inode) {
+                    if *pid == self.pid {
+                        self.connections.push(ConnectionDetail {
+                            protocol: protocol.to_string(),
+                            local_addr: entry.local_addr,
+                            local_port: entry.local_port,
+                            remote_addr: entry.remote_addr,
+                            remote_port: entry.remote_port,
+                            state: entry.state.clone(),
+                        });
+                    }
+                }
+            }
+        };
+
+        add_connections(&connection_map.tcp_connections, "TCP");
+        add_connections(&connection_map.tcp6_connections, "TCP6");
+        add_connections(&connection_map.udp_connections, "UDP");
+        add_connections(&connection_map.udp6_connections, "UDP6");
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::backends::process::ProcessUtils;
+use crate::backends::process::{ConnectionMap, ProcessUtils};
 use crate::process::{InterfaceInfo, InterfaceMap, ProcessInfo, ProcessMap};
 use anyhow::{Context, Result};
 
@@ -59,6 +59,8 @@ pub struct NetworkMonitor {
     // Handles to packet capture threads (one per interface) - no underscore, we'll join them!
     capture_handles: Vec<thread::JoinHandle<()>>,
     last_update: Instant,
+    // Cached connection map updated asynchronously
+    cached_connection_map: Arc<Mutex<ConnectionMap>>,
 }
 
 struct BandwidthTracker {
@@ -183,6 +185,9 @@ impl NetworkMonitor {
         // Create shutdown flag for graceful thread termination
         let shutdown_flag = Arc::new(AtomicBool::new(false));
 
+        // Initialize cached connection map
+        let cached_connection_map = Arc::new(Mutex::new(ConnectionMap::default()));
+
         // Create monitor instance first (without starting capture thread yet)
         let mut monitor = Self {
             bandwidth_tracker,
@@ -192,12 +197,31 @@ impl NetworkMonitor {
             shutdown_flag: Arc::clone(&shutdown_flag),
             capture_handles: Vec::new(),
             last_update: Instant::now(),
+            cached_connection_map: Arc::clone(&cached_connection_map),
         };
 
-        // CRITICAL: Populate socket and connection maps BEFORE starting packet capture
-        // This ensures that packets arriving immediately after startup are properly tracked
-        // Without this, all packets in the first second are lost because connection_map is empty
-        monitor.update_socket_map()?;
+        // Spawn background async task to update connection map
+        // This prevents blocking the UI thread during connection map updates
+        let cached_map_clone = Arc::clone(&cached_connection_map);
+        let shutdown_clone = Arc::clone(&shutdown_flag);
+        let process_utils = crate::backends::process::create_process_utils_with_socket_mapper(
+            socket_mapper_preference,
+        );
+
+        tokio::spawn(async move {
+            while !shutdown_clone.load(Ordering::Relaxed) {
+                // Fetch connection map (this is the blocking I/O operation)
+                if let Ok(conn_map) = process_utils.get_connection_map() {
+                    // Update the cached map
+                    if let Ok(mut cached) = cached_map_clone.lock() {
+                        *cached = conn_map;
+                    }
+                }
+
+                // Sleep for 1 second before next update
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
 
         // Start packet capture threads for all interfaces
         let interfaces = Self::find_all_interfaces();
@@ -588,6 +612,28 @@ impl NetworkMonitor {
         }
 
         self.last_update = now;
+
+        // CRITICAL: Drop the tracker lock before trying to acquire it again below
+        // This prevents a self-deadlock when we try to lock bandwidth_tracker at line 623
+        drop(tracker);
+
+        // Populate connections for each process using cached connection map
+        // This is non-blocking because we're using the cache updated by the async task
+        let conn_map = if let Ok(cached) = self.cached_connection_map.lock() {
+            cached.clone()
+        } else {
+            ConnectionMap::default()
+        };
+        let socket_map = if let Ok(tracker) = self.bandwidth_tracker.lock() {
+            tracker.socket_map.clone()
+        } else {
+            HashMap::new()
+        };
+
+        for process in process_map.values_mut() {
+            process.populate_connections(&conn_map, &socket_map);
+        }
+
         Ok((process_map, interface_map))
     }
 
@@ -599,8 +645,13 @@ impl NetworkMonitor {
         // Phase 1: Build new maps WITHOUT holding the lock
         // This allows packet capture to continue using old maps
 
-        // Get connection map from platform-specific process utils
-        let conn_map = self.process_utils.get_connection_map()?;
+        // Get connection map from cache (non-blocking!)
+        // The cache is updated asynchronously by the background tokio task
+        let conn_map = if let Ok(cached) = self.cached_connection_map.lock() {
+            cached.clone()
+        } else {
+            ConnectionMap::default()
+        };
 
         let mut new_socket_map = conn_map.socket_to_pid;
         let mut new_connection_map = HashMap::new();

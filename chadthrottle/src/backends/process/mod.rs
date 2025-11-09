@@ -44,6 +44,18 @@ pub struct ConnectionMap {
     pub udp6_connections: Vec<ConnectionEntry>,
 }
 
+impl Default for ConnectionMap {
+    fn default() -> Self {
+        Self {
+            socket_to_pid: HashMap::new(),
+            tcp_connections: Vec::new(),
+            tcp6_connections: Vec::new(),
+            udp_connections: Vec::new(),
+            udp6_connections: Vec::new(),
+        }
+    }
+}
+
 /// Network connection entry
 #[derive(Debug, Clone)]
 pub struct ConnectionEntry {
@@ -52,6 +64,7 @@ pub struct ConnectionEntry {
     pub remote_addr: IpAddr,
     pub remote_port: u16,
     pub inode: u64,
+    pub state: String, // "Established", "Listen", etc.
 }
 
 // Socket mapper backend system (cross-platform)
