@@ -912,8 +912,10 @@ pub fn draw_ui_with_backend_info(
         ])
         .split(f.area());
 
-    // Header
-    draw_header(f, chunks[0]);
+    // Header (hide in ProcessDetail view to save space)
+    if app.view_mode != ViewMode::ProcessDetail {
+        draw_header(f, chunks[0]);
+    }
 
     // Main content area - render based on view mode
     match app.view_mode {
@@ -930,7 +932,14 @@ pub fn draw_ui_with_backend_info(
             draw_interface_detail(f, chunks[1], app);
         }
         ViewMode::ProcessDetail => {
-            draw_process_detail(f, chunks[1], app);
+            // Use full area including header space for detail view
+            let detail_area = Rect {
+                x: chunks[0].x,
+                y: chunks[0].y,
+                width: chunks[0].width,
+                height: chunks[0].height + chunks[1].height,
+            };
+            draw_process_detail(f, detail_area, app);
         }
     }
 
@@ -2559,45 +2568,48 @@ fn draw_process_detail(f: &mut Frame, area: Rect, app: &AppState) {
         }
     };
 
-    // Split into title, tabs, and content areas
+    // Split into combined header and content areas (saves 6 lines!)
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Title
-            Constraint::Length(3), // Tab bar
+            Constraint::Length(3), // Combined title + tabs
             Constraint::Min(10),   // Content
         ])
         .split(area);
 
-    // Draw title
-    let title = format!("Process Details: {} (PID {})", process.name, process.pid);
-    let title_widget = Paragraph::new(title)
-        .style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )
-        .block(Block::default().borders(Borders::ALL));
-    f.render_widget(title_widget, chunks[0]);
-
-    // Draw tabs
-    draw_detail_tabs(f, chunks[1], app.detail_tab);
+    // Draw combined title with tabs
+    draw_detail_header_with_tabs(f, chunks[0], process, app.detail_tab);
 
     // Draw content based on active tab
     match app.detail_tab {
-        ProcessDetailTab::Overview => draw_detail_overview(f, chunks[2], process, &app.history),
+        ProcessDetailTab::Overview => draw_detail_overview(f, chunks[1], process, &app.history),
         ProcessDetailTab::Connections => {
-            draw_detail_connections(f, chunks[2], process, app.detail_scroll_offset)
+            draw_detail_connections(f, chunks[1], process, app.detail_scroll_offset)
         }
-        ProcessDetailTab::Traffic => draw_detail_traffic(f, chunks[2], process),
-        ProcessDetailTab::System => draw_detail_system(f, chunks[2], process),
+        ProcessDetailTab::Traffic => draw_detail_traffic(f, chunks[1], process),
+        ProcessDetailTab::System => draw_detail_system(f, chunks[1], process),
     }
 }
 
-fn draw_detail_tabs(f: &mut Frame, area: Rect, current_tab: ProcessDetailTab) {
+fn draw_detail_header_with_tabs(
+    f: &mut Frame,
+    area: Rect,
+    process: &ProcessInfo,
+    current_tab: ProcessDetailTab,
+) {
     let tabs = vec!["Overview", "Connections", "Traffic", "System"];
     let mut spans = vec![];
 
+    // Add process name and PID first
+    spans.push(Span::styled(
+        process.name.clone(),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::raw(format!(" (PID {})  ", process.pid)));
+
+    // Add tabs
     for (i, tab_name) in tabs.iter().enumerate() {
         let tab_enum = match i {
             0 => ProcessDetailTab::Overview,
@@ -2627,9 +2639,12 @@ fn draw_detail_tabs(f: &mut Frame, area: Rect, current_tab: ProcessDetailTab) {
         spans.push(Span::raw("]"));
     }
 
-    let tabs_widget =
-        Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::ALL));
-    f.render_widget(tabs_widget, area);
+    let header_widget = Paragraph::new(Line::from(spans)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Process Details"),
+    );
+    f.render_widget(header_widget, area);
 }
 
 fn draw_detail_overview(
