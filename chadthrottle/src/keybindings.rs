@@ -51,7 +51,12 @@ pub fn get_all_keybindings() -> Vec<KeyBinding> {
         },
         KeyBinding {
             key: "Enter",
-            description: "View interface details (in interface list)",
+            description: "View details (process or interface)",
+            category: KeyCategory::Navigation,
+        },
+        KeyBinding {
+            key: "Tab",
+            description: "Switch tabs (in detail view)",
             category: KeyCategory::Navigation,
         },
         KeyBinding {

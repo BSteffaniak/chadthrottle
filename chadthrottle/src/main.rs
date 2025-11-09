@@ -1112,7 +1112,7 @@ async fn run_app<B: ratatui::backend::Backend>(
 
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => {
-                        // Special handling for interface views
+                        // Special handling for interface views and process detail
                         match app.view_mode {
                             ui::ViewMode::InterfaceDetail => {
                                 app.exit_interface_detail();
@@ -1122,6 +1122,10 @@ async fn run_app<B: ratatui::backend::Backend>(
                                 app.view_mode = ui::ViewMode::ProcessView;
                                 app.status_message =
                                     "Closed interface modal - filter still active".to_string();
+                            }
+                            ui::ViewMode::ProcessDetail => {
+                                app.exit_process_detail();
+                                app.status_message = "Back to process list".to_string();
                             }
                             ui::ViewMode::ProcessView => {
                                 return Ok(());
@@ -1176,6 +1180,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                             ui::ViewMode::ProcessView => app.select_next(),
                             ui::ViewMode::InterfaceList => app.select_next_interface(),
                             ui::ViewMode::InterfaceDetail => {} // No selection in detail view
+                            ui::ViewMode::ProcessDetail => app.scroll_detail_down(),
                         }
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
@@ -1183,6 +1188,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                             ui::ViewMode::ProcessView => app.select_previous(),
                             ui::ViewMode::InterfaceList => app.select_previous_interface(),
                             ui::ViewMode::InterfaceDetail => {} // No selection in detail view
+                            ui::ViewMode::ProcessDetail => app.scroll_detail_up(),
                         }
                     }
                     KeyCode::Char('i') => {
@@ -1196,6 +1202,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                             ui::ViewMode::InterfaceDetail => {
                                 "Viewing interface details".to_string()
                             }
+                            ui::ViewMode::ProcessDetail => "Back to process list".to_string(),
                         };
                     }
                     KeyCode::Char('l') => {
@@ -1212,13 +1219,46 @@ async fn run_app<B: ratatui::backend::Backend>(
                             log::warn!("Failed to save traffic view mode to config: {}", e);
                         }
                     }
-                    KeyCode::Enter => {
-                        if app.view_mode == ui::ViewMode::InterfaceList {
+                    KeyCode::Enter => match app.view_mode {
+                        ui::ViewMode::InterfaceList => {
                             app.enter_interface_detail();
                             if let Some(iface) = app.get_selected_interface() {
                                 app.status_message =
                                     format!("Viewing processes on interface: {}", iface.name);
                             }
+                        }
+                        ui::ViewMode::ProcessView => {
+                            if app.get_selected_process().is_some() {
+                                app.enter_process_detail();
+                                app.status_message = "Viewing process details".to_string();
+                            }
+                        }
+                        _ => {}
+                    },
+                    KeyCode::Tab => {
+                        // Tab switches tabs in process detail view
+                        if app.view_mode == ui::ViewMode::ProcessDetail {
+                            app.next_detail_tab();
+                            let tab_name = match app.detail_tab {
+                                ui::ProcessDetailTab::Overview => "Overview",
+                                ui::ProcessDetailTab::Connections => "Connections",
+                                ui::ProcessDetailTab::Traffic => "Traffic",
+                                ui::ProcessDetailTab::System => "System",
+                            };
+                            app.status_message = format!("Switched to {} tab", tab_name);
+                        }
+                    }
+                    KeyCode::BackTab => {
+                        // Shift+Tab switches tabs backwards in process detail view
+                        if app.view_mode == ui::ViewMode::ProcessDetail {
+                            app.previous_detail_tab();
+                            let tab_name = match app.detail_tab {
+                                ui::ProcessDetailTab::Overview => "Overview",
+                                ui::ProcessDetailTab::Connections => "Connections",
+                                ui::ProcessDetailTab::Traffic => "Traffic",
+                                ui::ProcessDetailTab::System => "System",
+                            };
+                            app.status_message = format!("Switched to {} tab", tab_name);
                         }
                     }
                     KeyCode::Char(' ') => {

@@ -45,6 +45,10 @@ pub struct AppState {
     // Backend selection state (for interactive backend modal)
     pub backend_items: Vec<BackendSelectorItem>,
     pub backend_selected_index: usize,
+    // Process detail view state
+    pub selected_process_detail_pid: Option<i32>, // PID of process being detailed
+    pub detail_scroll_offset: usize,              // For scrolling long content
+    pub detail_tab: ProcessDetailTab,             // Which tab is active
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -52,6 +56,15 @@ pub enum ViewMode {
     ProcessView,     // Show all processes
     InterfaceList,   // Show list of interfaces
     InterfaceDetail, // Show processes on selected interface
+    ProcessDetail,   // Show detailed info about a single process
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ProcessDetailTab {
+    Overview,    // General info + bandwidth stats
+    Connections, // Active network connections
+    Traffic,     // Detailed traffic breakdown
+    System,      // System/proc info
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -288,6 +301,9 @@ impl AppState {
             backend_compatibility_dialog: None,
             backend_items: Vec::new(),
             backend_selected_index: 0,
+            selected_process_detail_pid: None,
+            detail_scroll_offset: 0,
+            detail_tab: ProcessDetailTab::Overview,
         }
     }
 
@@ -319,7 +335,7 @@ impl AppState {
                 }
                 ViewMode::InterfaceList
             }
-            ViewMode::InterfaceList | ViewMode::InterfaceDetail => {
+            ViewMode::InterfaceList | ViewMode::InterfaceDetail | ViewMode::ProcessDetail => {
                 // Switch back to process view
                 ViewMode::ProcessView
             }
@@ -816,6 +832,66 @@ impl AppState {
         }
         None
     }
+
+    // Process detail view navigation methods
+
+    /// Enter process detail view for the selected process
+    pub fn enter_process_detail(&mut self) {
+        if let Some(process) = self.get_selected_process() {
+            self.selected_process_detail_pid = Some(process.pid);
+            self.detail_scroll_offset = 0;
+            self.detail_tab = ProcessDetailTab::Overview;
+            self.view_mode = ViewMode::ProcessDetail;
+        }
+    }
+
+    /// Exit process detail view and return to process list
+    pub fn exit_process_detail(&mut self) {
+        self.view_mode = ViewMode::ProcessView;
+        self.selected_process_detail_pid = None;
+        self.detail_scroll_offset = 0;
+    }
+
+    /// Move to the next detail tab
+    pub fn next_detail_tab(&mut self) {
+        self.detail_tab = match self.detail_tab {
+            ProcessDetailTab::Overview => ProcessDetailTab::Connections,
+            ProcessDetailTab::Connections => ProcessDetailTab::Traffic,
+            ProcessDetailTab::Traffic => ProcessDetailTab::System,
+            ProcessDetailTab::System => ProcessDetailTab::Overview,
+        };
+        self.detail_scroll_offset = 0; // Reset scroll when changing tabs
+    }
+
+    /// Move to the previous detail tab
+    pub fn previous_detail_tab(&mut self) {
+        self.detail_tab = match self.detail_tab {
+            ProcessDetailTab::Overview => ProcessDetailTab::System,
+            ProcessDetailTab::Connections => ProcessDetailTab::Overview,
+            ProcessDetailTab::Traffic => ProcessDetailTab::Connections,
+            ProcessDetailTab::System => ProcessDetailTab::Traffic,
+        };
+        self.detail_scroll_offset = 0; // Reset scroll when changing tabs
+    }
+
+    /// Scroll detail view up
+    pub fn scroll_detail_up(&mut self) {
+        self.detail_scroll_offset = self.detail_scroll_offset.saturating_sub(1);
+    }
+
+    /// Scroll detail view down
+    pub fn scroll_detail_down(&mut self) {
+        self.detail_scroll_offset = self.detail_scroll_offset.saturating_add(1);
+    }
+
+    /// Get the process being detailed (if still exists in process list)
+    pub fn get_detail_process(&self) -> Option<&ProcessInfo> {
+        if let Some(pid) = self.selected_process_detail_pid {
+            self.process_list.iter().find(|p| p.pid == pid)
+        } else {
+            None
+        }
+    }
 }
 
 pub fn draw_ui(f: &mut Frame, app: &mut AppState) {
@@ -852,6 +928,9 @@ pub fn draw_ui_with_backend_info(
         }
         ViewMode::InterfaceDetail => {
             draw_interface_detail(f, chunks[1], app);
+        }
+        ViewMode::ProcessDetail => {
+            draw_process_detail(f, chunks[1], app);
         }
     }
 
@@ -2463,4 +2542,752 @@ fn draw_interface_modal(f: &mut Frame, area: Rect, app: &AppState) {
     let popup_area = centered_rect(70, 70, area);
     f.render_widget(Clear, popup_area);
     f.render_widget(widget, popup_area);
+}
+// Process Detail View Rendering
+
+fn draw_process_detail(f: &mut Frame, area: Rect, app: &AppState) {
+    // Get the process details
+    let process = match app.get_detail_process() {
+        Some(p) => p,
+        None => {
+            // Process no longer exists, show message
+            let msg = Paragraph::new("Process no longer exists. Press Esc to go back.")
+                .style(Style::default().fg(Color::Red))
+                .block(Block::default().borders(Borders::ALL).title("Error"));
+            f.render_widget(msg, area);
+            return;
+        }
+    };
+
+    // Split into title, tabs, and content areas
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Title
+            Constraint::Length(3), // Tab bar
+            Constraint::Min(10),   // Content
+        ])
+        .split(area);
+
+    // Draw title
+    let title = format!("Process Details: {} (PID {})", process.name, process.pid);
+    let title_widget = Paragraph::new(title)
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(Block::default().borders(Borders::ALL));
+    f.render_widget(title_widget, chunks[0]);
+
+    // Draw tabs
+    draw_detail_tabs(f, chunks[1], app.detail_tab);
+
+    // Draw content based on active tab
+    match app.detail_tab {
+        ProcessDetailTab::Overview => draw_detail_overview(f, chunks[2], process, &app.history),
+        ProcessDetailTab::Connections => {
+            draw_detail_connections(f, chunks[2], process, app.detail_scroll_offset)
+        }
+        ProcessDetailTab::Traffic => draw_detail_traffic(f, chunks[2], process),
+        ProcessDetailTab::System => draw_detail_system(f, chunks[2], process),
+    }
+}
+
+fn draw_detail_tabs(f: &mut Frame, area: Rect, current_tab: ProcessDetailTab) {
+    let tabs = vec!["Overview", "Connections", "Traffic", "System"];
+    let mut spans = vec![];
+
+    for (i, tab_name) in tabs.iter().enumerate() {
+        let tab_enum = match i {
+            0 => ProcessDetailTab::Overview,
+            1 => ProcessDetailTab::Connections,
+            2 => ProcessDetailTab::Traffic,
+            3 => ProcessDetailTab::System,
+            _ => ProcessDetailTab::Overview,
+        };
+
+        let is_active = tab_enum == current_tab;
+
+        if i > 0 {
+            spans.push(Span::raw(" "));
+        }
+
+        let style = if is_active {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+                .bg(Color::DarkGray)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+
+        spans.push(Span::raw("["));
+        spans.push(Span::styled(tab_name.to_string(), style));
+        spans.push(Span::raw("]"));
+    }
+
+    let tabs_widget =
+        Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::ALL));
+    f.render_widget(tabs_widget, area);
+}
+
+fn draw_detail_overview(
+    f: &mut Frame,
+    area: Rect,
+    process: &ProcessInfo,
+    history: &HistoryTracker,
+) {
+    let mut text = vec![];
+
+    // Basic Information
+    text.push(Line::from(vec![Span::styled(
+        "Basic Information:",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )]));
+    text.push(Line::from(""));
+    text.push(Line::from(format!("  PID:              {}", process.pid)));
+    text.push(Line::from(format!("  Name:             {}", process.name)));
+
+    // Get process details
+    let details = crate::process::ProcessDetails::from_pid(process.pid);
+
+    if let Some(ref cmdline) = details.cmdline {
+        let cmd_str = cmdline.join(" ");
+        let cmd_display = if cmd_str.len() > 80 {
+            format!("{}...", &cmd_str[..77])
+        } else {
+            cmd_str
+        };
+        text.push(Line::from(format!("  Command:          {}", cmd_display)));
+    }
+
+    if let Some(ref exe) = details.exe_path {
+        text.push(Line::from(format!("  Executable:       {}", exe)));
+    }
+
+    if let Some(ref cwd) = details.cwd {
+        text.push(Line::from(format!("  Working Dir:      {}", cwd)));
+    }
+
+    text.push(Line::from(format!(
+        "  State:            {}",
+        details.state_description()
+    )));
+
+    if let Some(ppid) = details.ppid {
+        text.push(Line::from(format!("  Parent PID:       {}", ppid)));
+    }
+
+    text.push(Line::from(""));
+
+    // Network Statistics
+    text.push(Line::from(vec![Span::styled(
+        "Network Statistics:",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )]));
+    text.push(Line::from(""));
+    text.push(Line::from(vec![
+        Span::raw("  Current Download: "),
+        Span::styled(
+            format!("↓ {:>10}", ProcessInfo::format_rate(process.download_rate)),
+            Style::default().fg(Color::Green),
+        ),
+        Span::raw("    Upload: "),
+        Span::styled(
+            format!("↑ {:>10}", ProcessInfo::format_rate(process.upload_rate)),
+            Style::default().fg(Color::Yellow),
+        ),
+    ]));
+
+    text.push(Line::from(vec![
+        Span::raw("  Total Download:   "),
+        Span::styled(
+            format!("{:>10}", ProcessInfo::format_bytes(process.total_download)),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::raw("      Upload: "),
+        Span::styled(
+            format!("{:>10}", ProcessInfo::format_bytes(process.total_upload)),
+            Style::default().fg(Color::Magenta),
+        ),
+    ]));
+
+    // Get history stats
+    if let Some(hist) = history.get_history(process.pid) {
+        text.push(Line::from(vec![
+            Span::raw("  Peak Download:    "),
+            Span::styled(
+                format!("{:>10}", ProcessInfo::format_rate(hist.max_download_rate())),
+                Style::default().fg(Color::Green),
+            ),
+            Span::raw("      Upload: "),
+            Span::styled(
+                format!("{:>10}", ProcessInfo::format_rate(hist.max_upload_rate())),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]));
+
+        text.push(Line::from(vec![
+            Span::raw("  Avg Download:     "),
+            Span::styled(
+                format!("{:>10}", ProcessInfo::format_rate(hist.avg_download_rate())),
+                Style::default().fg(Color::Green),
+            ),
+            Span::raw("      Upload: "),
+            Span::styled(
+                format!("{:>10}", ProcessInfo::format_rate(hist.avg_upload_rate())),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]));
+    }
+
+    text.push(Line::from(""));
+
+    // Internet/Local breakdown
+    text.push(Line::from(vec![Span::styled(
+        "Internet Traffic:",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )]));
+    text.push(Line::from(""));
+
+    let internet_pct = if process.download_rate > 0 {
+        (process.internet_download_rate as f64 / process.download_rate as f64 * 100.0) as u32
+    } else {
+        0
+    };
+
+    text.push(Line::from(vec![
+        Span::raw("  Download:         "),
+        Span::styled(
+            format!(
+                "↓ {:>10}",
+                ProcessInfo::format_rate(process.internet_download_rate)
+            ),
+            Style::default().fg(Color::Green),
+        ),
+        Span::raw(format!(" ({}%)  Total: ", internet_pct)),
+        Span::styled(
+            ProcessInfo::format_bytes(process.internet_total_download),
+            Style::default().fg(Color::Cyan),
+        ),
+    ]));
+
+    let upload_pct = if process.upload_rate > 0 {
+        (process.internet_upload_rate as f64 / process.upload_rate as f64 * 100.0) as u32
+    } else {
+        0
+    };
+
+    text.push(Line::from(vec![
+        Span::raw("  Upload:           "),
+        Span::styled(
+            format!(
+                "↑ {:>10}",
+                ProcessInfo::format_rate(process.internet_upload_rate)
+            ),
+            Style::default().fg(Color::Yellow),
+        ),
+        Span::raw(format!(" ({}%)  Total: ", upload_pct)),
+        Span::styled(
+            ProcessInfo::format_bytes(process.internet_total_upload),
+            Style::default().fg(Color::Magenta),
+        ),
+    ]));
+
+    text.push(Line::from(""));
+
+    // Local traffic
+    text.push(Line::from(vec![Span::styled(
+        "Local Traffic:",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )]));
+    text.push(Line::from(""));
+
+    let local_dl_pct = if process.download_rate > 0 {
+        (process.local_download_rate as f64 / process.download_rate as f64 * 100.0) as u32
+    } else {
+        0
+    };
+
+    text.push(Line::from(vec![
+        Span::raw("  Download:         "),
+        Span::styled(
+            format!(
+                "↓ {:>10}",
+                ProcessInfo::format_rate(process.local_download_rate)
+            ),
+            Style::default().fg(Color::Green),
+        ),
+        Span::raw(format!(" ({}%)   Total: ", local_dl_pct)),
+        Span::styled(
+            ProcessInfo::format_bytes(process.local_total_download),
+            Style::default().fg(Color::Cyan),
+        ),
+    ]));
+
+    let local_ul_pct = if process.upload_rate > 0 {
+        (process.local_upload_rate as f64 / process.upload_rate as f64 * 100.0) as u32
+    } else {
+        0
+    };
+
+    text.push(Line::from(vec![
+        Span::raw("  Upload:           "),
+        Span::styled(
+            format!(
+                "↑ {:>10}",
+                ProcessInfo::format_rate(process.local_upload_rate)
+            ),
+            Style::default().fg(Color::Yellow),
+        ),
+        Span::raw(format!(" ({}%)   Total: ", local_ul_pct)),
+        Span::styled(
+            ProcessInfo::format_bytes(process.local_total_upload),
+            Style::default().fg(Color::Magenta),
+        ),
+    ]));
+
+    text.push(Line::from(""));
+
+    // Throttle status
+    text.push(Line::from(vec![Span::styled(
+        "Throttle Status:",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )]));
+    text.push(Line::from(""));
+
+    if let Some(ref throttle) = process.throttle_limit {
+        let dl_text = if let Some(limit) = throttle.download_limit {
+            ProcessInfo::format_rate(limit)
+        } else {
+            "Unlimited".to_string()
+        };
+
+        let ul_text = if let Some(limit) = throttle.upload_limit {
+            ProcessInfo::format_rate(limit)
+        } else {
+            "Unlimited".to_string()
+        };
+
+        let traffic_type_text = match throttle.traffic_type {
+            crate::process::TrafficType::All => "All Traffic",
+            crate::process::TrafficType::Internet => "Internet Only",
+            crate::process::TrafficType::Local => "Local Only",
+        };
+
+        text.push(Line::from(vec![
+            Span::raw("  Download Limit:   "),
+            Span::styled(
+                dl_text,
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(" ({})", traffic_type_text)),
+            Span::styled(" ⚡", Style::default().fg(Color::Yellow)),
+        ]));
+
+        text.push(Line::from(vec![
+            Span::raw("  Upload Limit:     "),
+            Span::styled(
+                ul_text,
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    } else {
+        text.push(Line::from("  Not throttled"));
+    }
+
+    text.push(Line::from(""));
+
+    // System resources
+    if details.memory_rss.is_some() || details.threads.is_some() {
+        text.push(Line::from(vec![Span::styled(
+            "System Resources:",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]));
+        text.push(Line::from(""));
+
+        if let Some(rss) = details.memory_rss {
+            text.push(Line::from(format!(
+                "  Memory (RSS):     {}",
+                crate::process::ProcessDetails::format_memory(rss)
+            )));
+        }
+
+        if let Some(vms) = details.memory_vms {
+            text.push(Line::from(format!(
+                "  Memory (VMS):     {}",
+                crate::process::ProcessDetails::format_memory(vms)
+            )));
+        }
+
+        if let Some(threads) = details.threads {
+            text.push(Line::from(format!("  Threads:          {}", threads)));
+        }
+    }
+
+    text.push(Line::from(""));
+    text.push(Line::from(Span::styled(
+        "[Tab] Switch tab  [t] Throttle  [g] Graph  [Esc] Back",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let paragraph =
+        Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("Overview"));
+    f.render_widget(paragraph, area);
+}
+
+fn draw_detail_connections(
+    f: &mut Frame,
+    area: Rect,
+    process: &ProcessInfo,
+    _scroll_offset: usize,
+) {
+    // For now, show a placeholder. We'll implement connection tracking later
+    let text = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "Connection tracking coming soon!",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("This will show:"),
+        Line::from("  • Active TCP/UDP connections"),
+        Line::from("  • Remote addresses and ports"),
+        Line::from("  • Connection states"),
+        Line::from("  • Per-connection traffic (if available)"),
+        Line::from(""),
+        Line::from(format!("Process: {} (PID {})", process.name, process.pid)),
+        Line::from(""),
+        Line::from(""),
+        Line::from(Span::styled(
+            "[Tab] Switch tab  [Esc] Back",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let paragraph =
+        Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("Connections"));
+    f.render_widget(paragraph, area);
+}
+
+fn draw_detail_traffic(f: &mut Frame, area: Rect, process: &ProcessInfo) {
+    let mut text = vec![];
+
+    text.push(Line::from(""));
+    text.push(Line::from(vec![Span::styled(
+        "Traffic Breakdown by Interface:",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )]));
+    text.push(Line::from(""));
+
+    if process.interface_stats.is_empty() {
+        text.push(Line::from("  No interface data available"));
+    } else {
+        // Header
+        text.push(Line::from(vec![
+            Span::styled(
+                "  Interface    ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Download Rate    ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Upload Rate    ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Total DL     ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Total UL", Style::default().add_modifier(Modifier::BOLD)),
+        ]));
+
+        text.push(Line::from(
+            "  ─────────────────────────────────────────────────────────────────────",
+        ));
+
+        // Sort interfaces by download rate
+        let mut ifaces: Vec<_> = process.interface_stats.iter().collect();
+        ifaces.sort_by(|a, b| b.1.download_rate.cmp(&a.1.download_rate));
+
+        for (iface_name, stats) in ifaces.iter().take(10) {
+            // Show top 10
+            text.push(Line::from(vec![
+                Span::raw(format!("  {:12} ", iface_name)),
+                Span::styled(
+                    format!(
+                        "↓ {:>10}     ",
+                        ProcessInfo::format_rate(stats.download_rate)
+                    ),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::styled(
+                    format!("↑ {:>10}   ", ProcessInfo::format_rate(stats.upload_rate)),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled(
+                    format!("{:>10}   ", ProcessInfo::format_bytes(stats.total_download)),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(
+                    format!("{:>10}", ProcessInfo::format_bytes(stats.total_upload)),
+                    Style::default().fg(Color::Magenta),
+                ),
+            ]));
+        }
+    }
+
+    text.push(Line::from(""));
+    text.push(Line::from(""));
+
+    // Traffic by type
+    text.push(Line::from(vec![Span::styled(
+        "Traffic by Type:",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )]));
+    text.push(Line::from(""));
+
+    let total_dl = process.download_rate;
+    let total_ul = process.upload_rate;
+
+    if total_dl > 0 || total_ul > 0 {
+        let internet_pct = if total_dl > 0 {
+            (process.internet_download_rate as f64 / total_dl as f64 * 100.0) as u32
+        } else {
+            0
+        };
+
+        text.push(Line::from(vec![
+            Span::raw("  🌐 Internet:  "),
+            Span::styled(
+                format!("{}%", internet_pct),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  ("),
+            Span::styled(
+                format!(
+                    "↓ {}",
+                    ProcessInfo::format_rate(process.internet_download_rate)
+                ),
+                Style::default().fg(Color::Green),
+            ),
+            Span::raw(", "),
+            Span::styled(
+                format!(
+                    "↑ {})",
+                    ProcessInfo::format_rate(process.internet_upload_rate)
+                ),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]));
+
+        let local_pct = if total_dl > 0 {
+            (process.local_download_rate as f64 / total_dl as f64 * 100.0) as u32
+        } else {
+            0
+        };
+
+        text.push(Line::from(vec![
+            Span::raw("  🏠 Local:     "),
+            Span::styled(
+                format!("{}%", local_pct),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  ("),
+            Span::styled(
+                format!(
+                    "↓ {}",
+                    ProcessInfo::format_rate(process.local_download_rate)
+                ),
+                Style::default().fg(Color::Green),
+            ),
+            Span::raw(", "),
+            Span::styled(
+                format!("↑ {})", ProcessInfo::format_rate(process.local_upload_rate)),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]));
+    } else {
+        text.push(Line::from("  No traffic"));
+    }
+
+    text.push(Line::from(""));
+    text.push(Line::from(""));
+    text.push(Line::from(Span::styled(
+        "[g] Show bandwidth graph  [Tab] Switch tab  [Esc] Back",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let paragraph = Paragraph::new(text).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Traffic Details"),
+    );
+    f.render_widget(paragraph, area);
+}
+
+fn draw_detail_system(f: &mut Frame, area: Rect, process: &ProcessInfo) {
+    let details = crate::process::ProcessDetails::from_pid(process.pid);
+
+    let mut text = vec![];
+
+    text.push(Line::from(""));
+    text.push(Line::from(vec![Span::styled(
+        "Process Information:",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )]));
+    text.push(Line::from(""));
+
+    text.push(Line::from(format!("  PID:                {}", details.pid)));
+    if let Some(ppid) = details.ppid {
+        text.push(Line::from(format!("  Parent PID:         {}", ppid)));
+    }
+    text.push(Line::from(format!(
+        "  State:              {}",
+        details.state_description()
+    )));
+
+    text.push(Line::from(""));
+
+    // User/Group
+    if details.uid.is_some() || details.gid.is_some() {
+        text.push(Line::from(vec![Span::styled(
+            "User/Group:",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]));
+        text.push(Line::from(""));
+
+        if let Some(uid) = details.uid {
+            text.push(Line::from(format!("  UID:                {}", uid)));
+        }
+        if let Some(gid) = details.gid {
+            text.push(Line::from(format!("  GID:                {}", gid)));
+        }
+
+        text.push(Line::from(""));
+    }
+
+    // Memory
+    if details.memory_rss.is_some() || details.memory_vms.is_some() {
+        text.push(Line::from(vec![Span::styled(
+            "Memory:",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]));
+        text.push(Line::from(""));
+
+        if let Some(vms) = details.memory_vms {
+            text.push(Line::from(format!(
+                "  Virtual Memory:     {}",
+                crate::process::ProcessDetails::format_memory(vms)
+            )));
+        }
+        if let Some(rss) = details.memory_rss {
+            text.push(Line::from(format!(
+                "  Resident Memory:    {}",
+                crate::process::ProcessDetails::format_memory(rss)
+            )));
+        }
+
+        text.push(Line::from(""));
+    }
+
+    // Threads
+    if let Some(threads) = details.threads {
+        text.push(Line::from(vec![Span::styled(
+            "Threads:",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]));
+        text.push(Line::from(""));
+        text.push(Line::from(format!("  Thread Count:       {}", threads)));
+        text.push(Line::from(""));
+    }
+
+    // Executable
+    text.push(Line::from(vec![Span::styled(
+        "Executable:",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )]));
+    text.push(Line::from(""));
+
+    if let Some(ref exe) = details.exe_path {
+        text.push(Line::from(format!("  Path:               {}", exe)));
+    } else {
+        text.push(Line::from("  Path:               (not available)"));
+    }
+
+    if let Some(ref cwd) = details.cwd {
+        text.push(Line::from(format!("  Working Directory:  {}", cwd)));
+    }
+
+    text.push(Line::from(""));
+
+    // Command line
+    if let Some(ref cmdline) = details.cmdline {
+        text.push(Line::from(vec![Span::styled(
+            "Command Line:",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]));
+        text.push(Line::from(""));
+
+        let cmd_str = cmdline.join(" ");
+        // Wrap long command lines
+        let max_width = 70;
+        let mut remaining = cmd_str.as_str();
+        while !remaining.is_empty() {
+            let chunk_len = remaining.len().min(max_width);
+            text.push(Line::from(format!("  {}", &remaining[..chunk_len])));
+            remaining = &remaining[chunk_len..];
+        }
+    }
+
+    text.push(Line::from(""));
+    text.push(Line::from(""));
+    text.push(Line::from(Span::styled(
+        "[Tab] Switch tab  [Esc] Back",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let paragraph = Paragraph::new(text).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("System Information"),
+    );
+    f.render_widget(paragraph, area);
 }
