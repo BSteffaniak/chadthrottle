@@ -7,6 +7,9 @@ use anyhow::Result;
 #[cfg(feature = "monitor-pnet")]
 pub mod pnet;
 
+#[cfg(target_os = "windows")]
+pub mod windows_poll;
+
 /// Network monitoring backend trait
 pub trait MonitorBackend: Send + Sync {
     /// Backend name (e.g., "pnet", "ebpf", "wfp")
@@ -54,6 +57,15 @@ pub fn detect_available_backends() -> Vec<MonitorBackendInfo> {
         });
     }
 
+    #[cfg(target_os = "windows")]
+    {
+        backends.push(MonitorBackendInfo {
+            name: "windows-poll",
+            priority: BackendPriority::Good,
+            available: windows_poll::WindowsPollingMonitor::is_available(),
+        });
+    }
+
     backends
 }
 
@@ -80,6 +92,11 @@ fn create_monitor_backend(name: &str) -> Result<Box<dyn MonitorBackend>> {
     match name {
         #[cfg(feature = "monitor-pnet")]
         "pnet" => Ok(Box::new(pnet::PnetMonitor::new()?)),
+
+        #[cfg(target_os = "windows")]
+        "windows-poll" | "windows-poll-basic" | "windows-poll-stats" => {
+            Ok(Box::new(windows_poll::WindowsPollingMonitor::new()?))
+        }
 
         _ => Err(anyhow::anyhow!("Unknown monitor backend: {}", name)),
     }

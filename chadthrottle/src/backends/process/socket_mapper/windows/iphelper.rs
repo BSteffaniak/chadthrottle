@@ -215,8 +215,12 @@ fn get_tcp_table() -> Result<Vec<TcpEntry>> {
         let table = &*(buffer.as_ptr() as *const MIB_TCPTABLE_OWNER_PID);
         let mut entries = Vec::new();
 
+        // Use pointer arithmetic for flexible array member
+        // table.table is defined as [MIB_TCPROW_OWNER_PID; 1] but actually contains dwNumEntries elements
+        let table_ptr = table.table.as_ptr();
+
         for i in 0..table.dwNumEntries {
-            let row = &table.table[i as usize];
+            let row = &*table_ptr.add(i as usize);
 
             // Convert network byte order addresses
             let local_addr = IpAddr::V4(Ipv4Addr::from(u32::from_be(row.dwLocalAddr)));
@@ -274,8 +278,11 @@ fn get_tcp6_table() -> Result<Vec<TcpEntry>> {
         let table = &*(buffer.as_ptr() as *const MIB_TCP6TABLE_OWNER_PID);
         let mut entries = Vec::new();
 
+        // Use pointer arithmetic for flexible array member
+        let table_ptr = table.table.as_ptr();
+
         for i in 0..table.dwNumEntries {
-            let row = &table.table[i as usize];
+            let row = &*table_ptr.add(i as usize);
 
             let local_addr = IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr));
             let remote_addr = IpAddr::V6(Ipv6Addr::from(row.ucRemoteAddr));
@@ -332,8 +339,11 @@ fn get_udp_table() -> Result<Vec<UdpEntry>> {
         let table = &*(buffer.as_ptr() as *const MIB_UDPTABLE_OWNER_PID);
         let mut entries = Vec::new();
 
+        // Use pointer arithmetic for flexible array member
+        let table_ptr = table.table.as_ptr();
+
         for i in 0..table.dwNumEntries {
-            let row = &table.table[i as usize];
+            let row = &*table_ptr.add(i as usize);
 
             let local_addr = IpAddr::V4(Ipv4Addr::from(u32::from_be(row.dwLocalAddr)));
             let local_port = ((row.dwLocalPort >> 8) & 0xFF) as u16
@@ -383,8 +393,11 @@ fn get_udp6_table() -> Result<Vec<UdpEntry>> {
         let table = &*(buffer.as_ptr() as *const MIB_UDP6TABLE_OWNER_PID);
         let mut entries = Vec::new();
 
+        // Use pointer arithmetic for flexible array member
+        let table_ptr = table.table.as_ptr();
+
         for i in 0..table.dwNumEntries {
-            let row = &table.table[i as usize];
+            let row = &*table_ptr.add(i as usize);
 
             let local_addr = IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr));
             let local_port = ((row.dwLocalPort >> 8) & 0xFF) as u16

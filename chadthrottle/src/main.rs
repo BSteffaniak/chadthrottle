@@ -7,8 +7,76 @@ mod keybindings;
 #[cfg(feature = "monitor-pnet")]
 mod monitor;
 
-// Stub monitor module when no backends are available
-#[cfg(not(feature = "monitor-pnet"))]
+// Windows polling monitor wrapper when pnet is not available
+#[cfg(all(target_os = "windows", not(feature = "monitor-pnet")))]
+mod monitor {
+    use crate::backends::monitor::MonitorBackend;
+    use crate::backends::monitor::windows_poll::WindowsPollingMonitor;
+    use crate::process::{InterfaceMap, ProcessMap};
+    use anyhow::Result;
+    use std::collections::HashMap;
+    use std::time::Instant;
+
+    pub struct NetworkMonitor {
+        backend: WindowsPollingMonitor,
+    }
+
+    pub struct ProcessBandwidth {
+        name: String,
+        rx_bytes: u64,
+        tx_bytes: u64,
+        last_rx_bytes: u64,
+        last_tx_bytes: u64,
+    }
+
+    impl NetworkMonitor {
+        pub fn with_socket_mapper(_: Option<&str>) -> Result<Self> {
+            log::info!("Using Windows polling monitor backend");
+            Ok(NetworkMonitor {
+                backend: WindowsPollingMonitor::new()?,
+            })
+        }
+
+        pub fn get_socket_mapper_info(&self) -> (&str, &crate::backends::BackendCapabilities) {
+            // Windows polling monitor uses iphelper socket mapper
+            static CAPS: crate::backends::BackendCapabilities =
+                crate::backends::BackendCapabilities {
+                    ipv4_support: true,
+                    ipv6_support: true,
+                    per_process: true,
+                    per_connection: true,
+                };
+            ("iphelper", &CAPS)
+        }
+
+        pub fn update(&mut self) -> Result<(ProcessMap, InterfaceMap)> {
+            self.backend.update()
+        }
+
+        pub fn extract_bandwidth_data(
+            &self,
+        ) -> (HashMap<i32, ProcessBandwidth>, HashMap<i32, Instant>) {
+            // Not implemented for polling backend
+            (HashMap::new(), HashMap::new())
+        }
+
+        pub fn restore_bandwidth_data(
+            &mut self,
+            _: HashMap<i32, ProcessBandwidth>,
+            _: HashMap<i32, Instant>,
+        ) {
+            // No-op for polling backend
+        }
+
+        pub fn get_bandwidth_data(&self) -> HashMap<i32, Vec<crate::history::BandwidthSample>> {
+            // Not implemented for polling backend
+            HashMap::new()
+        }
+    }
+}
+
+// Stub monitor module when no backends are available (non-Windows without pnet)
+#[cfg(not(any(feature = "monitor-pnet", target_os = "windows")))]
 mod monitor {
     use crate::process::{InterfaceMap, ProcessMap};
     use anyhow::Result;
@@ -54,10 +122,14 @@ mod monitor {
 
         pub fn restore_bandwidth_data(
             &mut self,
-            _process_bandwidth: HashMap<i32, ProcessBandwidth>,
-            _terminated_processes: HashMap<i32, Instant>,
+            _: HashMap<i32, ProcessBandwidth>,
+            _: HashMap<i32, Instant>,
         ) {
             // No-op
+        }
+
+        pub fn get_bandwidth_data(&self) -> HashMap<i32, Vec<crate::history::BandwidthSample>> {
+            HashMap::new()
         }
     }
 }
