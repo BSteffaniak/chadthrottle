@@ -10,7 +10,7 @@
 // All metrics are accurate - no approximations or estimations.
 
 use crate::backends::monitor::MonitorBackend;
-use crate::backends::process::ProcessUtils;
+use crate::backends::process::{ConnectionMap, ProcessUtils};
 use crate::backends::{BackendCapabilities, BackendPriority};
 use crate::process::{InterfaceMap, ProcessInfo, ProcessMap};
 use anyhow::Result;
@@ -72,6 +72,9 @@ struct ConnectionTracker {
     // Per-process aggregated bandwidth
     process_bandwidth: HashMap<i32, ProcessBandwidth>,
 
+    // Full connection map for populating process details
+    connection_map: ConnectionMap,
+
     last_update: Instant,
 }
 
@@ -121,11 +124,19 @@ struct ConnectionStats {
 struct ProcessBandwidth {
     name: String,
 
-    // Cumulative totals
+    // Current sum of all connection cumulative totals (for reference)
     rx_bytes: u64,
     tx_bytes: u64,
 
-    // Previous values for rate calculation
+    // Process-lifetime accumulated deltas (actual data transferred by this process)
+    lifetime_rx_bytes: u64,
+    lifetime_tx_bytes: u64,
+
+    // Previous lifetime values for rate calculation
+    last_lifetime_rx_bytes: u64,
+    last_lifetime_tx_bytes: u64,
+
+    // Previous sum values (kept for compatibility, may remove later)
     last_rx_bytes: u64,
     last_tx_bytes: u64,
 
@@ -164,6 +175,7 @@ impl WindowsPollingMonitor {
             udp_connections: HashMap::new(),
             udp6_connections: HashMap::new(),
             process_bandwidth: HashMap::new(),
+            connection_map: ConnectionMap::default(),
             last_update: Instant::now(),
         }));
 
@@ -279,12 +291,24 @@ impl MonitorBackend for WindowsPollingMonitor {
                     let mut info = ProcessInfo::new(pid, bandwidth.name.clone());
                     info.download_rate = bandwidth.rx_rate;
                     info.upload_rate = bandwidth.tx_rate;
-                    info.total_download = bandwidth.rx_bytes;
-                    info.total_upload = bandwidth.tx_bytes;
+                    // Use lifetime accumulated deltas, not sum of connection totals
+                    info.total_download = bandwidth.lifetime_rx_bytes;
+                    info.total_upload = bandwidth.lifetime_tx_bytes;
 
                     process_map.insert(pid, info);
                 }
             }
+        }
+
+        // Populate connection details for each process
+        let conn_map = tracker.connection_map.clone();
+
+        // Drop the tracker lock before calling populate_connections
+        drop(tracker);
+
+        let socket_map = &conn_map.socket_to_pid;
+        for process in process_map.values_mut() {
+            process.populate_connections(&conn_map, socket_map);
         }
 
         // Interface map not implemented for polling backend
@@ -439,10 +463,10 @@ fn update_connection_list(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()>
     let now = Instant::now();
 
     // Process all connections - OUTSIDE mutex lock
-    for (inode, (pid, process_name)) in conn_map.socket_to_pid {
+    for (inode, (pid, process_name)) in &conn_map.socket_to_pid {
         // Find matching TCP connections
         for conn in &conn_map.tcp_connections {
-            if conn.inode == inode {
+            if &conn.inode == inode {
                 let key = ConnectionKey {
                     local_addr: conn.local_addr,
                     local_port: conn.local_port,
@@ -454,7 +478,7 @@ fn update_connection_list(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()>
                 new_tcp_connections.insert(
                     key,
                     ConnectionStats {
-                        pid,
+                        pid: *pid,
                         process_name: process_name.clone(),
                         local_addr: conn.local_addr,
                         local_port: conn.local_port,
@@ -472,7 +496,7 @@ fn update_connection_list(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()>
 
         // Find matching TCP6 connections
         for conn in &conn_map.tcp6_connections {
-            if conn.inode == inode {
+            if &conn.inode == inode {
                 let key = ConnectionKey {
                     local_addr: conn.local_addr,
                     local_port: conn.local_port,
@@ -484,7 +508,7 @@ fn update_connection_list(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()>
                 new_tcp6_connections.insert(
                     key,
                     ConnectionStats {
-                        pid,
+                        pid: *pid,
                         process_name: process_name.clone(),
                         local_addr: conn.local_addr,
                         local_port: conn.local_port,
@@ -502,7 +526,7 @@ fn update_connection_list(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()>
 
         // Find matching UDP connections
         for conn in &conn_map.udp_connections {
-            if conn.inode == inode {
+            if &conn.inode == inode {
                 let key = ConnectionKey {
                     local_addr: conn.local_addr,
                     local_port: conn.local_port,
@@ -514,7 +538,7 @@ fn update_connection_list(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()>
                 new_udp_connections.insert(
                     key,
                     ConnectionStats {
-                        pid,
+                        pid: *pid,
                         process_name: process_name.clone(),
                         local_addr: conn.local_addr,
                         local_port: conn.local_port,
@@ -532,7 +556,7 @@ fn update_connection_list(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()>
 
         // Find matching UDP6 connections
         for conn in &conn_map.udp6_connections {
-            if conn.inode == inode {
+            if &conn.inode == inode {
                 let key = ConnectionKey {
                     local_addr: conn.local_addr,
                     local_port: conn.local_port,
@@ -544,7 +568,7 @@ fn update_connection_list(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()>
                 new_udp6_connections.insert(
                     key,
                     ConnectionStats {
-                        pid,
+                        pid: *pid,
                         process_name: process_name.clone(),
                         local_addr: conn.local_addr,
                         local_port: conn.local_port,
@@ -569,6 +593,7 @@ fn update_connection_list(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()>
         tracker.tcp6_connections = new_tcp6_connections;
         tracker.udp_connections = new_udp_connections;
         tracker.udp6_connections = new_udp6_connections;
+        tracker.connection_map = conn_map;
     } // Mutex released immediately
 
     Ok(())
@@ -576,7 +601,17 @@ fn update_connection_list(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()>
 
 /// Update connection statistics with bandwidth tracking (Tier 2 - Stats mode)
 fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()> {
-    // First, update connection list (this handles mutex properly)
+    // Save old connection stats BEFORE updating the connection list
+    // We need these to calculate deltas
+    let (old_tcp_connections, old_tcp6_connections) = {
+        let tracker_guard = tracker.lock().unwrap();
+        (
+            tracker_guard.tcp_connections.clone(),
+            tracker_guard.tcp6_connections.clone(),
+        )
+    };
+
+    // Now update connection list (this handles mutex properly and replaces the connections)
     update_connection_list(tracker)?;
 
     // Build process_bandwidth HashMap by aggregating connection data
@@ -587,6 +622,10 @@ fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()
 
     // Rebuild process_bandwidth map from current connections
     let mut new_process_bandwidth: HashMap<i32, ProcessBandwidth> = HashMap::new();
+
+    // Track connection updates (to avoid borrow checker issues)
+    let mut tcp_connection_updates: Vec<(ConnectionKey, u64, u64)> = Vec::new();
+    let mut tcp6_connection_updates: Vec<(ConnectionKey, u64, u64)> = Vec::new();
 
     // Log connection counts for diagnostics
     log::info!(
@@ -600,20 +639,22 @@ fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()
     // Aggregate all TCP connections by PID and fetch real bandwidth data
     for stats in tracker.tcp_connections.values() {
         let entry = new_process_bandwidth.entry(stats.pid).or_insert_with(|| {
-            // Preserve previous rx_bytes and tx_bytes to use as last_* values
-            // This allows proper delta calculation for rate tracking
-            let (prev_rx, prev_tx) = tracker
-                .process_bandwidth
-                .get(&stats.pid)
-                .map(|prev| (prev.rx_bytes, prev.tx_bytes))
+            // Preserve previous lifetime values for delta calculation
+            let prev = tracker.process_bandwidth.get(&stats.pid);
+            let (prev_lifetime_rx, prev_lifetime_tx) = prev
+                .map(|p| (p.lifetime_rx_bytes, p.lifetime_tx_bytes))
                 .unwrap_or((0, 0));
 
             ProcessBandwidth {
                 name: stats.process_name.clone(),
                 rx_bytes: 0,
                 tx_bytes: 0,
-                last_rx_bytes: prev_rx,
-                last_tx_bytes: prev_tx,
+                lifetime_rx_bytes: prev_lifetime_rx,
+                lifetime_tx_bytes: prev_lifetime_tx,
+                last_lifetime_rx_bytes: prev_lifetime_rx,
+                last_lifetime_tx_bytes: prev_lifetime_tx,
+                last_rx_bytes: 0,
+                last_tx_bytes: 0,
                 rx_rate: 0,
                 tx_rate: 0,
                 connection_count: 0,
@@ -636,8 +677,47 @@ fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()
             stats.remote_port,
         ) {
             log::trace!("  -> Got {} RX bytes, {} TX bytes", rx_bytes, tx_bytes);
+
+            // Look up previous connection stats to calculate delta
+            let conn_key = ConnectionKey {
+                local_addr: stats.local_addr,
+                local_port: stats.local_port,
+                remote_addr: stats.remote_addr,
+                remote_port: stats.remote_port,
+                protocol: Protocol::Tcp,
+            };
+
+            let (prev_rx, prev_tx) = old_tcp_connections
+                .get(&conn_key)
+                .map(|old| (old.bytes_received, old.bytes_sent))
+                .unwrap_or((0, 0));
+
+            // Calculate delta for this specific connection
+            let delta_rx = rx_bytes.saturating_sub(prev_rx);
+            let delta_tx = tx_bytes.saturating_sub(prev_tx);
+
+            // Accumulate: sum of connection cumulative totals (for reference)
             entry.rx_bytes += rx_bytes;
             entry.tx_bytes += tx_bytes;
+
+            // Accumulate: lifetime deltas (actual new data transferred)
+            // Skip first-seen connections to avoid counting their historical data
+            let is_first_seen = old_tcp_connections.get(&conn_key).is_none();
+            if !is_first_seen {
+                entry.lifetime_rx_bytes += delta_rx;
+                entry.lifetime_tx_bytes += delta_tx;
+            }
+
+            // Queue update for later (avoid borrow checker issues)
+            tcp_connection_updates.push((conn_key, rx_bytes, tx_bytes));
+
+            log::trace!(
+                "  -> Delta: {} RX, {} TX (prev was {} RX, {} TX)",
+                delta_rx,
+                delta_tx,
+                prev_rx,
+                prev_tx
+            );
         } else {
             log::trace!("  -> get_tcp_stats returned None");
         }
@@ -646,20 +726,22 @@ fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()
     // Aggregate all TCP6 connections by PID and fetch real bandwidth data
     for stats in tracker.tcp6_connections.values() {
         let entry = new_process_bandwidth.entry(stats.pid).or_insert_with(|| {
-            // Preserve previous rx_bytes and tx_bytes to use as last_* values
-            // This allows proper delta calculation for rate tracking
-            let (prev_rx, prev_tx) = tracker
-                .process_bandwidth
-                .get(&stats.pid)
-                .map(|prev| (prev.rx_bytes, prev.tx_bytes))
+            // Preserve previous lifetime values for delta calculation
+            let prev = tracker.process_bandwidth.get(&stats.pid);
+            let (prev_lifetime_rx, prev_lifetime_tx) = prev
+                .map(|p| (p.lifetime_rx_bytes, p.lifetime_tx_bytes))
                 .unwrap_or((0, 0));
 
             ProcessBandwidth {
                 name: stats.process_name.clone(),
                 rx_bytes: 0,
                 tx_bytes: 0,
-                last_rx_bytes: prev_rx,
-                last_tx_bytes: prev_tx,
+                lifetime_rx_bytes: prev_lifetime_rx,
+                lifetime_tx_bytes: prev_lifetime_tx,
+                last_lifetime_rx_bytes: prev_lifetime_rx,
+                last_lifetime_tx_bytes: prev_lifetime_tx,
+                last_rx_bytes: 0,
+                last_tx_bytes: 0,
                 rx_rate: 0,
                 tx_rate: 0,
                 connection_count: 0,
@@ -682,8 +764,47 @@ fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()
             stats.remote_port,
         ) {
             log::trace!("  -> Got {} RX bytes, {} TX bytes", rx_bytes, tx_bytes);
+
+            // Look up previous connection stats to calculate delta
+            let conn_key = ConnectionKey {
+                local_addr: stats.local_addr,
+                local_port: stats.local_port,
+                remote_addr: stats.remote_addr,
+                remote_port: stats.remote_port,
+                protocol: Protocol::TcpV6,
+            };
+
+            let (prev_rx, prev_tx) = old_tcp6_connections
+                .get(&conn_key)
+                .map(|old| (old.bytes_received, old.bytes_sent))
+                .unwrap_or((0, 0));
+
+            // Calculate delta for this specific connection
+            let delta_rx = rx_bytes.saturating_sub(prev_rx);
+            let delta_tx = tx_bytes.saturating_sub(prev_tx);
+
+            // Accumulate: sum of connection cumulative totals (for reference)
             entry.rx_bytes += rx_bytes;
             entry.tx_bytes += tx_bytes;
+
+            // Accumulate: lifetime deltas (actual new data transferred)
+            // Skip first-seen connections to avoid counting their historical data
+            let is_first_seen = old_tcp6_connections.get(&conn_key).is_none();
+            if !is_first_seen {
+                entry.lifetime_rx_bytes += delta_rx;
+                entry.lifetime_tx_bytes += delta_tx;
+            }
+
+            // Queue update for later (avoid borrow checker issues)
+            tcp6_connection_updates.push((conn_key, rx_bytes, tx_bytes));
+
+            log::trace!(
+                "  -> Delta: {} RX, {} TX (prev was {} RX, {} TX)",
+                delta_rx,
+                delta_tx,
+                prev_rx,
+                prev_tx
+            );
         } else {
             log::trace!("  -> get_tcp_stats returned None (likely IPv6 - not yet supported)");
         }
@@ -692,20 +813,22 @@ fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()
     // Aggregate all UDP connections by PID
     for stats in tracker.udp_connections.values() {
         let entry = new_process_bandwidth.entry(stats.pid).or_insert_with(|| {
-            // Preserve previous rx_bytes and tx_bytes to use as last_* values
-            // This allows proper delta calculation for rate tracking
-            let (prev_rx, prev_tx) = tracker
-                .process_bandwidth
-                .get(&stats.pid)
-                .map(|prev| (prev.rx_bytes, prev.tx_bytes))
+            // Preserve previous lifetime values for delta calculation
+            let prev = tracker.process_bandwidth.get(&stats.pid);
+            let (prev_lifetime_rx, prev_lifetime_tx) = prev
+                .map(|p| (p.lifetime_rx_bytes, p.lifetime_tx_bytes))
                 .unwrap_or((0, 0));
 
             ProcessBandwidth {
                 name: stats.process_name.clone(),
                 rx_bytes: 0,
                 tx_bytes: 0,
-                last_rx_bytes: prev_rx,
-                last_tx_bytes: prev_tx,
+                lifetime_rx_bytes: prev_lifetime_rx,
+                lifetime_tx_bytes: prev_lifetime_tx,
+                last_lifetime_rx_bytes: prev_lifetime_rx,
+                last_lifetime_tx_bytes: prev_lifetime_tx,
+                last_rx_bytes: 0,
+                last_tx_bytes: 0,
                 rx_rate: 0,
                 tx_rate: 0,
                 connection_count: 0,
@@ -717,20 +840,22 @@ fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()
     // Aggregate all UDP6 connections by PID
     for stats in tracker.udp6_connections.values() {
         let entry = new_process_bandwidth.entry(stats.pid).or_insert_with(|| {
-            // Preserve previous rx_bytes and tx_bytes to use as last_* values
-            // This allows proper delta calculation for rate tracking
-            let (prev_rx, prev_tx) = tracker
-                .process_bandwidth
-                .get(&stats.pid)
-                .map(|prev| (prev.rx_bytes, prev.tx_bytes))
+            // Preserve previous lifetime values for delta calculation
+            let prev = tracker.process_bandwidth.get(&stats.pid);
+            let (prev_lifetime_rx, prev_lifetime_tx) = prev
+                .map(|p| (p.lifetime_rx_bytes, p.lifetime_tx_bytes))
                 .unwrap_or((0, 0));
 
             ProcessBandwidth {
                 name: stats.process_name.clone(),
                 rx_bytes: 0,
                 tx_bytes: 0,
-                last_rx_bytes: prev_rx,
-                last_tx_bytes: prev_tx,
+                lifetime_rx_bytes: prev_lifetime_rx,
+                lifetime_tx_bytes: prev_lifetime_tx,
+                last_lifetime_rx_bytes: prev_lifetime_rx,
+                last_lifetime_tx_bytes: prev_lifetime_tx,
+                last_rx_bytes: 0,
+                last_tx_bytes: 0,
                 rx_rate: 0,
                 tx_rate: 0,
                 connection_count: 0,
@@ -742,28 +867,47 @@ fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()
     // Update the tracker's process_bandwidth map
     tracker.process_bandwidth = new_process_bandwidth;
 
-    // Calculate rates based on available data
+    // Apply queued connection updates (now that we're not iterating)
+    for (conn_key, rx_bytes, tx_bytes) in tcp_connection_updates {
+        if let Some(conn_stats) = tracker.tcp_connections.get_mut(&conn_key) {
+            conn_stats.bytes_received = rx_bytes;
+            conn_stats.bytes_sent = tx_bytes;
+        }
+    }
+    for (conn_key, rx_bytes, tx_bytes) in tcp6_connection_updates {
+        if let Some(conn_stats) = tracker.tcp6_connections.get_mut(&conn_key) {
+            conn_stats.bytes_received = rx_bytes;
+            conn_stats.bytes_sent = tx_bytes;
+        }
+    }
+
+    // Calculate rates based on lifetime deltas
     if elapsed > 0.0 {
         for (pid, bandwidth) in &mut tracker.process_bandwidth {
-            let rx_diff = bandwidth.rx_bytes.saturating_sub(bandwidth.last_rx_bytes);
-            let tx_diff = bandwidth.tx_bytes.saturating_sub(bandwidth.last_tx_bytes);
+            // Calculate delta from lifetime accumulators (not from sum of connections)
+            let rx_diff = bandwidth
+                .lifetime_rx_bytes
+                .saturating_sub(bandwidth.last_lifetime_rx_bytes);
+            let tx_diff = bandwidth
+                .lifetime_tx_bytes
+                .saturating_sub(bandwidth.last_lifetime_tx_bytes);
 
             // Log rate calculation details for processes with activity
             if rx_diff > 0 || tx_diff > 0 {
                 let rx_rate = (rx_diff as f64 / elapsed) as u64;
                 let tx_rate = (tx_diff as f64 / elapsed) as u64;
                 log::debug!(
-                    "PID {} ({}): RX: current={} last={} diff={} → {}/s ({:.2} MB/s) | TX: current={} last={} diff={} → {}/s ({:.2} MB/s) | elapsed={:.2}s",
+                    "PID {} ({}): Lifetime: RX={} TX={} | Last: RX={} TX={} | Delta: RX={} TX={} | Rate: ↓ {}/s ({:.2} MB/s) ↑ {}/s ({:.2} MB/s) | elapsed={:.2}s",
                     pid,
                     bandwidth.name,
-                    bandwidth.rx_bytes,
-                    bandwidth.last_rx_bytes,
+                    bandwidth.lifetime_rx_bytes,
+                    bandwidth.lifetime_tx_bytes,
+                    bandwidth.last_lifetime_rx_bytes,
+                    bandwidth.last_lifetime_tx_bytes,
                     rx_diff,
+                    tx_diff,
                     rx_rate,
                     rx_rate as f64 / 1_048_576.0,
-                    bandwidth.tx_bytes,
-                    bandwidth.last_tx_bytes,
-                    tx_diff,
                     tx_rate,
                     tx_rate as f64 / 1_048_576.0,
                     elapsed
@@ -773,8 +917,9 @@ fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()
             bandwidth.rx_rate = (rx_diff as f64 / elapsed) as u64;
             bandwidth.tx_rate = (tx_diff as f64 / elapsed) as u64;
 
-            bandwidth.last_rx_bytes = bandwidth.rx_bytes;
-            bandwidth.last_tx_bytes = bandwidth.tx_bytes;
+            // Update last lifetime values for next cycle
+            bandwidth.last_lifetime_rx_bytes = bandwidth.lifetime_rx_bytes;
+            bandwidth.last_lifetime_tx_bytes = bandwidth.lifetime_tx_bytes;
         }
 
         tracker.last_update = now;
