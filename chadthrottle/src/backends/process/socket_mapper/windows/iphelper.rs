@@ -65,6 +65,12 @@ impl SocketMapperBackend for IpHelperSocketMapper {
         let mut udp_connections = Vec::new();
         let mut udp6_connections = Vec::new();
 
+        // PERFORMANCE CRITICAL: Create System once and reuse for all connections
+        // Creating System::new_all() for each connection is extremely slow (1-2 sec per call)
+        // With 100 connections, this reduces time from 100-200 seconds to 1-2 seconds total
+        use sysinfo::System;
+        let sys = System::new_all();
+
         // Get TCP IPv4 connections
         if let Ok(tcp_table) = get_tcp_table() {
             for entry in tcp_table {
@@ -77,13 +83,14 @@ impl SocketMapperBackend for IpHelperSocketMapper {
                     entry.remote_port,
                 );
 
-                socket_to_pid.insert(inode, (entry.pid, get_process_name(entry.pid)));
+                socket_to_pid.insert(inode, (entry.pid, get_process_name(&sys, entry.pid)));
                 tcp_connections.push(ConnectionEntry {
                     local_addr: entry.local_addr,
                     local_port: entry.local_port,
                     remote_addr: entry.remote_addr,
                     remote_port: entry.remote_port,
                     inode,
+                    state: entry.state.clone(),
                 });
             }
         }
@@ -98,13 +105,14 @@ impl SocketMapperBackend for IpHelperSocketMapper {
                     entry.remote_port,
                 );
 
-                socket_to_pid.insert(inode, (entry.pid, get_process_name(entry.pid)));
+                socket_to_pid.insert(inode, (entry.pid, get_process_name(&sys, entry.pid)));
                 tcp6_connections.push(ConnectionEntry {
                     local_addr: entry.local_addr,
                     local_port: entry.local_port,
                     remote_addr: entry.remote_addr,
                     remote_port: entry.remote_port,
                     inode,
+                    state: entry.state.clone(),
                 });
             }
         }
@@ -119,13 +127,14 @@ impl SocketMapperBackend for IpHelperSocketMapper {
                     0,
                 );
 
-                socket_to_pid.insert(inode, (entry.pid, get_process_name(entry.pid)));
+                socket_to_pid.insert(inode, (entry.pid, get_process_name(&sys, entry.pid)));
                 udp_connections.push(ConnectionEntry {
                     local_addr: entry.local_addr,
                     local_port: entry.local_port,
                     remote_addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
                     remote_port: 0,
                     inode,
+                    state: "UDP".to_string(),
                 });
             }
         }
@@ -140,13 +149,14 @@ impl SocketMapperBackend for IpHelperSocketMapper {
                     0,
                 );
 
-                socket_to_pid.insert(inode, (entry.pid, get_process_name(entry.pid)));
+                socket_to_pid.insert(inode, (entry.pid, get_process_name(&sys, entry.pid)));
                 udp6_connections.push(ConnectionEntry {
                     local_addr: entry.local_addr,
                     local_port: entry.local_port,
                     remote_addr: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
                     remote_port: 0,
                     inode,
+                    state: "UDP".to_string(),
                 });
             }
         }
@@ -169,6 +179,7 @@ struct TcpEntry {
     remote_addr: IpAddr,
     remote_port: u16,
     pid: i32,
+    state: String,
 }
 
 struct UdpEntry {
@@ -238,6 +249,7 @@ fn get_tcp_table() -> Result<Vec<TcpEntry>> {
                 remote_addr,
                 remote_port,
                 pid: row.dwOwningPid as i32,
+                state: tcp_state_to_string(row.dwState),
             });
         }
 
@@ -299,6 +311,7 @@ fn get_tcp6_table() -> Result<Vec<TcpEntry>> {
                 remote_addr,
                 remote_port,
                 pid: row.dwOwningPid as i32,
+                state: tcp_state_to_string(row.dwState),
             });
         }
 
@@ -433,11 +446,30 @@ fn create_synthetic_inode(
     hasher.finish()
 }
 
-/// Get process name by PID (using sysinfo)
-fn get_process_name(pid: i32) -> String {
-    use sysinfo::{Pid, System};
+/// Convert Windows TCP state constant to string
+fn tcp_state_to_string(state: u32) -> String {
+    // Windows MIB_TCP_STATE constants
+    match state {
+        1 => "CLOSED".to_string(),
+        2 => "LISTEN".to_string(),
+        3 => "SYN_SENT".to_string(),
+        4 => "SYN_RCVD".to_string(),
+        5 => "ESTABLISHED".to_string(),
+        6 => "FIN_WAIT1".to_string(),
+        7 => "FIN_WAIT2".to_string(),
+        8 => "CLOSE_WAIT".to_string(),
+        9 => "CLOSING".to_string(),
+        10 => "LAST_ACK".to_string(),
+        11 => "TIME_WAIT".to_string(),
+        12 => "DELETE_TCB".to_string(),
+        _ => format!("UNKNOWN({})", state),
+    }
+}
 
-    let sys = System::new_all();
+/// Get process name by PID (using cached System instance)
+fn get_process_name(sys: &sysinfo::System, pid: i32) -> String {
+    use sysinfo::Pid;
+
     let pid_obj = Pid::from_u32(pid as u32);
 
     sys.process(pid_obj)

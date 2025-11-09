@@ -528,14 +528,89 @@ fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()
     // First, update connection list (this handles mutex properly)
     update_connection_list(tracker)?;
 
-    // Then calculate rates based on available data
+    // Build process_bandwidth HashMap by aggregating connection data
     // Use a separate mutex lock AFTER connection list is updated
     let mut tracker = tracker.lock().unwrap();
     let now = Instant::now();
     let elapsed = now.duration_since(tracker.last_update).as_secs_f64();
 
+    // Rebuild process_bandwidth map from current connections
+    let mut new_process_bandwidth: HashMap<i32, ProcessBandwidth> = HashMap::new();
+
+    // Aggregate all TCP connections by PID
+    for stats in tracker.tcp_connections.values() {
+        let entry = new_process_bandwidth
+            .entry(stats.pid)
+            .or_insert_with(|| ProcessBandwidth {
+                name: stats.process_name.clone(),
+                rx_bytes: 0,
+                tx_bytes: 0,
+                last_rx_bytes: 0,
+                last_tx_bytes: 0,
+                rx_rate: 0,
+                tx_rate: 0,
+                connection_count: 0,
+            });
+        entry.connection_count += 1;
+        // Note: bytes_sent/received are 0 for now (need GetPerTcpConnectionEStats)
+    }
+
+    // Aggregate all TCP6 connections by PID
+    for stats in tracker.tcp6_connections.values() {
+        let entry = new_process_bandwidth
+            .entry(stats.pid)
+            .or_insert_with(|| ProcessBandwidth {
+                name: stats.process_name.clone(),
+                rx_bytes: 0,
+                tx_bytes: 0,
+                last_rx_bytes: 0,
+                last_tx_bytes: 0,
+                rx_rate: 0,
+                tx_rate: 0,
+                connection_count: 0,
+            });
+        entry.connection_count += 1;
+    }
+
+    // Aggregate all UDP connections by PID
+    for stats in tracker.udp_connections.values() {
+        let entry = new_process_bandwidth
+            .entry(stats.pid)
+            .or_insert_with(|| ProcessBandwidth {
+                name: stats.process_name.clone(),
+                rx_bytes: 0,
+                tx_bytes: 0,
+                last_rx_bytes: 0,
+                last_tx_bytes: 0,
+                rx_rate: 0,
+                tx_rate: 0,
+                connection_count: 0,
+            });
+        entry.connection_count += 1;
+    }
+
+    // Aggregate all UDP6 connections by PID
+    for stats in tracker.udp6_connections.values() {
+        let entry = new_process_bandwidth
+            .entry(stats.pid)
+            .or_insert_with(|| ProcessBandwidth {
+                name: stats.process_name.clone(),
+                rx_bytes: 0,
+                tx_bytes: 0,
+                last_rx_bytes: 0,
+                last_tx_bytes: 0,
+                rx_rate: 0,
+                tx_rate: 0,
+                connection_count: 0,
+            });
+        entry.connection_count += 1;
+    }
+
+    // Update the tracker's process_bandwidth map
+    tracker.process_bandwidth = new_process_bandwidth;
+
+    // Calculate rates based on available data (for future GetPerTcpConnectionEStats integration)
     if elapsed > 0.0 {
-        // Update rates for each process
         for (_pid, bandwidth) in &mut tracker.process_bandwidth {
             let rx_diff = bandwidth.rx_bytes.saturating_sub(bandwidth.last_rx_bytes);
             let tx_diff = bandwidth.tx_bytes.saturating_sub(bandwidth.last_tx_bytes);
