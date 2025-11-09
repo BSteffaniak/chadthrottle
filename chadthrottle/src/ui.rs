@@ -500,6 +500,31 @@ impl AppState {
         }
     }
 
+    /// Helper function to get the appropriate rates for sorting based on traffic view mode
+    /// Returns (download_rate, total_download, upload_rate, total_upload)
+    fn get_sort_rates(&self, process: &ProcessInfo) -> (u64, u64, u64, u64) {
+        match self.traffic_view_mode {
+            TrafficViewMode::All => (
+                process.download_rate,
+                process.total_download,
+                process.upload_rate,
+                process.total_upload,
+            ),
+            TrafficViewMode::Internet => (
+                process.internet_download_rate,
+                process.internet_total_download,
+                process.internet_upload_rate,
+                process.internet_total_upload,
+            ),
+            TrafficViewMode::Local => (
+                process.local_download_rate,
+                process.local_total_download,
+                process.local_upload_rate,
+                process.local_upload_rate,
+            ),
+        }
+    }
+
     pub fn update_processes(&mut self, process_map: ProcessMap) {
         let mut processes: Vec<ProcessInfo> = process_map.into_values().collect();
 
@@ -544,26 +569,30 @@ impl AppState {
                     _ => {} // Both same state, continue to next criteria
                 }
 
+                // Get rates based on current traffic view mode
+                let (a_dl_rate, a_dl_total, a_ul_rate, a_ul_total) = self.get_sort_rates(a);
+                let (b_dl_rate, b_dl_total, b_ul_rate, b_ul_total) = self.get_sort_rates(b);
+
                 // 2. Download rate (descending - higher rates first)
-                match b.download_rate.cmp(&a.download_rate) {
+                match b_dl_rate.cmp(&a_dl_rate) {
                     Ordering::Equal => {} // Continue to next criteria
                     other => return other,
                 }
 
                 // 3. Total download (descending - higher totals first)
-                match b.total_download.cmp(&a.total_download) {
+                match b_dl_total.cmp(&a_dl_total) {
                     Ordering::Equal => {}
                     other => return other,
                 }
 
                 // 4. Upload rate (descending - higher rates first)
-                match b.upload_rate.cmp(&a.upload_rate) {
+                match b_ul_rate.cmp(&a_ul_rate) {
                     Ordering::Equal => {}
                     other => return other,
                 }
 
                 // 5. Total upload (descending - higher totals first)
-                match b.total_upload.cmp(&a.total_upload) {
+                match b_ul_total.cmp(&a_ul_total) {
                     Ordering::Equal => {}
                     other => return other,
                 }
