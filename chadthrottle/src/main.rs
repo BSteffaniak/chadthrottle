@@ -687,9 +687,32 @@ async fn run_app<B: ratatui::backend::Backend>(
                     return Ok(());
                 }
 
-                // If help is shown, any key closes it
+                // If help is shown, handle scroll or close it
                 if app.show_help {
-                    app.show_help = false;
+                    match key.code {
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            app.scroll_help_up();
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            app.scroll_help_down();
+                        }
+                        KeyCode::PageUp => {
+                            // Scroll up by 10 lines
+                            for _ in 0..10 {
+                                app.scroll_help_up();
+                            }
+                        }
+                        KeyCode::PageDown => {
+                            // Scroll down by 10 lines
+                            for _ in 0..10 {
+                                app.scroll_help_down();
+                            }
+                        }
+                        _ => {
+                            app.show_help = false;
+                            app.reset_help_scroll();
+                        }
+                    }
                     continue;
                 }
 
@@ -814,8 +837,21 @@ async fn run_app<B: ratatui::backend::Backend>(
                         KeyCode::Down | KeyCode::Char('j') => {
                             app.select_next_backend();
                         }
+                        KeyCode::PageUp => {
+                            // Scroll up by 10 lines
+                            for _ in 0..10 {
+                                app.scroll_backend_info_up();
+                            }
+                        }
+                        KeyCode::PageDown => {
+                            // Scroll down by 10 lines
+                            for _ in 0..10 {
+                                app.scroll_backend_info_down();
+                            }
+                        }
                         KeyCode::Enter | KeyCode::Char('b') | KeyCode::Char('q') | KeyCode::Esc => {
                             app.show_backend_info = false;
+                            app.reset_backend_info_scroll();
                         }
                         _ => {}
                     }
@@ -844,6 +880,18 @@ async fn run_app<B: ratatui::backend::Backend>(
                         KeyCode::Down | KeyCode::Char('j') => {
                             if let Some(dialog) = &mut app.backend_compatibility_dialog {
                                 dialog.select_next();
+                            }
+                        }
+                        KeyCode::PageUp => {
+                            // Scroll up by 10 lines
+                            for _ in 0..10 {
+                                app.scroll_backend_compat_up();
+                            }
+                        }
+                        KeyCode::PageDown => {
+                            // Scroll down by 10 lines
+                            for _ in 0..10 {
+                                app.scroll_backend_compat_down();
                             }
                         }
                         KeyCode::Enter => {
@@ -1060,6 +1108,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                                                 compatible,
                                                 true, // is_upload
                                             ));
+                                        app.reset_backend_compat_scroll();
                                         app.show_backend_compatibility_dialog = true;
                                         // DON'T close throttle dialog - keep it in background
                                         continue; // Skip applying throttle for now
@@ -1076,6 +1125,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                                                 compatible,
                                                 false, // is_upload=false
                                             ));
+                                        app.reset_backend_compat_scroll();
                                         app.show_backend_compatibility_dialog = true;
                                         // DON'T close throttle dialog - keep it in background
                                         continue; // Skip applying throttle for now
@@ -1133,6 +1183,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                         }
                     }
                     KeyCode::Char('h') | KeyCode::Char('?') => {
+                        app.reset_help_scroll();
                         app.show_help = true;
                     }
                     KeyCode::Char('b') => {
@@ -1158,9 +1209,11 @@ async fn run_app<B: ratatui::backend::Backend>(
                                     config.preferred_socket_mapper.clone();
                             }
                             app.build_backend_items(&backend_info);
+                            app.reset_backend_info_scroll();
                             app.show_backend_info = true;
                         } else {
                             app.show_backend_info = false;
+                            app.reset_backend_info_scroll();
                         }
                     }
                     KeyCode::Char('f') => {
@@ -1189,6 +1242,52 @@ async fn run_app<B: ratatui::backend::Backend>(
                             ui::ViewMode::InterfaceList => app.select_previous_interface(),
                             ui::ViewMode::InterfaceDetail => {} // No selection in detail view
                             ui::ViewMode::ProcessDetail => app.scroll_detail_up(),
+                        }
+                    }
+                    KeyCode::PageUp => {
+                        match app.view_mode {
+                            ui::ViewMode::ProcessView => {
+                                // Select previous by 10
+                                for _ in 0..10 {
+                                    app.select_previous();
+                                }
+                            }
+                            ui::ViewMode::InterfaceList => {
+                                // Scroll interface modal up
+                                for _ in 0..10 {
+                                    app.scroll_interface_modal_up();
+                                }
+                            }
+                            ui::ViewMode::InterfaceDetail => {}
+                            ui::ViewMode::ProcessDetail => {
+                                // Scroll detail view up by 10 lines
+                                for _ in 0..10 {
+                                    app.scroll_detail_up();
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::PageDown => {
+                        match app.view_mode {
+                            ui::ViewMode::ProcessView => {
+                                // Select next by 10
+                                for _ in 0..10 {
+                                    app.select_next();
+                                }
+                            }
+                            ui::ViewMode::InterfaceList => {
+                                // Scroll interface modal down
+                                for _ in 0..10 {
+                                    app.scroll_interface_modal_down();
+                                }
+                            }
+                            ui::ViewMode::InterfaceDetail => {}
+                            ui::ViewMode::ProcessDetail => {
+                                // Scroll detail view down by 10 lines
+                                for _ in 0..10 {
+                                    app.scroll_detail_down();
+                                }
+                            }
                         }
                     }
                     KeyCode::Char('i') => {

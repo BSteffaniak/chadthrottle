@@ -52,6 +52,11 @@ pub struct AppState {
     pub selected_process_detail_pid: Option<i32>, // PID of process being detailed
     pub detail_scroll_offset: usize,              // For scrolling long content
     pub detail_tab: ProcessDetailTab,             // Which tab is active
+    // Modal scroll offsets
+    pub help_scroll_offset: usize,         // For help overlay scrolling
+    pub backend_info_scroll_offset: usize, // For backend info modal scrolling
+    pub interface_modal_scroll_offset: usize, // For interface filter modal scrolling
+    pub backend_compat_scroll_offset: usize, // For backend compatibility dialog scrolling
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -119,12 +124,13 @@ pub enum BackendCompatibilityAction {
     ConvertToAll,
 }
 
+#[derive(Clone)]
 pub struct BackendCompatibilityDialog {
     pub current_backend: String,
     pub traffic_type: crate::process::TrafficType,
     pub compatible_backends: Vec<String>,
-    pub selected_action: usize,
-    pub is_upload: bool,
+    pub selected_action: usize, // Index into available options
+    pub is_upload: bool,        // true if upload backend issue, false if download
 }
 
 impl BackendCompatibilityDialog {
@@ -308,6 +314,10 @@ impl AppState {
             selected_process_detail_pid: None,
             detail_scroll_offset: 0,
             detail_tab: ProcessDetailTab::Overview,
+            help_scroll_offset: 0,
+            backend_info_scroll_offset: 0,
+            interface_modal_scroll_offset: 0,
+            backend_compat_scroll_offset: 0,
         }
     }
 
@@ -337,6 +347,7 @@ impl AppState {
                     self.selected_interface_index = Some(0);
                     self.interface_list_state.select(Some(0));
                 }
+                self.reset_interface_modal_scroll();
                 ViewMode::InterfaceList
             }
             ViewMode::InterfaceList | ViewMode::InterfaceDetail | ViewMode::ProcessDetail => {
@@ -965,6 +976,78 @@ impl AppState {
             None
         }
     }
+
+    // Modal scroll methods
+
+    /// Reset help overlay scroll when opened
+    pub fn reset_help_scroll(&mut self) {
+        self.help_scroll_offset = 0;
+    }
+
+    /// Scroll help overlay up
+    pub fn scroll_help_up(&mut self) {
+        self.help_scroll_offset = self.help_scroll_offset.saturating_sub(1);
+    }
+
+    /// Scroll help overlay down
+    pub fn scroll_help_down(&mut self) {
+        self.help_scroll_offset = self.help_scroll_offset.saturating_add(1);
+    }
+
+    /// Reset backend info scroll when opened
+    pub fn reset_backend_info_scroll(&mut self) {
+        self.backend_info_scroll_offset = 0;
+    }
+
+    /// Scroll backend info modal up
+    pub fn scroll_backend_info_up(&mut self) {
+        self.backend_info_scroll_offset = self.backend_info_scroll_offset.saturating_sub(1);
+    }
+
+    /// Scroll backend info modal down
+    pub fn scroll_backend_info_down(&mut self) {
+        self.backend_info_scroll_offset = self.backend_info_scroll_offset.saturating_add(1);
+    }
+
+    /// Reset interface modal scroll when opened
+    pub fn reset_interface_modal_scroll(&mut self) {
+        self.interface_modal_scroll_offset = 0;
+    }
+
+    /// Scroll interface modal up
+    pub fn scroll_interface_modal_up(&mut self) {
+        self.interface_modal_scroll_offset = self.interface_modal_scroll_offset.saturating_sub(1);
+    }
+
+    /// Scroll interface modal down
+    pub fn scroll_interface_modal_down(&mut self) {
+        self.interface_modal_scroll_offset = self.interface_modal_scroll_offset.saturating_add(1);
+    }
+
+    /// Reset backend compatibility dialog scroll when opened
+    pub fn reset_backend_compat_scroll(&mut self) {
+        self.backend_compat_scroll_offset = 0;
+    }
+
+    /// Scroll backend compatibility dialog up
+    pub fn scroll_backend_compat_up(&mut self) {
+        self.backend_compat_scroll_offset = self.backend_compat_scroll_offset.saturating_sub(1);
+    }
+
+    /// Scroll backend compatibility dialog down
+    pub fn scroll_backend_compat_down(&mut self) {
+        self.backend_compat_scroll_offset = self.backend_compat_scroll_offset.saturating_add(1);
+    }
+
+    /// Clamp scroll offset to content bounds
+    /// content_lines: Total number of lines in content
+    /// visible_height: Height of visible area (including borders)
+    pub fn clamp_scroll(scroll_offset: usize, content_lines: usize, visible_height: u16) -> usize {
+        // Account for borders (top + bottom = 2) and padding
+        let usable_height = visible_height.saturating_sub(3) as usize;
+        let max_scroll = content_lines.saturating_sub(usable_height);
+        scroll_offset.min(max_scroll)
+    }
 }
 
 pub fn draw_ui(f: &mut Frame, app: &mut AppState) {
@@ -1021,7 +1104,7 @@ pub fn draw_ui_with_backend_info(
 
     // Help overlay
     if app.show_help {
-        draw_help_overlay(f, f.area());
+        draw_help_overlay(f, f.area(), app);
     }
 
     // Throttle dialog
@@ -1043,8 +1126,8 @@ pub fn draw_ui_with_backend_info(
 
     // Backend compatibility dialog (highest priority - renders on top of everything)
     if app.show_backend_compatibility_dialog {
-        if let Some(dialog) = &app.backend_compatibility_dialog {
-            draw_backend_compatibility_dialog(f, f.area(), dialog);
+        if let Some(dialog) = app.backend_compatibility_dialog.clone() {
+            draw_backend_compatibility_dialog(f, f.area(), app, &dialog);
         }
     }
 }
@@ -1385,7 +1468,7 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &AppState) {
     f.render_widget(status, area);
 }
 
-fn draw_help_overlay(f: &mut Frame, area: Rect) {
+fn draw_help_overlay(f: &mut Frame, area: Rect, app: &mut AppState) {
     // Auto-generate help text from centralized keybindings
     let mut help_text = vec![
         Line::from(""),
@@ -1405,10 +1488,19 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
     }
 
     help_text.push(Line::from(""));
-    help_text.push(Line::from("Press any key to close..."));
+    help_text.push(Line::from("Use ↑↓ to scroll, any other key to close"));
+
+    let help_area = centered_rect(60, 50, area);
+
+    // Clamp scroll offset to content bounds
+    let content_lines = help_text.len();
+    let clamped_scroll =
+        AppState::clamp_scroll(app.help_scroll_offset, content_lines, help_area.height);
+    app.help_scroll_offset = clamped_scroll;
 
     let help = Paragraph::new(help_text)
         .style(Style::default().bg(Color::Black).fg(Color::White))
+        .scroll((clamped_scroll as u16, 0))
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -1416,7 +1508,6 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
                 .style(Style::default().fg(Color::Cyan)),
         );
 
-    let help_area = centered_rect(60, 50, area);
     f.render_widget(ratatui::widgets::Clear, help_area);
     f.render_widget(help, help_area);
 }
@@ -1532,6 +1623,7 @@ fn draw_throttle_dialog(f: &mut Frame, area: Rect, app: &AppState) {
 fn draw_backend_compatibility_dialog(
     f: &mut Frame,
     area: Rect,
+    app: &mut AppState,
     dialog: &BackendCompatibilityDialog,
 ) {
     // Build option list
@@ -1605,15 +1697,27 @@ fn draw_backend_compatibility_dialog(
         Style::default().fg(Color::DarkGray),
     )));
 
-    // Render paragraph
-    let paragraph = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Backend Incompatibility")
-            .style(Style::default().fg(Color::Red)),
-    );
+    let dialog_area = centered_rect(80, 50, area);
 
-    let dialog_area = centered_rect(70, 60, area);
+    // Clamp scroll offset to content bounds
+    let content_lines = lines.len();
+    let clamped_scroll = AppState::clamp_scroll(
+        app.backend_compat_scroll_offset,
+        content_lines,
+        dialog_area.height,
+    );
+    app.backend_compat_scroll_offset = clamped_scroll;
+
+    // Render paragraph
+    let paragraph = Paragraph::new(lines)
+        .scroll((clamped_scroll as u16, 0))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Backend Incompatibility (↑↓ to scroll)")
+                .style(Style::default().fg(Color::Red)),
+        );
+
     f.render_widget(Clear, dialog_area);
     f.render_widget(paragraph, dialog_area);
 }
@@ -1716,7 +1820,7 @@ fn draw_bandwidth_graph(f: &mut Frame, area: Rect, app: &AppState) {
     f.render_widget(instructions, inst_area);
 }
 
-fn draw_backend_info(f: &mut Frame, area: Rect, app: &AppState, backend_info: &BackendInfo) {
+fn draw_backend_info(f: &mut Frame, area: Rect, app: &mut AppState, backend_info: &BackendInfo) {
     let mut text = vec![Line::from("")];
 
     text.push(Line::from(Span::styled(
@@ -2219,18 +2323,29 @@ fn draw_backend_info(f: &mut Frame, area: Rect, app: &AppState, backend_info: &B
         Style::default().fg(Color::DarkGray),
     )));
 
+    let backend_area = centered_rect(80, 80, area);
+
+    // Clamp scroll offset to content bounds
+    let content_lines = text.len();
+    let clamped_scroll = AppState::clamp_scroll(
+        app.backend_info_scroll_offset,
+        content_lines,
+        backend_area.height,
+    );
+    app.backend_info_scroll_offset = clamped_scroll;
+
     let backend_widget = Paragraph::new(text)
         .style(Style::default().bg(Color::Black).fg(Color::White))
+        .scroll((clamped_scroll as u16, 0))
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("ChadThrottle - Backends")
+                .title("Backends (↑↓ to scroll)")
                 .style(Style::default().fg(Color::Cyan)),
         );
 
-    let popup_area = centered_rect(70, 80, area);
-    f.render_widget(Clear, popup_area);
-    f.render_widget(backend_widget, popup_area);
+    f.render_widget(Clear, backend_area);
+    f.render_widget(backend_widget, backend_area);
 }
 
 fn draw_interface_list(f: &mut Frame, area: Rect, app: &mut AppState) {
@@ -2568,7 +2683,7 @@ fn draw_interface_detail(f: &mut Frame, area: Rect, app: &mut AppState) {
     f.render_widget(list, inner_list_area);
 }
 
-fn draw_interface_modal(f: &mut Frame, area: Rect, app: &AppState) {
+fn draw_interface_modal(f: &mut Frame, area: Rect, app: &mut AppState) {
     let mut text = vec![Line::from("")];
 
     // Title
@@ -2663,31 +2778,47 @@ fn draw_interface_modal(f: &mut Frame, area: Rect, app: &AppState) {
         Style::default().fg(Color::DarkGray),
     )));
 
+    let modal_area = centered_rect(70, 60, area);
+
+    // Clamp scroll offset to content bounds
+    let content_lines = text.len();
+    let clamped_scroll = AppState::clamp_scroll(
+        app.interface_modal_scroll_offset,
+        content_lines,
+        modal_area.height,
+    );
+    app.interface_modal_scroll_offset = clamped_scroll;
+
     let widget = Paragraph::new(text)
         .style(Style::default().bg(Color::Black).fg(Color::White))
+        .scroll((clamped_scroll as u16, 0))
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Interface Filter (Live)")
+                .title("Interface Filter (↑↓ to scroll)")
                 .style(Style::default().fg(Color::Cyan)),
         );
 
-    let popup_area = centered_rect(70, 70, area);
-    f.render_widget(Clear, popup_area);
-    f.render_widget(widget, popup_area);
+    f.render_widget(Clear, modal_area);
+    f.render_widget(widget, modal_area);
 }
 // Process Detail View Rendering
 
-fn draw_process_detail(f: &mut Frame, area: Rect, app: &AppState) {
-    // Get the process details
+fn draw_process_detail(f: &mut Frame, area: Rect, app: &mut AppState) {
+    // Get the process being detailed (still alive in process list?)
+    // Clone it to avoid borrow checker issues
     let process = match app.get_detail_process() {
-        Some(p) => p,
+        Some(p) => p.clone(),
         None => {
-            // Process no longer exists, show message
-            let msg = Paragraph::new("Process no longer exists. Press Esc to go back.")
+            // Process no longer exists - show message and return to process list
+            let message = Paragraph::new("Process no longer exists (press Esc to return)")
                 .style(Style::default().fg(Color::Red))
-                .block(Block::default().borders(Borders::ALL).title("Error"));
-            f.render_widget(msg, area);
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Process Not Found"),
+                );
+            f.render_widget(message, area);
             return;
         }
     };
@@ -2702,16 +2833,14 @@ fn draw_process_detail(f: &mut Frame, area: Rect, app: &AppState) {
         .split(area);
 
     // Draw combined title with tabs
-    draw_detail_header_with_tabs(f, chunks[0], process, app.detail_tab);
+    draw_detail_header_with_tabs(f, chunks[0], &process, app.detail_tab);
 
     // Draw content based on active tab
     match app.detail_tab {
-        ProcessDetailTab::Overview => draw_detail_overview(f, chunks[1], process, &app.history),
-        ProcessDetailTab::Connections => {
-            draw_detail_connections(f, chunks[1], process, app.detail_scroll_offset)
-        }
-        ProcessDetailTab::Traffic => draw_detail_traffic(f, chunks[1], process),
-        ProcessDetailTab::System => draw_detail_system(f, chunks[1], process),
+        ProcessDetailTab::Overview => draw_detail_overview(f, chunks[1], &process, app),
+        ProcessDetailTab::Connections => draw_detail_connections(f, chunks[1], &process, app),
+        ProcessDetailTab::Traffic => draw_detail_traffic(f, chunks[1], &process, app),
+        ProcessDetailTab::System => draw_detail_system(f, chunks[1], &process, app),
     }
 }
 
@@ -2771,12 +2900,8 @@ fn draw_detail_header_with_tabs(
     f.render_widget(header_widget, area);
 }
 
-fn draw_detail_overview(
-    f: &mut Frame,
-    area: Rect,
-    process: &ProcessInfo,
-    history: &HistoryTracker,
-) {
+fn draw_detail_overview(f: &mut Frame, area: Rect, process: &ProcessInfo, app: &mut AppState) {
+    let history = &app.history;
     let mut text = vec![];
 
     // Basic Information
@@ -3079,16 +3204,23 @@ fn draw_detail_overview(
 
     text.push(Line::from(""));
     text.push(Line::from(Span::styled(
-        "[Tab] Switch tab  [t] Throttle  [g] Graph  [Esc] Back",
+        "[↑↓] Scroll  [Tab] Switch tab  [t] Throttle  [g] Graph  [Esc] Back",
         Style::default().fg(Color::DarkGray),
     )));
 
-    let paragraph =
-        Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("Overview"));
+    // Clamp scroll offset to content bounds
+    let content_lines = text.len();
+    let clamped_scroll =
+        AppState::clamp_scroll(app.detail_scroll_offset, content_lines, area.height);
+    app.detail_scroll_offset = clamped_scroll;
+
+    let paragraph = Paragraph::new(text)
+        .scroll((clamped_scroll as u16, 0))
+        .block(Block::default().borders(Borders::ALL).title("Overview"));
     f.render_widget(paragraph, area);
 }
 
-fn draw_detail_connections(f: &mut Frame, area: Rect, process: &ProcessInfo, scroll_offset: usize) {
+fn draw_detail_connections(f: &mut Frame, area: Rect, process: &ProcessInfo, app: &mut AppState) {
     let mut text = vec![];
 
     text.push(Line::from(""));
@@ -3139,13 +3271,8 @@ fn draw_detail_connections(f: &mut Frame, area: Rect, process: &ProcessInfo, scr
             order_a.cmp(&order_b)
         });
 
-        // Calculate visible window based on scroll offset
-        let visible_height = (area.height as usize).saturating_sub(10); // Account for header/footer
-        let start_idx = scroll_offset.min(sorted_conns.len().saturating_sub(1));
-        let end_idx = (start_idx + visible_height).min(sorted_conns.len());
-
-        // Render visible connections
-        for conn in &sorted_conns[start_idx..end_idx] {
+        // Render all connections (scrolling handled by Paragraph widget)
+        for conn in &sorted_conns {
             let local = format!("{}:{}", format_ip_addr(&conn.local_addr), conn.local_port);
             let remote = if conn.remote_port == 0 {
                 "*:*".to_string()
@@ -3186,17 +3313,6 @@ fn draw_detail_connections(f: &mut Frame, area: Rect, process: &ProcessInfo, scr
                 Span::styled(format!("{:8}", state_display), state_style),
             ]));
         }
-
-        // Show scroll indicator if needed
-        if sorted_conns.len() > visible_height {
-            text.push(Line::from(""));
-            text.push(Line::from(format!(
-                "  Showing {}-{} of {} connections (scroll with ↑↓)",
-                start_idx + 1,
-                end_idx,
-                sorted_conns.len()
-            )));
-        }
     }
 
     text.push(Line::from(""));
@@ -3206,8 +3322,15 @@ fn draw_detail_connections(f: &mut Frame, area: Rect, process: &ProcessInfo, scr
         Style::default().fg(Color::DarkGray),
     )));
 
-    let paragraph =
-        Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("Connections"));
+    // Clamp scroll offset to content bounds
+    let content_lines = text.len();
+    let clamped_scroll =
+        AppState::clamp_scroll(app.detail_scroll_offset, content_lines, area.height);
+    app.detail_scroll_offset = clamped_scroll;
+
+    let paragraph = Paragraph::new(text)
+        .scroll((clamped_scroll as u16, 0))
+        .block(Block::default().borders(Borders::ALL).title("Connections"));
     f.render_widget(paragraph, area);
 }
 
@@ -3219,7 +3342,7 @@ fn format_ip_addr(addr: &IpAddr) -> String {
     }
 }
 
-fn draw_detail_traffic(f: &mut Frame, area: Rect, process: &ProcessInfo) {
+fn draw_detail_traffic(f: &mut Frame, area: Rect, process: &ProcessInfo, app: &mut AppState) {
     let mut text = vec![];
 
     text.push(Line::from(""));
@@ -3373,19 +3496,27 @@ fn draw_detail_traffic(f: &mut Frame, area: Rect, process: &ProcessInfo) {
     text.push(Line::from(""));
     text.push(Line::from(""));
     text.push(Line::from(Span::styled(
-        "[g] Show bandwidth graph  [Tab] Switch tab  [Esc] Back",
+        "[↑↓] Scroll  [Tab] Switch tab  [Esc] Back",
         Style::default().fg(Color::DarkGray),
     )));
 
-    let paragraph = Paragraph::new(text).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Traffic Details"),
-    );
+    // Clamp scroll offset to content bounds
+    let content_lines = text.len();
+    let clamped_scroll =
+        AppState::clamp_scroll(app.detail_scroll_offset, content_lines, area.height);
+    app.detail_scroll_offset = clamped_scroll;
+
+    let paragraph = Paragraph::new(text)
+        .scroll((clamped_scroll as u16, 0))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Traffic Details"),
+        );
     f.render_widget(paragraph, area);
 }
 
-fn draw_detail_system(f: &mut Frame, area: Rect, process: &ProcessInfo) {
+fn draw_detail_system(f: &mut Frame, area: Rect, process: &ProcessInfo, app: &mut AppState) {
     let details = crate::process::ProcessDetails::from_pid(process.pid);
 
     let mut text = vec![];
@@ -3514,14 +3645,22 @@ fn draw_detail_system(f: &mut Frame, area: Rect, process: &ProcessInfo) {
     text.push(Line::from(""));
     text.push(Line::from(""));
     text.push(Line::from(Span::styled(
-        "[Tab] Switch tab  [Esc] Back",
+        "[↑↓] Scroll  [Tab] Switch tab  [Esc] Back",
         Style::default().fg(Color::DarkGray),
     )));
 
-    let paragraph = Paragraph::new(text).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("System Information"),
-    );
+    // Clamp scroll offset to content bounds
+    let content_lines = text.len();
+    let clamped_scroll =
+        AppState::clamp_scroll(app.detail_scroll_offset, content_lines, area.height);
+    app.detail_scroll_offset = clamped_scroll;
+
+    let paragraph = Paragraph::new(text)
+        .scroll((clamped_scroll as u16, 0))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("System Information"),
+        );
     f.render_widget(paragraph, area);
 }
