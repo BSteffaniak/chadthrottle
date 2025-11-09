@@ -15,6 +15,7 @@ use ratatui::{
 };
 use std::collections::HashMap;
 use std::net::IpAddr;
+use unicode_width::UnicodeWidthStr;
 
 pub struct AppState {
     pub process_list: Vec<ProcessInfo>,
@@ -909,7 +910,7 @@ pub fn draw_ui_with_backend_info(
         .constraints([
             Constraint::Length(3), // Header
             Constraint::Min(10),   // Main content area
-            Constraint::Length(3), // Status bar
+            Constraint::Length(5), // Status bar (allows wrapping to 2-3 lines)
         ])
         .split(f.area());
 
@@ -1173,6 +1174,55 @@ fn draw_process_list(f: &mut Frame, area: Rect, app: &mut AppState) {
     f.render_stateful_widget(list, inner_list_area, &mut app.list_state);
 }
 
+/// Wrap spans into multiple lines based on available width
+/// This ensures the status bar doesn't get truncated on narrow terminals
+/// Uses lookahead to keep related spans (like [key] description) together
+fn wrap_spans_to_lines(spans: Vec<Span>, max_width: u16) -> Vec<Line> {
+    let mut lines = vec![];
+    let mut current_line = vec![];
+    let mut current_width = 0;
+    let mut i = 0;
+
+    while i < spans.len() {
+        let span = &spans[i];
+        let span_width = span.content.width() as u16;
+
+        // LOOKAHEAD: Check if this is a styled span (yellow key like "[b]")
+        // If so, calculate combined width with the next span (description)
+        let lookahead_width = if span.style.fg == Some(Color::Yellow) && i + 1 < spans.len() {
+            // This is a yellow key span, check next span (likely the description)
+            let next_span = &spans[i + 1];
+            span_width + next_span.content.width() as u16
+        } else {
+            // Not a key, just use this span's width
+            span_width
+        };
+
+        // If adding this span (and its paired span if applicable) would overflow, wrap
+        if current_width + lookahead_width > max_width && !current_line.is_empty() {
+            lines.push(Line::from(std::mem::take(&mut current_line)));
+            current_width = 0;
+        }
+
+        // Add the current span
+        current_width += span_width;
+        current_line.push(span.clone());
+        i += 1;
+    }
+
+    // Add remaining spans as the last line
+    if !current_line.is_empty() {
+        lines.push(Line::from(current_line));
+    }
+
+    // Return at least one empty line if no content
+    if lines.is_empty() {
+        lines.push(Line::from(""));
+    }
+
+    lines
+}
+
 fn draw_status_bar(f: &mut Frame, area: Rect, app: &AppState) {
     // Auto-generate status bar from centralized keybindings
     let mut spans = vec![];
@@ -1256,8 +1306,10 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &AppState) {
         }
     }
 
-    let status =
-        Paragraph::new(vec![Line::from(spans)]).block(Block::default().borders(Borders::ALL));
+    // Wrap spans to multiple lines if they exceed terminal width
+    let available_width = area.width.saturating_sub(2); // minus left/right borders
+    let wrapped_lines = wrap_spans_to_lines(spans, available_width);
+    let status = Paragraph::new(wrapped_lines).block(Block::default().borders(Borders::ALL));
 
     f.render_widget(status, area);
 }

@@ -238,6 +238,7 @@ dependencies = [
  "serde_json",
  "sysinfo",
  "tokio",
+ "unicode-width",
  "windows 0.58.0",
 ]
 
