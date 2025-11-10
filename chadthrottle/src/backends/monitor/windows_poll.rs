@@ -26,9 +26,12 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{BOOLEAN, NO_ERROR};
 #[cfg(target_os = "windows")]
 use windows::Win32::NetworkManagement::IpHelper::{
-    GetPerTcpConnectionEStats, SetPerTcpConnectionEStats, TCP_ESTATS_DATA_ROD_v0,
+    GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, GetPerTcpConnectionEStats,
+    IP_ADAPTER_ADDRESSES_LH, SetPerTcpConnectionEStats, TCP_ESTATS_DATA_ROD_v0,
     TCP_ESTATS_DATA_RW_v0, TcpConnectionEstatsData,
 };
+#[cfg(target_os = "windows")]
+use windows::Win32::Networking::WinSock::{AF_UNSPEC, SOCKADDR_IN, SOCKADDR_IN6};
 
 // MIB_TCPROW structure (Windows doesn't export this in the rust crate, so we define it)
 #[cfg(target_os = "windows")]
@@ -71,6 +74,18 @@ struct ConnectionTracker {
 
     // Per-process aggregated bandwidth
     process_bandwidth: HashMap<i32, ProcessBandwidth>,
+
+    // Per-interface aggregated bandwidth
+    interface_bandwidth: HashMap<String, InterfaceBandwidth>,
+
+    // Per-process-interface aggregated bandwidth
+    process_interface_bandwidth: HashMap<(i32, String), ProcessInterfaceBandwidth>,
+
+    // Cached interface list (refreshed periodically)
+    #[cfg(target_os = "windows")]
+    cached_interfaces: Vec<WindowsNetworkInterface>,
+    #[cfg(target_os = "windows")]
+    last_interface_refresh: Instant,
 
     // Full connection map for populating process details
     connection_map: ConnectionMap,
@@ -168,6 +183,59 @@ struct ProcessBandwidth {
     connection_count: usize,
 }
 
+/// Aggregated bandwidth per network interface
+#[derive(Debug, Clone)]
+struct InterfaceBandwidth {
+    name: String,
+
+    // Process-lifetime accumulated deltas
+    lifetime_rx_bytes: u64,
+    lifetime_tx_bytes: u64,
+
+    // Previous lifetime values for rate calculation
+    last_lifetime_rx_bytes: u64,
+    last_lifetime_tx_bytes: u64,
+
+    // Calculated rates (bytes/sec)
+    rx_rate: u64,
+    tx_rate: u64,
+}
+
+/// Aggregated bandwidth per process-interface pair
+#[derive(Debug, Clone)]
+struct ProcessInterfaceBandwidth {
+    // Lifetime accumulated deltas
+    rx_bytes: u64,
+    tx_bytes: u64,
+
+    // Previous values for rate calculation
+    last_rx_bytes: u64,
+    last_tx_bytes: u64,
+
+    // Traffic categorization
+    internet_rx_bytes: u64,
+    internet_tx_bytes: u64,
+    local_rx_bytes: u64,
+    local_tx_bytes: u64,
+
+    last_internet_rx_bytes: u64,
+    last_internet_tx_bytes: u64,
+    last_local_rx_bytes: u64,
+    last_local_tx_bytes: u64,
+}
+
+/// Windows network interface information
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone)]
+struct WindowsNetworkInterface {
+    name: String,
+    friendly_name: String,
+    mac_address: Option<String>,
+    ip_addresses: Vec<IpAddr>,
+    is_up: bool,
+    is_loopback: bool,
+}
+
 impl WindowsPollingMonitor {
     /// Create new monitor with automatic tier detection
     pub fn new() -> Result<Self> {
@@ -195,11 +263,38 @@ impl WindowsPollingMonitor {
             udp_connections: HashMap::new(),
             udp6_connections: HashMap::new(),
             process_bandwidth: HashMap::new(),
+            interface_bandwidth: HashMap::new(),
+            process_interface_bandwidth: HashMap::new(),
+            #[cfg(target_os = "windows")]
+            cached_interfaces: Vec::new(),
+            #[cfg(target_os = "windows")]
+            last_interface_refresh: Instant::now(),
             connection_map: ConnectionMap::default(),
             last_update: Instant::now(),
         }));
 
         let shutdown_flag = Arc::new(AtomicBool::new(false));
+
+        // Initialize interface cache immediately on Windows
+        #[cfg(target_os = "windows")]
+        {
+            match enumerate_windows_interfaces() {
+                Ok(interfaces) => {
+                    let mut tracker = connection_tracker.lock().unwrap();
+                    tracker.cached_interfaces = interfaces;
+                    log::info!(
+                        "Initialized network interface cache: {} interfaces",
+                        tracker.cached_interfaces.len()
+                    );
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Failed to enumerate network interfaces during initialization: {}",
+                        e
+                    );
+                }
+            }
+        }
 
         // Start polling thread
         let polling_thread = Some(start_polling_thread(
@@ -272,6 +367,10 @@ impl MonitorBackend for WindowsPollingMonitor {
         let tracker = self.connection_tracker.lock().unwrap();
         let mut process_map = ProcessMap::new();
 
+        // Calculate elapsed time for rate calculations
+        let now = Instant::now();
+        let elapsed = now.duration_since(tracker.last_update).as_secs_f64();
+
         match tracker.tier {
             MonitoringTier::Basic => {
                 // Show processes with connections (no bandwidth without admin)
@@ -326,24 +425,220 @@ impl MonitorBackend for WindowsPollingMonitor {
                     info.local_total_download = bandwidth.lifetime_local_rx_bytes;
                     info.local_total_upload = bandwidth.lifetime_local_tx_bytes;
 
+                    // Populate per-interface stats for this process
+                    info.interface_stats = tracker
+                        .process_interface_bandwidth
+                        .iter()
+                        .filter(|((p, _), _)| *p == pid)
+                        .map(|((_, iface), bw)| {
+                            // Calculate rates based on deltas
+                            let rx_diff = bw.rx_bytes.saturating_sub(bw.last_rx_bytes);
+                            let tx_diff = bw.tx_bytes.saturating_sub(bw.last_tx_bytes);
+
+                            let download_rate = if elapsed > 0.0 {
+                                (rx_diff as f64 / elapsed) as u64
+                            } else {
+                                0
+                            };
+                            let upload_rate = if elapsed > 0.0 {
+                                (tx_diff as f64 / elapsed) as u64
+                            } else {
+                                0
+                            };
+
+                            // Calculate categorized rates
+                            let internet_rx_diff = bw
+                                .internet_rx_bytes
+                                .saturating_sub(bw.last_internet_rx_bytes);
+                            let internet_tx_diff = bw
+                                .internet_tx_bytes
+                                .saturating_sub(bw.last_internet_tx_bytes);
+                            let local_rx_diff =
+                                bw.local_rx_bytes.saturating_sub(bw.last_local_rx_bytes);
+                            let local_tx_diff =
+                                bw.local_tx_bytes.saturating_sub(bw.last_local_tx_bytes);
+
+                            let internet_download_rate = if elapsed > 0.0 {
+                                (internet_rx_diff as f64 / elapsed) as u64
+                            } else {
+                                0
+                            };
+                            let internet_upload_rate = if elapsed > 0.0 {
+                                (internet_tx_diff as f64 / elapsed) as u64
+                            } else {
+                                0
+                            };
+                            let local_download_rate = if elapsed > 0.0 {
+                                (local_rx_diff as f64 / elapsed) as u64
+                            } else {
+                                0
+                            };
+                            let local_upload_rate = if elapsed > 0.0 {
+                                (local_tx_diff as f64 / elapsed) as u64
+                            } else {
+                                0
+                            };
+
+                            (
+                                iface.clone(),
+                                crate::process::InterfaceStats {
+                                    download_rate,
+                                    upload_rate,
+                                    total_download: bw.rx_bytes,
+                                    total_upload: bw.tx_bytes,
+                                    internet_download_rate,
+                                    internet_upload_rate,
+                                    local_download_rate,
+                                    local_upload_rate,
+                                },
+                            )
+                        })
+                        .collect();
+
                     process_map.insert(pid, info);
                 }
             }
         }
 
-        // Populate connection details for each process
+        // Build interface map with bandwidth statistics (INSIDE LOCK - no clones!)
+        let mut interface_map = InterfaceMap::new();
+
+        #[cfg(target_os = "windows")]
+        {
+            use crate::process::InterfaceInfo;
+            use std::collections::HashSet;
+
+            log::info!(
+                "Building InterfaceMap: {} cached interfaces, {} TCP connections, {} TCP6 connections",
+                tracker.cached_interfaces.len(),
+                tracker.tcp_connections.len(),
+                tracker.tcp6_connections.len()
+            );
+
+            for interface in &tracker.cached_interfaces {
+                // Skip interfaces that are down or have no IPs
+                if !interface.is_up || interface.ip_addresses.is_empty() {
+                    log::debug!(
+                        "Skipping interface '{}': is_up={}, ip_count={}",
+                        interface.friendly_name,
+                        interface.is_up,
+                        interface.ip_addresses.len()
+                    );
+                    continue;
+                }
+
+                let iface_name = &interface.friendly_name;
+
+                log::debug!(
+                    "Processing interface '{}': IPs = {:?}",
+                    iface_name,
+                    interface.ip_addresses
+                );
+
+                // Get bandwidth stats for this interface (just reading, no clone)
+                let (download_rate, upload_rate) = tracker
+                    .interface_bandwidth
+                    .get(iface_name)
+                    .map(|bw| (bw.rx_rate, bw.tx_rate))
+                    .unwrap_or((0, 0));
+
+                // Count processes using this interface (iterating references, no clone!)
+                let mut process_pids: HashSet<i32> = HashSet::new();
+                let mut matched_tcp_connections = 0;
+                let mut unmatched_tcp_connections = 0;
+
+                // Check TCP connections
+                for conn in tracker.tcp_connections.values() {
+                    if let Some(conn_iface) =
+                        get_interface_for_ip(&conn.local_addr, &tracker.cached_interfaces)
+                    {
+                        if conn_iface == *iface_name {
+                            process_pids.insert(conn.pid);
+                            matched_tcp_connections += 1;
+                            log::trace!(
+                                "Matched TCP connection: local_addr={} -> interface='{}' (PID {})",
+                                conn.local_addr,
+                                iface_name,
+                                conn.pid
+                            );
+                        }
+                    } else {
+                        unmatched_tcp_connections += 1;
+                        log::trace!(
+                            "Unmatched TCP connection: local_addr={} (PID {}) - no interface match",
+                            conn.local_addr,
+                            conn.pid
+                        );
+                    }
+                }
+
+                let mut matched_tcp6_connections = 0;
+                let mut unmatched_tcp6_connections = 0;
+
+                // Check TCP6 connections
+                for conn in tracker.tcp6_connections.values() {
+                    if let Some(conn_iface) =
+                        get_interface_for_ip(&conn.local_addr, &tracker.cached_interfaces)
+                    {
+                        if conn_iface == *iface_name {
+                            process_pids.insert(conn.pid);
+                            matched_tcp6_connections += 1;
+                            log::trace!(
+                                "Matched TCP6 connection: local_addr={} -> interface='{}' (PID {})",
+                                conn.local_addr,
+                                iface_name,
+                                conn.pid
+                            );
+                        }
+                    } else {
+                        unmatched_tcp6_connections += 1;
+                        log::trace!(
+                            "Unmatched TCP6 connection: local_addr={} (PID {}) - no interface match",
+                            conn.local_addr,
+                            conn.pid
+                        );
+                    }
+                }
+
+                let process_count = process_pids.len();
+
+                log::info!(
+                    "Interface '{}': matched {}/{} TCP, {}/{} TCP6 connections, {} unique PIDs",
+                    iface_name,
+                    matched_tcp_connections,
+                    matched_tcp_connections + unmatched_tcp_connections,
+                    matched_tcp6_connections,
+                    matched_tcp6_connections + unmatched_tcp6_connections,
+                    process_count
+                );
+
+                // Only clone small strings and metadata (not entire connection list!)
+                interface_map.insert(
+                    iface_name.clone(),
+                    InterfaceInfo {
+                        name: iface_name.clone(),
+                        mac_address: interface.mac_address.clone(),
+                        ip_addresses: interface.ip_addresses.clone(),
+                        is_up: interface.is_up,
+                        is_loopback: interface.is_loopback,
+                        total_download_rate: download_rate,
+                        total_upload_rate: upload_rate,
+                        process_count,
+                    },
+                );
+            }
+        }
+
+        // Get connection map for populate_connections() (this clone is unavoidable)
         let conn_map = tracker.connection_map.clone();
 
-        // Drop the tracker lock before calling populate_connections
+        // Now drop the lock
         drop(tracker);
 
         let socket_map = &conn_map.socket_to_pid;
         for process in process_map.values_mut() {
             process.populate_connections(&conn_map, socket_map);
         }
-
-        // Interface map not implemented for polling backend
-        let interface_map = InterfaceMap::new();
 
         Ok((process_map, interface_map))
     }
@@ -651,12 +946,42 @@ fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()
     let now = Instant::now();
     let elapsed = now.duration_since(tracker.last_update).as_secs_f64();
 
+    // Refresh interface cache if needed (every 10 seconds)
+    #[cfg(target_os = "windows")]
+    let refresh_interfaces = now.duration_since(tracker.last_interface_refresh).as_secs() >= 10;
+    #[cfg(target_os = "windows")]
+    if refresh_interfaces {
+        match enumerate_windows_interfaces() {
+            Ok(interfaces) => {
+                tracker.cached_interfaces = interfaces;
+                tracker.last_interface_refresh = now;
+                log::debug!(
+                    "Refreshed network interface cache: {} interfaces",
+                    tracker.cached_interfaces.len()
+                );
+            }
+            Err(e) => {
+                log::warn!("Failed to enumerate network interfaces: {}", e);
+            }
+        }
+    }
+
     // Rebuild process_bandwidth map from current connections
     let mut new_process_bandwidth: HashMap<i32, ProcessBandwidth> = HashMap::new();
 
     // Track connection updates (to avoid borrow checker issues)
     let mut tcp_connection_updates: Vec<(ConnectionKey, u64, u64)> = Vec::new();
     let mut tcp6_connection_updates: Vec<(ConnectionKey, u64, u64)> = Vec::new();
+
+    // Track interface updates (to avoid borrow checker issues)
+    #[cfg(target_os = "windows")]
+    let mut interface_updates: Vec<(
+        String,
+        u64,
+        u64,
+        i32,
+        crate::traffic_classifier::TrafficCategory,
+    )> = Vec::new();
 
     // Log connection counts for diagnostics
     log::info!(
@@ -776,6 +1101,20 @@ fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()
                         entry.lifetime_local_rx_bytes += delta_rx;
                         entry.lifetime_local_tx_bytes += delta_tx;
                     }
+                }
+
+                // Queue interface update (avoid borrow checker issues)
+                #[cfg(target_os = "windows")]
+                if let Some(interface_name) =
+                    get_interface_for_ip(&stats.local_addr, &tracker.cached_interfaces)
+                {
+                    interface_updates.push((
+                        interface_name,
+                        delta_rx,
+                        delta_tx,
+                        stats.pid,
+                        traffic_category,
+                    ));
                 }
             }
 
@@ -903,6 +1242,20 @@ fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()
                         entry.lifetime_local_rx_bytes += delta_rx;
                         entry.lifetime_local_tx_bytes += delta_tx;
                     }
+                }
+
+                // Queue interface update (avoid borrow checker issues)
+                #[cfg(target_os = "windows")]
+                if let Some(interface_name) =
+                    get_interface_for_ip(&stats.local_addr, &tracker.cached_interfaces)
+                {
+                    interface_updates.push((
+                        interface_name,
+                        delta_rx,
+                        delta_tx,
+                        stats.pid,
+                        traffic_category,
+                    ));
                 }
             }
 
@@ -1036,6 +1389,60 @@ fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()
         }
     }
 
+    // Apply queued interface updates
+    #[cfg(target_os = "windows")]
+    for (interface_name, delta_rx, delta_tx, pid, traffic_category) in interface_updates {
+        // Update per-interface bandwidth
+        let iface_entry = tracker
+            .interface_bandwidth
+            .entry(interface_name.clone())
+            .or_insert_with(|| InterfaceBandwidth {
+                name: interface_name.clone(),
+                lifetime_rx_bytes: 0,
+                lifetime_tx_bytes: 0,
+                last_lifetime_rx_bytes: 0,
+                last_lifetime_tx_bytes: 0,
+                rx_rate: 0,
+                tx_rate: 0,
+            });
+
+        iface_entry.lifetime_rx_bytes += delta_rx;
+        iface_entry.lifetime_tx_bytes += delta_tx;
+
+        // Update per-process-interface bandwidth
+        let proc_iface_entry = tracker
+            .process_interface_bandwidth
+            .entry((pid, interface_name.clone()))
+            .or_insert_with(|| ProcessInterfaceBandwidth {
+                rx_bytes: 0,
+                tx_bytes: 0,
+                last_rx_bytes: 0,
+                last_tx_bytes: 0,
+                internet_rx_bytes: 0,
+                internet_tx_bytes: 0,
+                local_rx_bytes: 0,
+                local_tx_bytes: 0,
+                last_internet_rx_bytes: 0,
+                last_internet_tx_bytes: 0,
+                last_local_rx_bytes: 0,
+                last_local_tx_bytes: 0,
+            });
+
+        proc_iface_entry.rx_bytes += delta_rx;
+        proc_iface_entry.tx_bytes += delta_tx;
+
+        match traffic_category {
+            crate::traffic_classifier::TrafficCategory::Internet => {
+                proc_iface_entry.internet_rx_bytes += delta_rx;
+                proc_iface_entry.internet_tx_bytes += delta_tx;
+            }
+            crate::traffic_classifier::TrafficCategory::Local => {
+                proc_iface_entry.local_rx_bytes += delta_rx;
+                proc_iface_entry.local_tx_bytes += delta_tx;
+            }
+        }
+    }
+
     // Calculate rates based on lifetime deltas
     if elapsed > 0.0 {
         for (pid, bandwidth) in &mut tracker.process_bandwidth {
@@ -1098,6 +1505,33 @@ fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()
             bandwidth.last_internet_tx_bytes = bandwidth.lifetime_internet_tx_bytes;
             bandwidth.last_local_rx_bytes = bandwidth.lifetime_local_rx_bytes;
             bandwidth.last_local_tx_bytes = bandwidth.lifetime_local_tx_bytes;
+        }
+
+        // Calculate interface rates
+        for (_, iface_bandwidth) in &mut tracker.interface_bandwidth {
+            let rx_diff = iface_bandwidth
+                .lifetime_rx_bytes
+                .saturating_sub(iface_bandwidth.last_lifetime_rx_bytes);
+            let tx_diff = iface_bandwidth
+                .lifetime_tx_bytes
+                .saturating_sub(iface_bandwidth.last_lifetime_tx_bytes);
+
+            iface_bandwidth.rx_rate = (rx_diff as f64 / elapsed) as u64;
+            iface_bandwidth.tx_rate = (tx_diff as f64 / elapsed) as u64;
+
+            iface_bandwidth.last_lifetime_rx_bytes = iface_bandwidth.lifetime_rx_bytes;
+            iface_bandwidth.last_lifetime_tx_bytes = iface_bandwidth.lifetime_tx_bytes;
+        }
+
+        // Calculate process-interface rates (no need to store rates, they're calculated on-demand in update())
+        for (_, proc_iface_bandwidth) in &mut tracker.process_interface_bandwidth {
+            // Update last values for next cycle's rate calculation
+            proc_iface_bandwidth.last_rx_bytes = proc_iface_bandwidth.rx_bytes;
+            proc_iface_bandwidth.last_tx_bytes = proc_iface_bandwidth.tx_bytes;
+            proc_iface_bandwidth.last_internet_rx_bytes = proc_iface_bandwidth.internet_rx_bytes;
+            proc_iface_bandwidth.last_internet_tx_bytes = proc_iface_bandwidth.internet_tx_bytes;
+            proc_iface_bandwidth.last_local_rx_bytes = proc_iface_bandwidth.local_rx_bytes;
+            proc_iface_bandwidth.last_local_tx_bytes = proc_iface_bandwidth.local_tx_bytes;
         }
 
         tracker.last_update = now;
@@ -1249,6 +1683,143 @@ unsafe fn get_connection_bandwidth(row: &MIB_TCPROW) -> Option<(u64, u64)> {
         );
         None
     }
+}
+
+/// Enumerate all network interfaces on Windows using GetAdaptersAddresses API
+#[cfg(target_os = "windows")]
+fn enumerate_windows_interfaces() -> Result<Vec<WindowsNetworkInterface>> {
+    use std::ffi::CStr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    use windows::core::PWSTR;
+
+    unsafe {
+        // Call GetAdaptersAddresses with buffer allocation
+        let mut buffer_size = 15000u32; // Initial buffer size
+        let mut buffer = vec![0u8; buffer_size as usize];
+        let mut attempts = 0;
+
+        loop {
+            let result = GetAdaptersAddresses(
+                AF_UNSPEC.0 as u32, // Get both IPv4 and IPv6
+                GAA_FLAG_INCLUDE_PREFIX,
+                None,
+                Some(buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
+                &mut buffer_size,
+            );
+
+            if result == NO_ERROR.0 {
+                break; // Success
+            } else if result == 111 && attempts < 3 {
+                // ERROR_BUFFER_OVERFLOW - need larger buffer
+                buffer.resize(buffer_size as usize, 0);
+                attempts += 1;
+            } else {
+                anyhow::bail!("GetAdaptersAddresses failed with error code: {}", result);
+            }
+        }
+
+        // Parse adapter list
+        let mut interfaces = Vec::new();
+        let mut adapter_ptr = buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+
+        while !adapter_ptr.is_null() {
+            let adapter = &*adapter_ptr;
+
+            // Get adapter name (ASCII)
+            let name = if !adapter.AdapterName.is_null() {
+                CStr::from_ptr(adapter.AdapterName.0 as *const i8)
+                    .to_string_lossy()
+                    .to_string()
+            } else {
+                String::from("Unknown")
+            };
+
+            // Get friendly name (Unicode)
+            let friendly_name = if !adapter.FriendlyName.is_null() {
+                let pwstr = PWSTR(adapter.FriendlyName.0);
+                pwstr.to_string().unwrap_or_else(|_| name.clone())
+            } else {
+                name.clone()
+            };
+
+            // Get MAC address
+            let mac_address = if adapter.PhysicalAddressLength >= 6 {
+                Some(format!(
+                    "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                    adapter.PhysicalAddress[0],
+                    adapter.PhysicalAddress[1],
+                    adapter.PhysicalAddress[2],
+                    adapter.PhysicalAddress[3],
+                    adapter.PhysicalAddress[4],
+                    adapter.PhysicalAddress[5],
+                ))
+            } else {
+                None
+            };
+
+            // Get IP addresses
+            let mut ip_addresses = Vec::new();
+            let mut unicast_ptr = adapter.FirstUnicastAddress;
+
+            while !unicast_ptr.is_null() {
+                let unicast = &*unicast_ptr;
+                let sockaddr = &*unicast.Address.lpSockaddr;
+
+                // Parse SOCKADDR to IpAddr
+                match sockaddr.sa_family.0 {
+                    2 => {
+                        // AF_INET (IPv4)
+                        let sockaddr_in = &*(sockaddr as *const _ as *const SOCKADDR_IN);
+                        let bytes = sockaddr_in.sin_addr.S_un.S_addr.to_ne_bytes();
+                        ip_addresses.push(IpAddr::V4(Ipv4Addr::from(bytes)));
+                    }
+                    23 => {
+                        // AF_INET6 (IPv6)
+                        let sockaddr_in6 = &*(sockaddr as *const _ as *const SOCKADDR_IN6);
+                        let bytes = sockaddr_in6.sin6_addr.u.Byte;
+                        ip_addresses.push(IpAddr::V6(Ipv6Addr::from(bytes)));
+                    }
+                    _ => {}
+                }
+
+                unicast_ptr = unicast.Next;
+            }
+
+            // Check if interface is up (OperStatus.0 == 1 means IfOperStatusUp)
+            let is_up = adapter.OperStatus.0 == 1;
+
+            // Check if loopback (IfType == 24 means IF_TYPE_SOFTWARE_LOOPBACK)
+            let is_loopback = adapter.IfType == 24;
+
+            interfaces.push(WindowsNetworkInterface {
+                name,
+                friendly_name,
+                mac_address,
+                ip_addresses,
+                is_up,
+                is_loopback,
+            });
+
+            adapter_ptr = adapter.Next;
+        }
+
+        Ok(interfaces)
+    }
+}
+
+/// Get interface name for a given local IP address
+#[cfg(target_os = "windows")]
+fn get_interface_for_ip(
+    local_addr: &IpAddr,
+    interfaces: &[WindowsNetworkInterface],
+) -> Option<String> {
+    for interface in interfaces {
+        if interface.ip_addresses.contains(local_addr) {
+            // Return friendly name for user display
+            return Some(interface.friendly_name.clone());
+        }
+    }
+    None
 }
 
 /// Get TCP statistics for a specific connection (Windows only, requires admin)
