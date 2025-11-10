@@ -143,7 +143,7 @@ use clap::Parser;
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-        MouseEvent, MouseEventKind,
+        MouseButton, MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -1592,8 +1592,128 @@ async fn run_app<B: ratatui::backend::Backend>(
                                 }
                             }
                         }
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            // Handle left mouse click for selection
+                            let click_x = mouse.column;
+                            let click_y = mouse.row;
+
+                            // Check each clickable region
+                            for region in &app.clickable_regions {
+                                // Check if click is within region bounds
+                                if click_x >= region.area.x
+                                    && click_x < region.area.x + region.area.width
+                                    && click_y >= region.area.y
+                                    && click_y < region.area.y + region.area.height
+                                {
+                                    match &region.region_type {
+                                        ui::ClickableRegionType::ProcessList {
+                                            first_visible_index,
+                                            visible_count: _,
+                                        } => {
+                                            // Only handle process list clicks when it's actually visible
+                                            // (not covered by any overlays/modals)
+                                            if app.view_mode != ui::ViewMode::ProcessView
+                                                || app.show_backend_info
+                                                || app.show_help
+                                                || app.show_throttle_dialog
+                                                || app.show_graph
+                                                || app.show_backend_compatibility_dialog
+                                            {
+                                                continue; // Skip this region, check next one
+                                            }
+
+                                            // Calculate which list item was clicked
+                                            // inner_list_area.y doesn't include border, but List widget does
+                                            // Remove the +1 offset that was causing off-by-one error
+                                            let relative_y = click_y.saturating_sub(region.area.y);
+                                            let clicked_index =
+                                                first_visible_index + relative_y as usize;
+
+                                            // Validate index is within bounds
+                                            if clicked_index < app.process_list.len() {
+                                                app.selected_index = Some(clicked_index);
+                                                app.list_state.select(Some(clicked_index));
+                                            }
+                                        }
+                                        ui::ClickableRegionType::ProcessDetailTabs {
+                                            tab_ranges,
+                                        } => {
+                                            // Only handle tab clicks in ProcessDetail mode
+                                            if app.view_mode != ui::ViewMode::ProcessDetail {
+                                                continue;
+                                            }
+
+                                            // Find which tab was clicked based on column
+                                            for (start_col, end_col, tab) in tab_ranges {
+                                                if click_x >= *start_col && click_x < *end_col {
+                                                    app.detail_tab = *tab;
+                                                    app.detail_scroll_offset = 0; // Reset scroll when switching tabs
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        ui::ClickableRegionType::InterfaceModal {
+                                            header_lines,
+                                        } => {
+                                            // Only handle interface modal clicks when modal is open
+                                            if app.view_mode != ui::ViewMode::InterfaceList {
+                                                continue;
+                                            }
+
+                                            // Calculate which interface was clicked
+                                            // Account for border and header lines
+                                            let relative_y =
+                                                click_y.saturating_sub(region.area.y + 1);
+
+                                            if relative_y >= *header_lines as u16 {
+                                                let clicked_index =
+                                                    (relative_y - *header_lines as u16) as usize;
+
+                                                // Validate index is within bounds
+                                                if clicked_index < app.interface_list.len() {
+                                                    app.selected_interface_index =
+                                                        Some(clicked_index);
+                                                    // Don't update last_interface_selection here
+                                                    // Let the auto-scroll code detect the change on next frame
+                                                }
+                                            }
+                                        }
+                                        ui::ClickableRegionType::BackendModal { line_to_item } => {
+                                            // Only handle backend modal clicks when modal is open
+                                            if !app.show_backend_info {
+                                                continue;
+                                            }
+
+                                            // Calculate which line was clicked (accounting for scroll)
+                                            let relative_y =
+                                                click_y.saturating_sub(region.area.y + 1);
+                                            let visual_line = relative_y as usize
+                                                + app.backend_info_scroll_offset;
+
+                                            // Look up which backend item this line corresponds to
+                                            if let Some(&item_index) =
+                                                line_to_item.get(&visual_line)
+                                            {
+                                                // Make sure it's a backend (not a group header)
+                                                if matches!(
+                                                    app.backend_items.get(item_index),
+                                                    Some(ui::BackendSelectorItem::Backend { .. })
+                                                ) {
+                                                    app.backend_selected_index = item_index;
+                                                    // Don't update last_backend_selection here
+                                                    // Let the auto-scroll code detect the change on next frame
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Found matching region, stop searching
+                                    break;
+                                }
+                            }
+                        }
                         _ => {
-                            // Ignore other mouse events (clicks, moves, etc.)
+                            // Ignore other mouse events (moves, etc.)
                         }
                     }
                 }

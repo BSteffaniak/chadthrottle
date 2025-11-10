@@ -57,6 +57,11 @@ pub struct AppState {
     pub backend_info_scroll_offset: usize, // For backend info modal scrolling
     pub interface_modal_scroll_offset: usize, // For interface filter modal scrolling
     pub backend_compat_scroll_offset: usize, // For backend compatibility dialog scrolling
+    // Auto-scroll optimization - track last selection to avoid redundant scrolling
+    pub last_interface_selection: Option<usize>,
+    pub last_backend_selection: usize,
+    // Mouse click selection - track clickable regions for each frame
+    pub clickable_regions: Vec<ClickableRegion>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -80,6 +85,31 @@ pub enum TrafficViewMode {
     All,      // Show combined traffic
     Internet, // Show only internet traffic
     Local,    // Show only local network traffic
+}
+
+#[derive(Debug, Clone)]
+pub struct ClickableRegion {
+    pub area: Rect,
+    pub region_type: ClickableRegionType,
+}
+
+#[derive(Debug, Clone)]
+pub enum ClickableRegionType {
+    ProcessList {
+        first_visible_index: usize, // Index of first visible item in list
+        visible_count: usize,       // Number of visible items
+    },
+    ProcessDetailTabs {
+        // Column ranges for each tab: (start_col, end_col, tab)
+        tab_ranges: Vec<(u16, u16, ProcessDetailTab)>,
+    },
+    InterfaceModal {
+        header_lines: usize, // Number of header lines before interface list starts
+    },
+    BackendModal {
+        // Maps visual line (accounting for scroll) to backend item index
+        line_to_item: HashMap<usize, usize>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -318,6 +348,9 @@ impl AppState {
             backend_info_scroll_offset: 0,
             interface_modal_scroll_offset: 0,
             backend_compat_scroll_offset: 0,
+            last_interface_selection: None,
+            last_backend_selection: 0,
+            clickable_regions: Vec::new(),
         }
     }
 
@@ -1079,6 +1112,9 @@ pub fn draw_ui_with_backend_info(
     app: &mut AppState,
     backend_info: Option<&BackendInfo>,
 ) {
+    // Clear clickable regions from previous frame
+    app.clickable_regions.clear();
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1346,6 +1382,17 @@ fn draw_process_list(f: &mut Frame, area: Rect, app: &mut AppState) {
     };
 
     f.render_stateful_widget(list, inner_list_area, &mut app.list_state);
+
+    // Store clickable region for mouse selection
+    let first_visible = app.list_state.offset();
+    let visible_count = inner_list_area.height.saturating_sub(1) as usize; // -1 for potential scrollbar
+    app.clickable_regions.push(ClickableRegion {
+        area: inner_list_area,
+        region_type: ClickableRegionType::ProcessList {
+            first_visible_index: first_visible,
+            visible_count,
+        },
+    });
 }
 
 /// Wrap spans into multiple lines based on available width
@@ -1854,9 +1901,10 @@ fn draw_backend_info(f: &mut Frame, area: Rect, app: &mut AppState, backend_info
     // Get backend stats from backend_info
     let backend_stats = &backend_info.backend_stats;
 
-    // Track line numbers for auto-scroll
+    // Track line numbers for auto-scroll and click handling
     let mut current_line = text.len();
     let mut selected_line: Option<usize> = None;
+    let mut line_to_item: HashMap<usize, usize> = HashMap::new();
 
     // Render all items (group headers and backends) with radio buttons
     for (index, item) in app.backend_items.iter().enumerate() {
@@ -1889,6 +1937,9 @@ fn draw_backend_info(f: &mut Frame, area: Rect, app: &mut AppState, backend_info
                 is_current_default,
             } => {
                 let is_selected = index == app.backend_selected_index;
+
+                // Map this line to the backend item index for click handling
+                line_to_item.insert(current_line, index);
 
                 // Track this line if it's selected
                 if is_selected {
@@ -2384,6 +2435,12 @@ fn draw_backend_info(f: &mut Frame, area: Rect, app: &mut AppState, backend_info
 
     f.render_widget(Clear, backend_area);
     f.render_widget(backend_widget, backend_area);
+
+    // Store clickable region for mouse selection
+    app.clickable_regions.push(ClickableRegion {
+        area: backend_area,
+        region_type: ClickableRegionType::BackendModal { line_to_item },
+    });
 }
 
 fn draw_interface_list(f: &mut Frame, area: Rect, app: &mut AppState) {
@@ -2851,6 +2908,14 @@ fn draw_interface_modal(f: &mut Frame, area: Rect, app: &mut AppState) {
 
     f.render_widget(Clear, modal_area);
     f.render_widget(widget, modal_area);
+
+    // Store clickable region for mouse selection
+    app.clickable_regions.push(ClickableRegion {
+        area: modal_area,
+        region_type: ClickableRegionType::InterfaceModal {
+            header_lines: 7, // Same as used in auto-scroll calculation
+        },
+    });
 }
 // Process Detail View Rendering
 
@@ -2883,7 +2948,7 @@ fn draw_process_detail(f: &mut Frame, area: Rect, app: &mut AppState) {
         .split(area);
 
     // Draw combined title with tabs
-    draw_detail_header_with_tabs(f, chunks[0], &process, app.detail_tab);
+    draw_detail_header_with_tabs(f, chunks[0], &process, app.detail_tab, app);
 
     // Draw content based on active tab
     match app.detail_tab {
@@ -2899,20 +2964,31 @@ fn draw_detail_header_with_tabs(
     area: Rect,
     process: &ProcessInfo,
     current_tab: ProcessDetailTab,
+    app: &mut AppState,
 ) {
     let tabs = vec!["Overview", "Connections", "Traffic", "System"];
     let mut spans = vec![];
+    let mut tab_ranges = Vec::new();
+
+    // Track column position for click regions
+    let base_col = area.x + 1; // Account for border only (no padding)
+    let mut current_col = base_col;
 
     // Add process name and PID first
-    spans.push(Span::styled(
+    let name_span = Span::styled(
         process.name.clone(),
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
-    ));
-    spans.push(Span::raw(format!(" (PID {})  ", process.pid)));
+    );
+    current_col += name_span.content.width() as u16;
+    spans.push(name_span);
 
-    // Add tabs
+    let pid_text = format!(" (PID {})  ", process.pid);
+    current_col += pid_text.width() as u16;
+    spans.push(Span::raw(pid_text));
+
+    // Add tabs and track their positions for click handling
     for (i, tab_name) in tabs.iter().enumerate() {
         let tab_enum = match i {
             0 => ProcessDetailTab::Overview,
@@ -2924,8 +3000,10 @@ fn draw_detail_header_with_tabs(
 
         let is_active = tab_enum == current_tab;
 
+        // Add space before tab (except first)
         if i > 0 {
             spans.push(Span::raw(" "));
+            current_col += 1;
         }
 
         let style = if is_active {
@@ -2937,9 +3015,22 @@ fn draw_detail_header_with_tabs(
             Style::default().fg(Color::Gray)
         };
 
+        // Add opening bracket and start tracking click range
+        let tab_click_start = current_col; // Include opening bracket
         spans.push(Span::raw("["));
+        current_col += 1;
+
+        // Add tab name
         spans.push(Span::styled(tab_name.to_string(), style));
+        current_col += tab_name.width() as u16;
+
+        // Add closing bracket
         spans.push(Span::raw("]"));
+        current_col += 1;
+        let tab_click_end = current_col; // Include closing bracket
+
+        // Store click range including brackets for easier clicking
+        tab_ranges.push((tab_click_start, tab_click_end, tab_enum));
     }
 
     let header_widget = Paragraph::new(Line::from(spans)).block(
@@ -2948,6 +3039,12 @@ fn draw_detail_header_with_tabs(
             .title("Process Details"),
     );
     f.render_widget(header_widget, area);
+
+    // Store clickable region for mouse selection
+    app.clickable_regions.push(ClickableRegion {
+        area,
+        region_type: ClickableRegionType::ProcessDetailTabs { tab_ranges },
+    });
 }
 
 fn draw_detail_overview(f: &mut Frame, area: Rect, process: &ProcessInfo, app: &mut AppState) {
