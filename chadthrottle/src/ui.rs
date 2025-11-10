@@ -3682,13 +3682,29 @@ fn draw_detail_system(f: &mut Frame, area: Rect, process: &ProcessInfo, app: &mu
         text.push(Line::from(""));
 
         let cmd_str = cmdline.join(" ");
-        // Wrap long command lines
-        let max_width = 70;
+        // Wrap long command lines at word/path boundaries
+        // Calculate available width: area width - borders (2) - indentation (2)
+        let max_width = area.width.saturating_sub(4) as usize;
         let mut remaining = cmd_str.as_str();
         while !remaining.is_empty() {
-            let chunk_len = remaining.len().min(max_width);
-            text.push(Line::from(format!("  {}", &remaining[..chunk_len])));
-            remaining = &remaining[chunk_len..];
+            if remaining.len() <= max_width {
+                // Fits on one line
+                text.push(Line::from(format!("  {}", remaining)));
+                break;
+            }
+
+            // Try to find a good break point (space, slash, backslash)
+            let mut break_point = max_width;
+            if let Some(pos) = remaining[..max_width].rfind(|c| c == ' ' || c == '/' || c == '\\') {
+                // Break after the separator
+                break_point = pos + 1;
+            }
+
+            text.push(Line::from(format!(
+                "  {}",
+                &remaining[..break_point].trim_end()
+            )));
+            remaining = &remaining[break_point..].trim_start();
         }
     }
 
