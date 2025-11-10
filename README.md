@@ -26,7 +26,7 @@
 
 **Optional (for download throttling):**
 
-- `ifb` kernel module - See [IFB_SETUP.md](IFB_SETUP.md) for installation
+- `ifb` kernel module for bidirectional throttling
 - Without IFB: Upload throttling still works
 
 ### Build from source
@@ -106,8 +106,8 @@ sudo chadthrottle --pid 1234 --download-limit 1M --upload-backend tc-htb --downl
 ChadThrottle
 ├── src/
 │   ├── main.rs       # Entry point and TUI event loop
-│   ├── monitor.rs    # Socket inode mapping & network monitoring
-│   ├── throttle.rs   # Bandwidth throttling (trickle/cgroups)
+│   ├── monitor.rs    # Network monitoring with packet capture
+│   ├── backends/     # Pluggable backend implementations
 │   ├── ui.rs         # Ratatui UI components
 │   └── process.rs    # Process data structures
 └── Cargo.toml
@@ -161,8 +161,6 @@ ChadThrottle implements accurate **bidirectional** per-process throttling using:
 - Show a warning when you try to set download limits
 - Apply upload throttling only
 - Continue working normally for monitoring and upload limits
-
-See [THROTTLING.md](THROTTLING.md) for detailed documentation and [IFB_SETUP.md](IFB_SETUP.md) for enabling download throttling.
 
 ## Roadmap
 
