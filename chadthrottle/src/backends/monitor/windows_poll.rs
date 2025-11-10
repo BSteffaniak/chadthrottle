@@ -144,6 +144,26 @@ struct ProcessBandwidth {
     rx_rate: u64,
     tx_rate: u64,
 
+    // Internet traffic tracking
+    internet_rx_bytes: u64,
+    internet_tx_bytes: u64,
+    lifetime_internet_rx_bytes: u64,
+    lifetime_internet_tx_bytes: u64,
+    last_internet_rx_bytes: u64,
+    last_internet_tx_bytes: u64,
+    internet_rx_rate: u64,
+    internet_tx_rate: u64,
+
+    // Local traffic tracking
+    local_rx_bytes: u64,
+    local_tx_bytes: u64,
+    lifetime_local_rx_bytes: u64,
+    lifetime_local_tx_bytes: u64,
+    last_local_rx_bytes: u64,
+    last_local_tx_bytes: u64,
+    local_rx_rate: u64,
+    local_tx_rate: u64,
+
     // Connection count
     connection_count: usize,
 }
@@ -294,6 +314,17 @@ impl MonitorBackend for WindowsPollingMonitor {
                     // Use lifetime accumulated deltas, not sum of connection totals
                     info.total_download = bandwidth.lifetime_rx_bytes;
                     info.total_upload = bandwidth.lifetime_tx_bytes;
+
+                    // Populate categorized traffic data
+                    info.internet_download_rate = bandwidth.internet_rx_rate;
+                    info.internet_upload_rate = bandwidth.internet_tx_rate;
+                    info.internet_total_download = bandwidth.lifetime_internet_rx_bytes;
+                    info.internet_total_upload = bandwidth.lifetime_internet_tx_bytes;
+
+                    info.local_download_rate = bandwidth.local_rx_rate;
+                    info.local_upload_rate = bandwidth.local_tx_rate;
+                    info.local_total_download = bandwidth.lifetime_local_rx_bytes;
+                    info.local_total_upload = bandwidth.lifetime_local_tx_bytes;
 
                     process_map.insert(pid, info);
                 }
@@ -644,6 +675,12 @@ fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()
             let (prev_lifetime_rx, prev_lifetime_tx) = prev
                 .map(|p| (p.lifetime_rx_bytes, p.lifetime_tx_bytes))
                 .unwrap_or((0, 0));
+            let (prev_lifetime_internet_rx, prev_lifetime_internet_tx) = prev
+                .map(|p| (p.lifetime_internet_rx_bytes, p.lifetime_internet_tx_bytes))
+                .unwrap_or((0, 0));
+            let (prev_lifetime_local_rx, prev_lifetime_local_tx) = prev
+                .map(|p| (p.lifetime_local_rx_bytes, p.lifetime_local_tx_bytes))
+                .unwrap_or((0, 0));
 
             ProcessBandwidth {
                 name: stats.process_name.clone(),
@@ -657,6 +694,22 @@ fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()
                 last_tx_bytes: 0,
                 rx_rate: 0,
                 tx_rate: 0,
+                internet_rx_bytes: 0,
+                internet_tx_bytes: 0,
+                lifetime_internet_rx_bytes: prev_lifetime_internet_rx,
+                lifetime_internet_tx_bytes: prev_lifetime_internet_tx,
+                last_internet_rx_bytes: prev_lifetime_internet_rx,
+                last_internet_tx_bytes: prev_lifetime_internet_tx,
+                internet_rx_rate: 0,
+                internet_tx_rate: 0,
+                local_rx_bytes: 0,
+                local_tx_bytes: 0,
+                lifetime_local_rx_bytes: prev_lifetime_local_rx,
+                lifetime_local_tx_bytes: prev_lifetime_local_tx,
+                last_local_rx_bytes: prev_lifetime_local_rx,
+                last_local_tx_bytes: prev_lifetime_local_tx,
+                local_rx_rate: 0,
+                local_tx_rate: 0,
                 connection_count: 0,
             }
         });
@@ -706,6 +759,24 @@ fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()
             if !is_first_seen {
                 entry.lifetime_rx_bytes += delta_rx;
                 entry.lifetime_tx_bytes += delta_tx;
+
+                // Categorize traffic by remote address
+                let traffic_category =
+                    crate::traffic_classifier::categorize_traffic(&stats.remote_addr);
+                match traffic_category {
+                    crate::traffic_classifier::TrafficCategory::Internet => {
+                        entry.internet_rx_bytes += rx_bytes;
+                        entry.internet_tx_bytes += tx_bytes;
+                        entry.lifetime_internet_rx_bytes += delta_rx;
+                        entry.lifetime_internet_tx_bytes += delta_tx;
+                    }
+                    crate::traffic_classifier::TrafficCategory::Local => {
+                        entry.local_rx_bytes += rx_bytes;
+                        entry.local_tx_bytes += tx_bytes;
+                        entry.lifetime_local_rx_bytes += delta_rx;
+                        entry.lifetime_local_tx_bytes += delta_tx;
+                    }
+                }
             }
 
             // Queue update for later (avoid borrow checker issues)
@@ -731,6 +802,12 @@ fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()
             let (prev_lifetime_rx, prev_lifetime_tx) = prev
                 .map(|p| (p.lifetime_rx_bytes, p.lifetime_tx_bytes))
                 .unwrap_or((0, 0));
+            let (prev_lifetime_internet_rx, prev_lifetime_internet_tx) = prev
+                .map(|p| (p.lifetime_internet_rx_bytes, p.lifetime_internet_tx_bytes))
+                .unwrap_or((0, 0));
+            let (prev_lifetime_local_rx, prev_lifetime_local_tx) = prev
+                .map(|p| (p.lifetime_local_rx_bytes, p.lifetime_local_tx_bytes))
+                .unwrap_or((0, 0));
 
             ProcessBandwidth {
                 name: stats.process_name.clone(),
@@ -744,6 +821,22 @@ fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()
                 last_tx_bytes: 0,
                 rx_rate: 0,
                 tx_rate: 0,
+                internet_rx_bytes: 0,
+                internet_tx_bytes: 0,
+                lifetime_internet_rx_bytes: prev_lifetime_internet_rx,
+                lifetime_internet_tx_bytes: prev_lifetime_internet_tx,
+                last_internet_rx_bytes: prev_lifetime_internet_rx,
+                last_internet_tx_bytes: prev_lifetime_internet_tx,
+                internet_rx_rate: 0,
+                internet_tx_rate: 0,
+                local_rx_bytes: 0,
+                local_tx_bytes: 0,
+                lifetime_local_rx_bytes: prev_lifetime_local_rx,
+                lifetime_local_tx_bytes: prev_lifetime_local_tx,
+                last_local_rx_bytes: prev_lifetime_local_rx,
+                last_local_tx_bytes: prev_lifetime_local_tx,
+                local_rx_rate: 0,
+                local_tx_rate: 0,
                 connection_count: 0,
             }
         });
@@ -793,6 +886,24 @@ fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()
             if !is_first_seen {
                 entry.lifetime_rx_bytes += delta_rx;
                 entry.lifetime_tx_bytes += delta_tx;
+
+                // Categorize traffic by remote address
+                let traffic_category =
+                    crate::traffic_classifier::categorize_traffic(&stats.remote_addr);
+                match traffic_category {
+                    crate::traffic_classifier::TrafficCategory::Internet => {
+                        entry.internet_rx_bytes += rx_bytes;
+                        entry.internet_tx_bytes += tx_bytes;
+                        entry.lifetime_internet_rx_bytes += delta_rx;
+                        entry.lifetime_internet_tx_bytes += delta_tx;
+                    }
+                    crate::traffic_classifier::TrafficCategory::Local => {
+                        entry.local_rx_bytes += rx_bytes;
+                        entry.local_tx_bytes += tx_bytes;
+                        entry.lifetime_local_rx_bytes += delta_rx;
+                        entry.lifetime_local_tx_bytes += delta_tx;
+                    }
+                }
             }
 
             // Queue update for later (avoid borrow checker issues)
@@ -818,32 +929,11 @@ fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()
             let (prev_lifetime_rx, prev_lifetime_tx) = prev
                 .map(|p| (p.lifetime_rx_bytes, p.lifetime_tx_bytes))
                 .unwrap_or((0, 0));
-
-            ProcessBandwidth {
-                name: stats.process_name.clone(),
-                rx_bytes: 0,
-                tx_bytes: 0,
-                lifetime_rx_bytes: prev_lifetime_rx,
-                lifetime_tx_bytes: prev_lifetime_tx,
-                last_lifetime_rx_bytes: prev_lifetime_rx,
-                last_lifetime_tx_bytes: prev_lifetime_tx,
-                last_rx_bytes: 0,
-                last_tx_bytes: 0,
-                rx_rate: 0,
-                tx_rate: 0,
-                connection_count: 0,
-            }
-        });
-        entry.connection_count += 1;
-    }
-
-    // Aggregate all UDP6 connections by PID
-    for stats in tracker.udp6_connections.values() {
-        let entry = new_process_bandwidth.entry(stats.pid).or_insert_with(|| {
-            // Preserve previous lifetime values for delta calculation
-            let prev = tracker.process_bandwidth.get(&stats.pid);
-            let (prev_lifetime_rx, prev_lifetime_tx) = prev
-                .map(|p| (p.lifetime_rx_bytes, p.lifetime_tx_bytes))
+            let (prev_lifetime_internet_rx, prev_lifetime_internet_tx) = prev
+                .map(|p| (p.lifetime_internet_rx_bytes, p.lifetime_internet_tx_bytes))
+                .unwrap_or((0, 0));
+            let (prev_lifetime_local_rx, prev_lifetime_local_tx) = prev
+                .map(|p| (p.lifetime_local_rx_bytes, p.lifetime_local_tx_bytes))
                 .unwrap_or((0, 0));
 
             ProcessBandwidth {
@@ -858,6 +948,71 @@ fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()
                 last_tx_bytes: 0,
                 rx_rate: 0,
                 tx_rate: 0,
+                internet_rx_bytes: 0,
+                internet_tx_bytes: 0,
+                lifetime_internet_rx_bytes: prev_lifetime_internet_rx,
+                lifetime_internet_tx_bytes: prev_lifetime_internet_tx,
+                last_internet_rx_bytes: prev_lifetime_internet_rx,
+                last_internet_tx_bytes: prev_lifetime_internet_tx,
+                internet_rx_rate: 0,
+                internet_tx_rate: 0,
+                local_rx_bytes: 0,
+                local_tx_bytes: 0,
+                lifetime_local_rx_bytes: prev_lifetime_local_rx,
+                lifetime_local_tx_bytes: prev_lifetime_local_tx,
+                last_local_rx_bytes: prev_lifetime_local_rx,
+                last_local_tx_bytes: prev_lifetime_local_tx,
+                local_rx_rate: 0,
+                local_tx_rate: 0,
+                connection_count: 0,
+            }
+        });
+        entry.connection_count += 1;
+    }
+
+    // Aggregate all UDP6 connections by PID
+    for stats in tracker.udp6_connections.values() {
+        let entry = new_process_bandwidth.entry(stats.pid).or_insert_with(|| {
+            // Preserve previous lifetime values for delta calculation
+            let prev = tracker.process_bandwidth.get(&stats.pid);
+            let (prev_lifetime_rx, prev_lifetime_tx) = prev
+                .map(|p| (p.lifetime_rx_bytes, p.lifetime_tx_bytes))
+                .unwrap_or((0, 0));
+            let (prev_lifetime_internet_rx, prev_lifetime_internet_tx) = prev
+                .map(|p| (p.lifetime_internet_rx_bytes, p.lifetime_internet_tx_bytes))
+                .unwrap_or((0, 0));
+            let (prev_lifetime_local_rx, prev_lifetime_local_tx) = prev
+                .map(|p| (p.lifetime_local_rx_bytes, p.lifetime_local_tx_bytes))
+                .unwrap_or((0, 0));
+
+            ProcessBandwidth {
+                name: stats.process_name.clone(),
+                rx_bytes: 0,
+                tx_bytes: 0,
+                lifetime_rx_bytes: prev_lifetime_rx,
+                lifetime_tx_bytes: prev_lifetime_tx,
+                last_lifetime_rx_bytes: prev_lifetime_rx,
+                last_lifetime_tx_bytes: prev_lifetime_tx,
+                last_rx_bytes: 0,
+                last_tx_bytes: 0,
+                rx_rate: 0,
+                tx_rate: 0,
+                internet_rx_bytes: 0,
+                internet_tx_bytes: 0,
+                lifetime_internet_rx_bytes: prev_lifetime_internet_rx,
+                lifetime_internet_tx_bytes: prev_lifetime_internet_tx,
+                last_internet_rx_bytes: prev_lifetime_internet_rx,
+                last_internet_tx_bytes: prev_lifetime_internet_tx,
+                internet_rx_rate: 0,
+                internet_tx_rate: 0,
+                local_rx_bytes: 0,
+                local_tx_bytes: 0,
+                lifetime_local_rx_bytes: prev_lifetime_local_rx,
+                lifetime_local_tx_bytes: prev_lifetime_local_tx,
+                last_local_rx_bytes: prev_lifetime_local_rx,
+                last_local_tx_bytes: prev_lifetime_local_tx,
+                local_rx_rate: 0,
+                local_tx_rate: 0,
                 connection_count: 0,
             }
         });
@@ -917,9 +1072,32 @@ fn update_connection_stats(tracker: &Arc<Mutex<ConnectionTracker>>) -> Result<()
             bandwidth.rx_rate = (rx_diff as f64 / elapsed) as u64;
             bandwidth.tx_rate = (tx_diff as f64 / elapsed) as u64;
 
+            // Calculate categorized rates
+            let internet_rx_diff = bandwidth
+                .lifetime_internet_rx_bytes
+                .saturating_sub(bandwidth.last_internet_rx_bytes);
+            let internet_tx_diff = bandwidth
+                .lifetime_internet_tx_bytes
+                .saturating_sub(bandwidth.last_internet_tx_bytes);
+            let local_rx_diff = bandwidth
+                .lifetime_local_rx_bytes
+                .saturating_sub(bandwidth.last_local_rx_bytes);
+            let local_tx_diff = bandwidth
+                .lifetime_local_tx_bytes
+                .saturating_sub(bandwidth.last_local_tx_bytes);
+
+            bandwidth.internet_rx_rate = (internet_rx_diff as f64 / elapsed) as u64;
+            bandwidth.internet_tx_rate = (internet_tx_diff as f64 / elapsed) as u64;
+            bandwidth.local_rx_rate = (local_rx_diff as f64 / elapsed) as u64;
+            bandwidth.local_tx_rate = (local_tx_diff as f64 / elapsed) as u64;
+
             // Update last lifetime values for next cycle
             bandwidth.last_lifetime_rx_bytes = bandwidth.lifetime_rx_bytes;
             bandwidth.last_lifetime_tx_bytes = bandwidth.lifetime_tx_bytes;
+            bandwidth.last_internet_rx_bytes = bandwidth.lifetime_internet_rx_bytes;
+            bandwidth.last_internet_tx_bytes = bandwidth.lifetime_internet_tx_bytes;
+            bandwidth.last_local_rx_bytes = bandwidth.lifetime_local_rx_bytes;
+            bandwidth.last_local_tx_bytes = bandwidth.lifetime_local_tx_bytes;
         }
 
         tracker.last_update = now;
