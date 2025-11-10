@@ -69,9 +69,22 @@ impl Default for Config {
 
 impl Config {
     /// Get the config file path
+    /// Uses platform-specific config directories:
+    /// - Linux: ~/.config/chadthrottle
+    /// - macOS: ~/Library/Application Support/chadthrottle
+    /// - Windows: C:\Users\{user}\AppData\Roaming\chadthrottle
     pub fn config_path() -> Result<PathBuf> {
-        let home = std::env::var("HOME").context("HOME environment variable not set")?;
-        let config_dir = PathBuf::from(home).join(CONFIG_DIR);
+        // Try to use platform-specific config directory first
+        let config_dir = if let Some(config_base) = dirs::config_dir() {
+            // Prefer XDG config directory on Linux, AppData on Windows, Library on macOS
+            config_base.join("chadthrottle")
+        } else if let Some(home) = dirs::home_dir() {
+            // Fallback: use ~/.config/chadthrottle on all platforms
+            home.join(CONFIG_DIR)
+        } else {
+            // Last resort fallback
+            anyhow::bail!("Could not determine config directory (no home directory found)");
+        };
 
         // Create config directory if it doesn't exist
         fs::create_dir_all(&config_dir).context(format!(
