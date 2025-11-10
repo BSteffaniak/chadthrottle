@@ -33,9 +33,20 @@
 
 ```bash
 cd chadthrottle
+
+# Default build (monitoring only):
 cargo build --release
+
+# With all Linux throttling backends (recommended):
+cargo build --release --features linux-full
+
+# Or with specific backends:
+cargo build --release --features "throttle-tc-htb,throttle-ifb-tc"
+
 sudo cp target/release/chadthrottle /usr/local/bin/
 ```
+
+**Note:** The default build includes monitoring only. To enable throttling features, you must explicitly enable cargo features (see above).
 
 ## Usage
 
@@ -177,7 +188,7 @@ ChadThrottle implements accurate **bidirectional** per-process throttling using:
 - [ ] Save/load throttle profiles
 - [ ] Per-connection throttling
 - [ ] Domain whitelist/blacklist
-- [ ] eBPF-based throttling (alternative to IFB)
+- [x] eBPF-based throttling (alternative to IFB)
 
 ## Why "ChadThrottle"?
 
