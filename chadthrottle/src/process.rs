@@ -262,20 +262,58 @@ impl ProcessDetails {
 
     #[cfg(not(target_os = "linux"))]
     pub fn from_pid(pid: i32) -> Self {
-        Self {
-            pid,
-            name: format!("PID {}", pid),
-            cmdline: None,
-            exe_path: None,
-            cwd: None,
-            state: None,
-            ppid: None,
-            threads: None,
-            memory_rss: None,
-            memory_vms: None,
-            uid: None,
-            gid: None,
-            connections: Vec::new(),
+        use sysinfo::{Pid, System};
+
+        // Get process information from sysinfo
+        // Note: System::new_all() is slow but necessary to get full process info
+        let sys = System::new_all();
+        let pid_obj = Pid::from_u32(pid as u32);
+
+        if let Some(process) = sys.process(pid_obj) {
+            Self {
+                pid,
+                name: process.name().to_str().unwrap_or("unknown").to_string(),
+                cmdline: Some(
+                    process
+                        .cmd()
+                        .iter()
+                        .map(|s| s.to_str().unwrap_or("").to_string())
+                        .collect(),
+                ),
+                exe_path: process
+                    .exe()
+                    .and_then(|p| p.to_str())
+                    .map(|s| s.to_string()),
+                cwd: process
+                    .cwd()
+                    .and_then(|p| p.to_str())
+                    .map(|s| s.to_string()),
+                state: Some(format!("{:?}", process.status())),
+                ppid: process.parent().map(|p| p.as_u32() as i32),
+                threads: None, // Not available on Windows via sysinfo
+                memory_rss: Some(process.memory() / 1024), // Convert bytes to KB
+                memory_vms: Some(process.virtual_memory() / 1024), // Convert bytes to KB
+                uid: None,     // Not applicable on Windows
+                gid: None,     // Not applicable on Windows
+                connections: Vec::new(), // Populated separately
+            }
+        } else {
+            // Fallback if process not found or has terminated
+            Self {
+                pid,
+                name: format!("PID {}", pid),
+                cmdline: None,
+                exe_path: None,
+                cwd: None,
+                state: Some("Unknown".to_string()),
+                ppid: None,
+                threads: None,
+                memory_rss: None,
+                memory_vms: None,
+                uid: None,
+                gid: None,
+                connections: Vec::new(),
+            }
         }
     }
 
