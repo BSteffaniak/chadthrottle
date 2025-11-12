@@ -20,6 +20,13 @@ pub trait ProcessUtils: Send + Sync {
 
     /// Get socket-to-PID mapping for network connections
     fn get_connection_map(&self) -> Result<ConnectionMap>;
+
+    /// Refresh internal caches (e.g., process list)
+    /// This should be called periodically to keep cached data fresh
+    /// Default implementation is a no-op for platforms that don't cache
+    fn refresh_caches(&self) {
+        // Default no-op implementation
+    }
 }
 
 /// Process entry with PID and name

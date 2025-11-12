@@ -15,7 +15,32 @@ mod monitor {
     use crate::process::{InterfaceMap, ProcessMap};
     use anyhow::Result;
     use std::collections::HashMap;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
+    use tokio::sync::mpsc;
+
+    /// Commands sent from UI thread to monitoring thread
+    pub enum MonitorCommand {
+        /// Switch to a different socket mapper backend
+        SwitchSocketMapper {
+            backend_name: String,
+            /// Channel to send back success or error (hot-swap, no thread restart)
+            response_tx: tokio::sync::oneshot::Sender<Result<()>>,
+        },
+        /// Signal to shutdown the monitoring thread
+        Shutdown,
+    }
+
+    /// Update data sent from monitoring thread to UI thread
+    #[derive(Debug, Clone)]
+    pub struct MonitorUpdateData {
+        pub process_map: ProcessMap,
+        pub interface_map: InterfaceMap,
+        pub socket_mapper_name: String,
+        pub socket_mapper_capabilities: crate::backends::BackendCapabilities,
+    }
+
+    /// Update messages sent from monitoring thread to UI thread
+    pub type MonitorUpdate = MonitorUpdateData;
 
     pub struct NetworkMonitor {
         backend: WindowsPollingMonitor,
@@ -35,6 +60,10 @@ mod monitor {
             Ok(NetworkMonitor {
                 backend: WindowsPollingMonitor::new()?,
             })
+        }
+
+        pub fn get_monitoring_backend_name(&self) -> &'static str {
+            "windows-poll"
         }
 
         pub fn get_socket_mapper_info(&self) -> (&str, &crate::backends::BackendCapabilities) {
@@ -72,6 +101,78 @@ mod monitor {
             // Not implemented for polling backend
             HashMap::new()
         }
+
+        /// Run the monitoring loop in a background thread
+        pub fn run_monitoring_loop(
+            mut self,
+            mut cmd_rx: mpsc::UnboundedReceiver<MonitorCommand>,
+            update_tx: mpsc::UnboundedSender<MonitorUpdate>,
+        ) {
+            log::info!("Starting monitoring background thread (windows-poll)");
+            let mut last_update = Instant::now();
+
+            loop {
+                // Check for commands (non-blocking)
+                match cmd_rx.try_recv() {
+                    Ok(MonitorCommand::Shutdown) => {
+                        log::info!("Monitoring thread received shutdown command");
+                        break;
+                    }
+                    Ok(MonitorCommand::SwitchSocketMapper {
+                        backend_name: _,
+                        response_tx,
+                    }) => {
+                        log::warn!("Socket mapper switching not supported in windows-poll backend");
+                        let _ = response_tx.send(Err(anyhow::anyhow!("Not supported")));
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => {
+                        // No command, continue monitoring
+                    }
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        log::warn!("Command channel disconnected, shutting down monitoring thread");
+                        break;
+                    }
+                }
+
+                // Perform update approximately once per second
+                let now = Instant::now();
+                if now.duration_since(last_update) >= Duration::from_secs(1) {
+                    match self.update() {
+                        Ok((process_map, interface_map)) => {
+                            // Send update to UI thread (non-blocking) with socket mapper info
+                            let update_data = MonitorUpdateData {
+                                process_map,
+                                interface_map,
+                                socket_mapper_name: "iphelper".to_string(),
+                                socket_mapper_capabilities: crate::backends::BackendCapabilities {
+                                    ipv4_support: true,
+                                    ipv6_support: true,
+                                    per_process: true,
+                                    per_connection: true,
+                                },
+                            };
+
+                            if update_tx.send(update_data).is_err() {
+                                log::warn!(
+                                    "Update channel disconnected, shutting down monitoring thread"
+                                );
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("Monitor update failed: {}", e);
+                        }
+                    }
+
+                    last_update = now;
+                }
+
+                // Sleep briefly to avoid busy-waiting
+                std::thread::sleep(Duration::from_millis(100));
+            }
+
+            log::info!("Monitoring background thread exiting");
+        }
     }
 }
 
@@ -81,7 +182,32 @@ mod monitor {
     use crate::process::{InterfaceMap, ProcessMap};
     use anyhow::Result;
     use std::collections::HashMap;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
+    use tokio::sync::mpsc;
+
+    /// Commands sent from UI thread to monitoring thread
+    pub enum MonitorCommand {
+        /// Switch to a different socket mapper backend
+        SwitchSocketMapper {
+            backend_name: String,
+            /// Channel to send back success or error (hot-swap, no thread restart)
+            response_tx: tokio::sync::oneshot::Sender<Result<()>>,
+        },
+        /// Signal to shutdown the monitoring thread
+        Shutdown,
+    }
+
+    /// Update data sent from monitoring thread to UI thread
+    #[derive(Debug, Clone)]
+    pub struct MonitorUpdateData {
+        pub process_map: ProcessMap,
+        pub interface_map: InterfaceMap,
+        pub socket_mapper_name: String,
+        pub socket_mapper_capabilities: crate::backends::BackendCapabilities,
+    }
+
+    /// Update messages sent from monitoring thread to UI thread
+    pub type MonitorUpdate = MonitorUpdateData;
 
     pub struct NetworkMonitor;
 
@@ -131,6 +257,60 @@ mod monitor {
         pub fn get_bandwidth_data(&self) -> HashMap<i32, Vec<crate::history::BandwidthSample>> {
             HashMap::new()
         }
+
+        pub fn get_monitoring_backend_name(&self) -> &'static str {
+            "none"
+        }
+
+        /// Run the monitoring loop in a background thread (stub implementation)
+        pub fn run_monitoring_loop(
+            self,
+            mut cmd_rx: mpsc::UnboundedReceiver<MonitorCommand>,
+            update_tx: mpsc::UnboundedSender<MonitorUpdate>,
+        ) {
+            log::warn!("Monitoring background thread started but no backend available");
+
+            loop {
+                // Check for commands
+                match cmd_rx.try_recv() {
+                    Ok(MonitorCommand::Shutdown) => {
+                        break;
+                    }
+                    Ok(MonitorCommand::SwitchSocketMapper {
+                        backend_name: _,
+                        response_tx,
+                    }) => {
+                        let _ = response_tx.send(Err(anyhow::anyhow!("No backend available")));
+                    }
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        break;
+                    }
+                    _ => {}
+                }
+
+                // Send empty updates periodically
+                let _now = Instant::now();
+                std::thread::sleep(Duration::from_secs(1));
+
+                let update_data = MonitorUpdateData {
+                    process_map: HashMap::new(),
+                    interface_map: HashMap::new(),
+                    socket_mapper_name: "none".to_string(),
+                    socket_mapper_capabilities: crate::backends::BackendCapabilities {
+                        ipv4_support: false,
+                        ipv6_support: false,
+                        per_process: false,
+                        per_connection: false,
+                    },
+                };
+
+                if update_tx.send(update_data).is_err() {
+                    break;
+                }
+            }
+
+            log::info!("Stub monitoring thread exiting");
+        }
     }
 }
 
@@ -158,7 +338,7 @@ use crate::backends::throttle::{
     detect_download_backends, detect_upload_backends, select_download_backend,
     select_upload_backend,
 };
-use crate::monitor::NetworkMonitor;
+use crate::monitor::{MonitorCommand, MonitorUpdate, NetworkMonitor};
 use crate::process::ThrottleLimit;
 use crate::ui::AppState;
 
@@ -563,10 +743,11 @@ async fn main() -> Result<()> {
         .download_backend
         .as_deref()
         .or(config.preferred_download_backend.as_deref());
-    let socket_mapper_preference = args
+    let socket_mapper_preference_str = args
         .socket_mapper
-        .as_deref()
-        .or(config.preferred_socket_mapper.as_deref());
+        .clone()
+        .or_else(|| config.preferred_socket_mapper.clone());
+    let socket_mapper_preference = socket_mapper_preference_str.as_deref();
 
     // Log which preference source is being used
     if let Some(pref) = upload_preference {
@@ -628,7 +809,16 @@ async fn main() -> Result<()> {
 
     // Create managers with selected backends
     let mut throttle_manager = ThrottleManager::new(upload_backend, download_backend);
-    let mut monitor = NetworkMonitor::with_socket_mapper(socket_mapper_preference)?;
+
+    // Create monitoring channels for async communication
+    let (monitor_cmd_tx, monitor_cmd_rx) = tokio::sync::mpsc::unbounded_channel::<MonitorCommand>();
+    let (monitor_update_tx, mut monitor_update_rx) =
+        tokio::sync::mpsc::unbounded_channel::<MonitorUpdate>();
+
+    // Create monitor and move it to background thread
+    let monitor = NetworkMonitor::with_socket_mapper(socket_mapper_preference)?;
+
+    // Restore throttles before spawning monitor thread
     if !args.no_restore {
         log::info!("Restoring saved throttles...");
         for (pid, saved_throttle) in config.get_throttles() {
@@ -653,15 +843,28 @@ async fn main() -> Result<()> {
         log::info!("Skipping throttle restoration (--no-restore flag)");
     }
 
-    // Run the app
+    // Spawn monitoring thread with ownership of monitor
+    let monitor_thread = std::thread::spawn(move || {
+        monitor.run_monitoring_loop(monitor_cmd_rx, monitor_update_tx);
+    });
+    log::info!("Spawned background monitoring thread");
+
+    // Run the app with channel receivers
     let res = run_app(
         &mut terminal,
         &mut app,
-        &mut monitor,
+        &mut monitor_update_rx,
+        monitor_cmd_tx.clone(),
         &mut throttle_manager,
         &mut config,
+        socket_mapper_preference,
     )
     .await;
+
+    // Shutdown monitoring thread gracefully
+    let _ = monitor_cmd_tx.send(MonitorCommand::Shutdown);
+    let _ = monitor_thread.join();
+    log::info!("Monitoring thread shut down");
 
     // Save config before exit (unless --no-save specified)
     if !args.no_save {
@@ -714,40 +917,42 @@ async fn main() -> Result<()> {
 async fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut AppState,
-    monitor: &mut NetworkMonitor,
+    monitor_update_rx: &mut tokio::sync::mpsc::UnboundedReceiver<MonitorUpdate>,
+    monitor_cmd_tx: tokio::sync::mpsc::UnboundedSender<MonitorCommand>,
     throttle_manager: &mut ThrottleManager,
     config: &mut config::Config,
+    socket_mapper_preference: Option<&str>,
 ) -> Result<()> {
-    let mut update_interval = interval(Duration::from_secs(1));
     let mut bandwidth_log_counter = 0u32; // Log bandwidth every N updates
 
+    // Cache socket mappers at startup - they don't change at runtime
+    use crate::backends::process::socket_mapper::detect_socket_mappers;
+    let cached_socket_mappers: Vec<(String, crate::backends::BackendPriority, bool)> =
+        detect_socket_mappers()
+            .iter()
+            .map(|sm| (sm.name.to_string(), sm.priority, sm.available))
+            .collect();
+
+    // Cache backend info - only rebuild when throttles change
+    let mut cached_backend_info: Option<crate::backends::throttle::BackendInfo> = None;
+    let mut needs_backend_refresh = true;
+
+    // Track current socket mapper state (updated from MonitorUpdate)
+    let mut current_socket_mapper: Option<String> = socket_mapper_preference.map(|s| s.to_string());
+    let mut current_socket_mapper_caps: Option<crate::backends::BackendCapabilities> = None;
+
+    // Track if we need to redraw
+    let mut needs_redraw = true;
+
+    // Performance tracking - log slow iterations
+    let mut last_perf_log = std::time::Instant::now();
+
     loop {
-        // Get backend info for UI display
-        let mut backend_info = throttle_manager.get_backend_info(
-            config.preferred_upload_backend.clone(),
-            config.preferred_download_backend.clone(),
-        );
+        let loop_start = std::time::Instant::now();
 
-        // Populate socket mapper info from NetworkMonitor
-        {
-            use crate::backends::process::socket_mapper::detect_socket_mappers;
-            let socket_mappers = detect_socket_mappers();
-            backend_info.available_socket_mappers = socket_mappers
-                .iter()
-                .map(|sm| (sm.name.to_string(), sm.priority, sm.available))
-                .collect();
-
-            let (active_sm, capabilities) = monitor.get_socket_mapper_info();
-            backend_info.active_socket_mapper = Some(active_sm.to_string());
-            backend_info.socket_mapper_capabilities = Some(capabilities.clone());
-            backend_info.preferred_socket_mapper = config.preferred_socket_mapper.clone();
-        }
-
-        // Draw UI
-        terminal.draw(|f| ui::draw_ui_with_backend_info(f, app, Some(&backend_info)))?;
-
-        // Handle input with timeout
-        if event::poll(Duration::from_millis(100))? {
+        // PRIORITY 1: Handle input FIRST - check with minimal timeout
+        if event::poll(Duration::from_millis(16))? {
+            // ~60fps response time
             match event::read()? {
                 Event::Key(key) => {
                     // Only handle key press events (ignore release and repeat)
@@ -798,48 +1003,71 @@ async fn run_app<B: ratatui::backend::Backend>(
                             KeyCode::Char(' ') => {
                                 // Space bar - immediately apply backend selection
                                 if let Some((name, group)) = app.get_selected_backend() {
+                                    // Clone name early to avoid borrow issues
+                                    let backend_name = name.to_string();
+
                                     match group {
                                         ui::BackendGroup::SocketMapper => {
-                                            // Only switch if different from current
-                                            let (current_sm, _) = monitor.get_socket_mapper_info();
-                                            if name != current_sm {
+                                            // Get current socket mapper from cached state
+                                            let current_sm = current_socket_mapper
+                                                .as_deref()
+                                                .unwrap_or("unknown");
+
+                                            if backend_name.as_str() != current_sm {
                                                 log::info!(
                                                     "Switching socket mapper: {} → {}",
                                                     current_sm,
-                                                    name
+                                                    backend_name
                                                 );
 
-                                                // Extract bandwidth data BEFORE dropping old monitor
-                                                let (process_bandwidth, terminated_processes) =
-                                                    monitor.extract_bandwidth_data();
-                                                let process_count = process_bandwidth.len();
-                                                let terminated_count = terminated_processes.len();
+                                                // Create oneshot channel for response
+                                                let (response_tx, response_rx) =
+                                                    tokio::sync::oneshot::channel();
 
-                                                // Create new monitor (old one will be dropped, cleaning up threads)
-                                                match NetworkMonitor::with_socket_mapper(Some(name))
+                                                // Send switch command to monitoring thread (hot-swap)
+                                                if monitor_cmd_tx
+                                                    .send(MonitorCommand::SwitchSocketMapper {
+                                                        backend_name: backend_name.clone(),
+                                                        response_tx,
+                                                    })
+                                                    .is_err()
                                                 {
-                                                    Ok(mut new_monitor) => {
-                                                        // Restore bandwidth data in new monitor
-                                                        new_monitor.restore_bandwidth_data(
-                                                            process_bandwidth,
-                                                            terminated_processes,
-                                                        );
+                                                    app.status_message = "❌ Failed to send command to monitoring thread".to_string();
+                                                    log::error!(
+                                                        "Command channel closed unexpectedly"
+                                                    );
+                                                    continue;
+                                                }
 
-                                                        // Replace monitor (old one drops here, threads cleaned up)
-                                                        *monitor = new_monitor;
+                                                // Show status while waiting
+                                                app.status_message =
+                                                    format!("⏳ Switching to {}...", backend_name);
+                                                needs_redraw = true;
 
+                                                // Wait for response with timeout (5 seconds should be plenty)
+                                                match tokio::time::timeout(
+                                                    Duration::from_secs(5),
+                                                    response_rx,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(Ok(Ok(()))) => {
+                                                        // Success! Monitor hot-swapped to new backend
                                                         config.preferred_socket_mapper =
-                                                            Some(name.to_string());
+                                                            Some(backend_name.clone());
                                                         let _ = config.save();
+
                                                         app.status_message = format!(
-                                                            "✅ Socket mapper → {} (preserved {} processes, {} terminated)",
-                                                            name, process_count, terminated_count
+                                                            "✅ Socket mapper → {}",
+                                                            backend_name
                                                         );
                                                         log::info!(
-                                                            "Socket mapper switched successfully, bandwidth data preserved"
+                                                            "Socket mapper switched successfully via hot-swap"
                                                         );
+
+                                                        // Backend state will be updated on next MonitorUpdate
                                                     }
-                                                    Err(e) => {
+                                                    Ok(Ok(Err(e))) => {
                                                         app.status_message =
                                                             format!("❌ Socket mapper: {}", e);
                                                         log::error!(
@@ -847,7 +1075,25 @@ async fn run_app<B: ratatui::backend::Backend>(
                                                             e
                                                         );
                                                     }
+                                                    Ok(Err(_)) => {
+                                                        app.status_message =
+                                                            "❌ Response channel closed"
+                                                                .to_string();
+                                                        log::error!(
+                                                            "Response channel closed unexpectedly"
+                                                        );
+                                                    }
+                                                    Err(_) => {
+                                                        app.status_message =
+                                                            "❌ Timeout waiting for switch (>5s)"
+                                                                .to_string();
+                                                        log::error!(
+                                                            "Timeout waiting for socket mapper switch"
+                                                        );
+                                                    }
                                                 }
+
+                                                needs_backend_refresh = true;
                                             } else {
                                                 app.status_message =
                                                     format!("'{}' is already active", name);
@@ -894,20 +1140,14 @@ async fn run_app<B: ratatui::backend::Backend>(
                                         config.preferred_download_backend.clone(),
                                     );
                                     {
-                                        use crate::backends::process::socket_mapper::detect_socket_mappers;
-                                        let socket_mappers = detect_socket_mappers();
-                                        backend_info.available_socket_mappers = socket_mappers
-                                            .iter()
-                                            .map(|sm| {
-                                                (sm.name.to_string(), sm.priority, sm.available)
-                                            })
-                                            .collect();
-                                        let (active_sm, capabilities) =
-                                            monitor.get_socket_mapper_info();
+                                        // Use cached socket mappers and current backend state
+                                        backend_info.available_socket_mappers =
+                                            cached_socket_mappers.clone();
+                                        backend_info.active_monitoring = Some("pnet".to_string());
                                         backend_info.active_socket_mapper =
-                                            Some(active_sm.to_string());
+                                            current_socket_mapper.clone();
                                         backend_info.socket_mapper_capabilities =
-                                            Some(capabilities.clone());
+                                            current_socket_mapper_caps.clone();
                                         backend_info.preferred_socket_mapper =
                                             config.preferred_socket_mapper.clone();
                                     }
@@ -1045,6 +1285,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                                                     &limit,
                                                 ) {
                                                     Ok(_) => {
+                                                        needs_backend_refresh = true; // Throttle changed
                                                         app.status_message = format!(
                                                             "Throttle applied to {} using {} backend{}",
                                                             name,
@@ -1113,6 +1354,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                                                     &limit,
                                                 ) {
                                                     Ok(_) => {
+                                                        needs_backend_refresh = true; // Throttle changed
                                                         app.status_message = format!(
                                                             "Throttle applied to {} as 'All Traffic'",
                                                             name
@@ -1239,6 +1481,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                                             &limit,
                                         ) {
                                             Ok(_) => {
+                                                needs_backend_refresh = true; // Throttle changed
                                                 app.status_message = format!(
                                                     "Throttle applied to {} (PID {})",
                                                     process_name, pid
@@ -1297,15 +1540,12 @@ async fn run_app<B: ratatui::backend::Backend>(
                                 {
                                     use crate::backends::process::socket_mapper::detect_socket_mappers;
                                     let socket_mappers = detect_socket_mappers();
-                                    backend_info.available_socket_mappers = socket_mappers
-                                        .iter()
-                                        .map(|sm| (sm.name.to_string(), sm.priority, sm.available))
-                                        .collect();
-                                    let (active_sm, capabilities) =
-                                        monitor.get_socket_mapper_info();
-                                    backend_info.active_socket_mapper = Some(active_sm.to_string());
-                                    backend_info.socket_mapper_capabilities =
-                                        Some(capabilities.clone());
+                                    backend_info.available_socket_mappers =
+                                        cached_socket_mappers.clone();
+                                    backend_info.active_monitoring = Some("pnet".to_string());
+                                    backend_info.active_socket_mapper = socket_mapper_preference
+                                        .map(|s| s.to_string())
+                                        .or_else(|| config.preferred_socket_mapper.clone());
                                     backend_info.preferred_socket_mapper =
                                         config.preferred_socket_mapper.clone();
                                 }
@@ -1510,6 +1750,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                                 // Remove throttle
                                 match throttle_manager.remove_throttle(process.pid) {
                                     Ok(_) => {
+                                        needs_backend_refresh = true; // Throttle changed
                                         app.status_message = format!(
                                             "Throttle removed from {} (PID {})",
                                             process.name, process.pid
@@ -1721,86 +1962,181 @@ async fn run_app<B: ratatui::backend::Backend>(
                     // Ignore other event types
                 }
             }
+
+            // Input was handled - we need to redraw
+            needs_redraw = true;
+            continue; // Skip to next iteration to handle more input if available
         }
 
-        // Update network stats periodically
-        if tokio::time::timeout(Duration::from_millis(1), update_interval.tick())
-            .await
-            .is_ok()
-        {
-            match monitor.update() {
-                Ok((mut process_map, interface_map)) => {
-                    // Increment bandwidth log counter
-                    bandwidth_log_counter += 1;
-                    let should_log_bandwidth = bandwidth_log_counter % 5 == 0; // Log every 5 seconds
+        // PRIORITY 2: Check for network stats updates (non-blocking!)
+        // The monitoring thread sends updates approximately once per second
+        // We use try_recv() which never blocks, keeping UI responsive at all times
+        if let Ok(update_data) = monitor_update_rx.try_recv() {
+            let update_start = std::time::Instant::now();
 
-                    // Update throttle status and history for each process
-                    for (pid, process_info) in process_map.iter_mut() {
-                        if let Some(throttle) = throttle_manager.get_throttle(*pid) {
-                            process_info.throttle_limit = Some(crate::process::ThrottleLimit {
-                                download_limit: throttle.download_limit,
-                                upload_limit: throttle.upload_limit,
-                                traffic_type: crate::process::TrafficType::All, // Backend throttles use All for now
-                            });
+            // Extract data and update backend state tracking
+            let mut process_map = update_data.process_map;
+            let interface_map = update_data.interface_map;
+            current_socket_mapper = Some(update_data.socket_mapper_name);
+            current_socket_mapper_caps = Some(update_data.socket_mapper_capabilities);
 
-                            // Log bandwidth vs throttle limit periodically
-                            if should_log_bandwidth {
-                                // Check download throttle
-                                if let Some(download_limit) = throttle.download_limit {
-                                    let actual_bps = process_info.download_rate;
-                                    let ratio = actual_bps as f64 / download_limit as f64;
+            let monitor_update_time = update_start.elapsed();
 
-                                    let status = if ratio > 1.5 {
-                                        "⚠️  THROTTLE NOT WORKING"
-                                    } else if ratio > 1.1 {
-                                        "⚠️  OVER LIMIT"
-                                    } else {
-                                        "✅ THROTTLED"
-                                    };
+            // Increment bandwidth log counter
+            bandwidth_log_counter += 1;
+            let should_log_bandwidth = bandwidth_log_counter % 5 == 0; // Log every 5 seconds
 
-                                    log::info!(
-                                        "PID {} ({}) download: actual={}/s, limit={}/s, ratio={:.2}x {}",
-                                        pid,
-                                        process_info.name,
-                                        human_readable(actual_bps),
-                                        human_readable(download_limit),
-                                        ratio,
-                                        status
-                                    );
-                                }
+            let throttle_start = std::time::Instant::now();
+            // Update throttle status and history for each process
+            for (pid, process_info) in process_map.iter_mut() {
+                if let Some(throttle) = throttle_manager.get_throttle(*pid) {
+                    process_info.throttle_limit = Some(crate::process::ThrottleLimit {
+                        download_limit: throttle.download_limit,
+                        upload_limit: throttle.upload_limit,
+                        traffic_type: crate::process::TrafficType::All, // Backend throttles use All for now
+                    });
 
-                                // Log eBPF stats if using eBPF backend
-                                #[cfg(feature = "throttle-ebpf")]
-                                let _ = throttle_manager.log_ebpf_stats(*pid);
-                            }
+                    // Log bandwidth vs throttle limit periodically
+                    if should_log_bandwidth {
+                        // Check download throttle
+                        if let Some(download_limit) = throttle.download_limit {
+                            let actual_bps = process_info.download_rate;
+                            let ratio = actual_bps as f64 / download_limit as f64;
+
+                            let status = if ratio > 1.5 {
+                                "⚠️  THROTTLE NOT WORKING"
+                            } else if ratio > 1.1 {
+                                "⚠️  OVER LIMIT"
+                            } else {
+                                "✅ THROTTLED"
+                            };
+
+                            log::info!(
+                                "PID {} ({}) download: actual={}/s, limit={}/s, ratio={:.2}x {}",
+                                pid,
+                                process_info.name,
+                                human_readable(actual_bps),
+                                human_readable(download_limit),
+                                ratio,
+                                status
+                            );
                         }
 
-                        // Track bandwidth history
-                        app.history.update(
-                            *pid,
-                            process_info.name.clone(),
-                            process_info.download_rate,
-                            process_info.upload_rate,
-                        );
+                        // Log eBPF stats if using eBPF backend
+                        #[cfg(feature = "throttle-ebpf")]
+                        let _ = throttle_manager.log_ebpf_stats(*pid);
                     }
+                }
 
-                    app.update_processes(process_map);
-                    app.update_interfaces(interface_map);
-                    // Update status with process count
-                    if !app.status_message.starts_with("Throttle")
-                        && !app.status_message.starts_with("Failed")
-                    {
-                        app.status_message = format!(
-                            "Monitoring {} process(es) on {} interface(s)",
-                            app.process_list.len(),
-                            app.interface_list.len()
-                        );
-                    }
-                }
-                Err(e) => {
-                    app.status_message = format!("Error updating: {}", e);
-                }
+                // Track bandwidth history
+                app.history.update(
+                    *pid,
+                    process_info.name.clone(),
+                    process_info.download_rate,
+                    process_info.upload_rate,
+                );
             }
+
+            let throttle_update_time = throttle_start.elapsed();
+
+            let app_update_start = std::time::Instant::now();
+            app.update_processes(process_map);
+            app.update_interfaces(interface_map);
+            let app_update_time = app_update_start.elapsed();
+
+            // Update status with process count
+            if !app.status_message.starts_with("Throttle")
+                && !app.status_message.starts_with("Failed")
+            {
+                app.status_message = format!(
+                    "Monitoring {} process(es) on {} interface(s)",
+                    app.process_list.len(),
+                    app.interface_list.len()
+                );
+            }
+
+            // Log performance metrics every 5 seconds
+            if should_log_bandwidth {
+                log::info!(
+                    "⏱️  Performance: monitor.update={:?}, throttle_loop={:?}, app.update={:?}",
+                    monitor_update_time,
+                    throttle_update_time,
+                    app_update_time
+                );
+            }
+
+            // Data updated - need to redraw and refresh backend info
+            needs_redraw = true;
+            needs_backend_refresh = true;
         }
+
+        // PRIORITY 3: Rebuild backend info only when needed (throttles changed)
+        if needs_backend_refresh {
+            let backend_info_start = std::time::Instant::now();
+            let mut backend_info = throttle_manager.get_backend_info(
+                config.preferred_upload_backend.clone(),
+                config.preferred_download_backend.clone(),
+            );
+
+            // Use cached socket mappers and current backend state (no system calls!)
+            backend_info.available_socket_mappers = cached_socket_mappers.clone();
+            backend_info.active_monitoring = Some("pnet".to_string());
+            backend_info.active_socket_mapper = current_socket_mapper.clone();
+            backend_info.socket_mapper_capabilities = current_socket_mapper_caps.clone();
+            backend_info.preferred_socket_mapper = config.preferred_socket_mapper.clone();
+
+            cached_backend_info = Some(backend_info);
+            needs_backend_refresh = false;
+
+            log::debug!(
+                "Backend info refresh took {:?}",
+                backend_info_start.elapsed()
+            );
+        }
+
+        // PRIORITY 4: Draw UI only when data changed
+        if needs_redraw {
+            let draw_start = std::time::Instant::now();
+            if let Some(ref backend_info) = cached_backend_info {
+                terminal.draw(|f| ui::draw_ui_with_backend_info(f, app, Some(backend_info)))?;
+            } else {
+                terminal.draw(|f| ui::draw_ui(f, app))?;
+            }
+            let draw_time = draw_start.elapsed();
+
+            // Log if drawing is slow (over 16ms = below 60fps)
+            if draw_time.as_millis() > 16 {
+                log::warn!(
+                    "⚠️  Slow UI draw: {:?} (processes={}, should be <16ms)",
+                    draw_time,
+                    app.process_list.len()
+                );
+            } else {
+                log::debug!("UI draw took {:?}", draw_time);
+            }
+
+            needs_redraw = false;
+        }
+
+        // Track loop performance - log if iteration took too long
+        let loop_time = loop_start.elapsed();
+        if loop_time.as_millis() > 50 {
+            log::warn!(
+                "⚠️  Slow loop iteration: {:?} (should be <50ms for smooth UI)",
+                loop_time
+            );
+        }
+
+        // Log overall performance metrics every 10 seconds
+        if last_perf_log.elapsed().as_secs() >= 10 {
+            log::info!(
+                "📊 Main loop running smoothly - last iteration: {:?}",
+                loop_time
+            );
+            last_perf_log = std::time::Instant::now();
+        }
+
+        // Small sleep to prevent busy-waiting
+        tokio::time::sleep(Duration::from_millis(1)).await;
     }
 }
