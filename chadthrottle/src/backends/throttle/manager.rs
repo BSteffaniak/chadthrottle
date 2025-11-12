@@ -192,6 +192,7 @@ impl ThrottleManager {
         BackendInfo {
             active_upload: self.default_upload.clone(),
             active_download: self.default_download.clone(),
+            active_monitoring: None, // Will be populated by caller from NetworkMonitor
             active_socket_mapper: None, // Will be populated by caller from NetworkMonitor
             available_upload: detect_upload_backends()
                 .into_iter()

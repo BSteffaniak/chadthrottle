@@ -23,11 +23,36 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 
 /// How long to keep terminated processes visible (in seconds)
 const TERMINATED_DISPLAY_DURATION: Duration = Duration::from_secs(5);
+
+/// Commands sent from UI thread to monitoring thread
+pub enum MonitorCommand {
+    /// Switch to a different socket mapper backend
+    SwitchSocketMapper {
+        backend_name: String,
+        /// Channel to send back success or error (hot-swap, no thread restart)
+        response_tx: tokio::sync::oneshot::Sender<Result<()>>,
+    },
+    /// Signal to shutdown the monitoring thread
+    Shutdown,
+}
+
+/// Update data sent from monitoring thread to UI thread
+#[derive(Debug, Clone)]
+pub struct MonitorUpdateData {
+    pub process_map: ProcessMap,
+    pub interface_map: InterfaceMap,
+    pub socket_mapper_name: String,
+    pub socket_mapper_capabilities: crate::backends::BackendCapabilities,
+}
+
+/// Update messages sent from monitoring thread to UI thread
+pub type MonitorUpdate = MonitorUpdateData;
 
 /// Connection identifier for tracking packets
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
@@ -51,6 +76,8 @@ pub struct NetworkMonitor {
     bandwidth_tracker: Arc<Mutex<BandwidthTracker>>,
     // Platform-specific process utilities
     process_utils: Box<dyn ProcessUtils>,
+    // Monitoring backend name (e.g., "pnet", "windows-poll")
+    monitoring_backend_name: &'static str,
     // Socket mapper backend information
     socket_mapper_name: String,
     socket_mapper_capabilities: crate::backends::BackendCapabilities,
@@ -59,8 +86,23 @@ pub struct NetworkMonitor {
     // Handles to packet capture threads (one per interface) - no underscore, we'll join them!
     capture_handles: Vec<thread::JoinHandle<()>>,
     last_update: Instant,
-    // Cached connection map updated asynchronously
-    cached_connection_map: Arc<Mutex<ConnectionMap>>,
+    // Cached PROCESSED connection data updated asynchronously
+    cached_processed_data: Arc<Mutex<ProcessedConnectionData>>,
+    // Cached interface list (doesn't change at runtime)
+    cached_interfaces: Vec<NetworkInterface>,
+    // Cached process existence checks (updated every update cycle)
+    cached_process_exists: HashMap<i32, bool>,
+    last_process_check: Instant,
+}
+
+/// Pre-processed connection data ready for use by the UI thread
+/// This is built by the background async task to avoid blocking the UI
+#[derive(Default, Clone)]
+struct ProcessedConnectionData {
+    socket_map: HashMap<u64, (i32, String)>,
+    connection_map: HashMap<ConnectionKey, i32>,
+    pids_with_names: Vec<(i32, String)>,
+    raw_connection_map: ConnectionMap, // Kept for populate_connections
 }
 
 struct BandwidthTracker {
@@ -100,6 +142,7 @@ pub struct ProcessBandwidth {
     last_local_tx_bytes: u64,
 }
 
+#[derive(Clone)]
 struct InterfaceBandwidth {
     name: String,
     rx_bytes: u64,
@@ -108,6 +151,7 @@ struct InterfaceBandwidth {
     last_tx_bytes: u64,
 }
 
+#[derive(Clone)]
 struct ProcessInterfaceBandwidth {
     rx_bytes: u64,
     tx_bytes: u64,
@@ -185,36 +229,74 @@ impl NetworkMonitor {
         // Create shutdown flag for graceful thread termination
         let shutdown_flag = Arc::new(AtomicBool::new(false));
 
-        // Initialize cached connection map
-        let cached_connection_map = Arc::new(Mutex::new(ConnectionMap::default()));
+        // Initialize cached processed connection data
+        let cached_processed_data = Arc::new(Mutex::new(ProcessedConnectionData::default()));
+
+        // Cache interface list once at startup
+        let cached_interfaces = Self::find_all_interfaces();
+        log::info!("Cached {} network interfaces", cached_interfaces.len());
 
         // Create monitor instance first (without starting capture thread yet)
         let mut monitor = Self {
             bandwidth_tracker,
             process_utils,
+            monitoring_backend_name: "pnet",
             socket_mapper_name,
             socket_mapper_capabilities,
             shutdown_flag: Arc::clone(&shutdown_flag),
             capture_handles: Vec::new(),
             last_update: Instant::now(),
-            cached_connection_map: Arc::clone(&cached_connection_map),
+            cached_processed_data: Arc::clone(&cached_processed_data),
+            cached_interfaces: cached_interfaces.clone(),
+            cached_process_exists: HashMap::new(),
+            last_process_check: Instant::now(),
         };
 
         // Spawn background async task to update connection map
         // This prevents blocking the UI thread during connection map updates
-        let cached_map_clone = Arc::clone(&cached_connection_map);
+        let cached_data_clone = Arc::clone(&cached_processed_data);
         let shutdown_clone = Arc::clone(&shutdown_flag);
         let process_utils = crate::backends::process::create_process_utils_with_socket_mapper(
             socket_mapper_preference,
         );
 
+        // Initialize connection map BEFORE starting packet capture to avoid race condition
+        log::info!("Initializing connection map before packet capture...");
+        if let Ok(initial_conn_map) = monitor.process_utils.get_connection_map() {
+            log::info!(
+                "Initial connection map fetched with {} sockets",
+                initial_conn_map.socket_to_pid.len()
+            );
+
+            // Process the connection map in the main thread for initialization
+            let processed = Self::process_connection_map(initial_conn_map);
+
+            if let Ok(mut cached) = cached_data_clone.lock() {
+                *cached = processed;
+            }
+        } else {
+            log::warn!(
+                "Failed to get initial connection map - processes may not appear immediately"
+            );
+        }
+
+        // Update socket map from initial processed data
+        if let Err(e) = monitor.update_socket_map() {
+            log::warn!("Failed to initialize socket map: {}", e);
+        }
+
+        // Spawn background async task to fetch AND process connection maps
+        // This keeps ALL heavy computation out of the UI thread
         tokio::spawn(async move {
             while !shutdown_clone.load(Ordering::Relaxed) {
-                // Fetch connection map (this is the blocking I/O operation)
+                // Fetch connection map (blocking I/O)
                 if let Ok(conn_map) = process_utils.get_connection_map() {
-                    // Update the cached map
-                    if let Ok(mut cached) = cached_map_clone.lock() {
-                        *cached = conn_map;
+                    // Process it (heavy computation - done in background!)
+                    let processed = NetworkMonitor::process_connection_map(conn_map);
+
+                    // Store pre-processed results (fast!)
+                    if let Ok(mut cached) = cached_data_clone.lock() {
+                        *cached = processed;
                     }
                 }
 
@@ -246,6 +328,11 @@ impl NetworkMonitor {
         Ok(monitor)
     }
 
+    /// Get monitoring backend name (e.g., "pnet")
+    pub fn get_monitoring_backend_name(&self) -> &'static str {
+        self.monitoring_backend_name
+    }
+
     /// Get socket mapper backend information
     pub fn get_socket_mapper_info(&self) -> (&str, &crate::backends::BackendCapabilities) {
         (&self.socket_mapper_name, &self.socket_mapper_capabilities)
@@ -255,18 +342,59 @@ impl NetworkMonitor {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_update).as_secs_f64();
 
-        // Update socket inode mapping
+        // CRITICAL OPTIMIZATION: Refresh process_utils caches ONCE per update
+        // This refreshes the System instance on Windows, making all subsequent
+        // process_exists() calls use the same cached data instead of creating
+        // new System instances (which is extremely expensive: 10-20ms each)
+        self.process_utils.refresh_caches();
+
+        // Update socket/connection maps from cached data
+        // The background async task updates cached_connection_map every second
+        // We rebuild our internal maps from the cache to avoid blocking
         self.update_socket_map()?;
 
-        // Calculate rates and build process map and interface map
+        // CRITICAL: Update process existence cache OUTSIDE the lock
+        // Only check every 2 seconds to avoid excessive Windows API calls
+        if now.duration_since(self.last_process_check).as_secs() >= 2 {
+            // Get list of PIDs to check
+            let pids_to_check: Vec<i32> = {
+                let tracker = self.bandwidth_tracker.lock().unwrap();
+                tracker.process_bandwidth.keys().copied().collect()
+            };
+
+            // Check process existence WITHOUT holding the lock
+            let mut new_cache = HashMap::new();
+            for pid in pids_to_check {
+                new_cache.insert(pid, self.process_utils.process_exists(pid));
+            }
+
+            self.cached_process_exists = new_cache;
+            self.last_process_check = now;
+        }
+
+        // PHASE 1: Collect data from tracker (hold lock briefly)
+        let (
+            process_bandwidth_snapshot,
+            interface_bandwidth_snapshot,
+            process_interface_snapshot,
+            terminated_snapshot,
+        ) = {
+            let tracker = self.bandwidth_tracker.lock().unwrap();
+            (
+                tracker.process_bandwidth.clone(),
+                tracker.interface_bandwidth.clone(),
+                tracker.process_interface_bandwidth.clone(),
+                tracker.terminated_processes.clone(),
+            )
+        };
+        // Lock is released here!
+
+        // PHASE 2: Process data WITHOUT holding the lock
         let mut process_map = ProcessMap::new();
         let mut interface_map = InterfaceMap::new();
-        let mut tracker = self.bandwidth_tracker.lock().unwrap();
-
-        // First pass: collect all data we need (to avoid multiple borrows)
         let mut process_data = Vec::new();
 
-        for (&pid, bandwidth) in &tracker.process_bandwidth {
+        for (&pid, bandwidth) in &process_bandwidth_snapshot {
             let rx_diff = bandwidth.rx_bytes.saturating_sub(bandwidth.last_rx_bytes);
             let tx_diff = bandwidth.tx_bytes.saturating_sub(bandwidth.last_tx_bytes);
 
@@ -317,8 +445,12 @@ impl NetworkMonitor {
                 0
             };
 
-            let process_exists = self.process_utils.process_exists(pid);
-            let term_time = tracker.terminated_processes.get(&pid).copied();
+            let process_exists = self
+                .cached_process_exists
+                .get(&pid)
+                .copied()
+                .unwrap_or(true);
+            let term_time = terminated_snapshot.get(&pid).copied();
 
             process_data.push((
                 pid,
@@ -338,17 +470,6 @@ impl NetworkMonitor {
                 process_exists,
                 term_time,
             ));
-        }
-
-        // Update last values now that we're done reading
-        for (&pid, bandwidth) in &mut tracker.process_bandwidth {
-            bandwidth.last_rx_bytes = bandwidth.rx_bytes;
-            bandwidth.last_tx_bytes = bandwidth.tx_bytes;
-            // NEW: Update categorized last values
-            bandwidth.last_internet_rx_bytes = bandwidth.internet_rx_bytes;
-            bandwidth.last_internet_tx_bytes = bandwidth.internet_tx_bytes;
-            bandwidth.last_local_rx_bytes = bandwidth.local_rx_bytes;
-            bandwidth.last_local_tx_bytes = bandwidth.local_tx_bytes;
         }
 
         // Track PIDs to remove and newly terminated
@@ -395,8 +516,7 @@ impl NetworkMonitor {
                 proc_info.local_total_upload = local_tx_bytes;
 
                 // Populate per-interface stats for this process
-                proc_info.interface_stats = tracker
-                    .process_interface_bandwidth
+                proc_info.interface_stats = process_interface_snapshot
                     .iter()
                     .filter(|((p, _), _)| *p == pid)
                     .map(|((_, iface), bw)| {
@@ -520,24 +640,12 @@ impl NetworkMonitor {
             }
         }
 
-        // Record newly terminated processes
-        for pid in newly_terminated {
-            tracker.terminated_processes.insert(pid, now);
-        }
-
-        // Clean up old terminated processes
-        for pid in pids_to_remove {
-            tracker.process_bandwidth.remove(&pid);
-            tracker.terminated_processes.remove(&pid);
-        }
-
-        // Build interface map with aggregated statistics
-        let interfaces = Self::find_all_interfaces();
-        for interface in interfaces {
+        // Build interface map with aggregated statistics (use cached interfaces!)
+        for interface in &self.cached_interfaces {
             let iface_name = interface.name.clone();
 
             // Get interface bandwidth stats
-            let iface_bandwidth = tracker.interface_bandwidth.get(&iface_name);
+            let iface_bandwidth = interface_bandwidth_snapshot.get(&iface_name);
 
             let (total_download_rate, total_upload_rate) = if let Some(bw) = iface_bandwidth {
                 let rx_diff = bw.rx_bytes.saturating_sub(bw.last_rx_bytes);
@@ -561,8 +669,7 @@ impl NetworkMonitor {
             };
 
             // Count processes using this interface
-            let process_count = tracker
-                .process_interface_bandwidth
+            let process_count = process_interface_snapshot
                 .keys()
                 .filter(|(_, iface)| iface == &iface_name)
                 .map(|(pid, _)| pid)
@@ -595,63 +702,186 @@ impl NetworkMonitor {
             );
         }
 
-        // Update last values for interface bandwidth
-        for (_, bw) in &mut tracker.interface_bandwidth {
-            bw.last_rx_bytes = bw.rx_bytes;
-            bw.last_tx_bytes = bw.tx_bytes;
-        }
+        // PHASE 3: Update tracker with results (hold lock briefly)
+        {
+            let mut tracker = self.bandwidth_tracker.lock().unwrap();
 
-        // Update last values for process-interface bandwidth
-        for (_, bw) in &mut tracker.process_interface_bandwidth {
-            bw.last_rx_bytes = bw.rx_bytes;
-            bw.last_tx_bytes = bw.tx_bytes;
-            bw.last_internet_rx_bytes = bw.internet_rx_bytes;
-            bw.last_internet_tx_bytes = bw.internet_tx_bytes;
-            bw.last_local_rx_bytes = bw.local_rx_bytes;
-            bw.last_local_tx_bytes = bw.local_tx_bytes;
+            // Update last values for process bandwidth
+            for (&pid, bandwidth) in &mut tracker.process_bandwidth {
+                bandwidth.last_rx_bytes = bandwidth.rx_bytes;
+                bandwidth.last_tx_bytes = bandwidth.tx_bytes;
+                bandwidth.last_internet_rx_bytes = bandwidth.internet_rx_bytes;
+                bandwidth.last_internet_tx_bytes = bandwidth.internet_tx_bytes;
+                bandwidth.last_local_rx_bytes = bandwidth.local_rx_bytes;
+                bandwidth.last_local_tx_bytes = bandwidth.local_tx_bytes;
+            }
+
+            // Update last values for interface bandwidth
+            for (_, bw) in &mut tracker.interface_bandwidth {
+                bw.last_rx_bytes = bw.rx_bytes;
+                bw.last_tx_bytes = bw.tx_bytes;
+            }
+
+            // Update last values for process-interface bandwidth
+            for (_, bw) in &mut tracker.process_interface_bandwidth {
+                bw.last_rx_bytes = bw.rx_bytes;
+                bw.last_tx_bytes = bw.tx_bytes;
+                bw.last_internet_rx_bytes = bw.internet_rx_bytes;
+                bw.last_internet_tx_bytes = bw.internet_tx_bytes;
+                bw.last_local_rx_bytes = bw.local_rx_bytes;
+                bw.last_local_tx_bytes = bw.local_tx_bytes;
+            }
+
+            // Record newly terminated processes
+            for pid in newly_terminated {
+                tracker.terminated_processes.insert(pid, now);
+            }
+
+            // Clean up old terminated processes
+            for pid in pids_to_remove {
+                tracker.process_bandwidth.remove(&pid);
+                tracker.terminated_processes.remove(&pid);
+            }
         }
+        // Lock is released here!
 
         self.last_update = now;
 
-        // CRITICAL: Drop the tracker lock before trying to acquire it again below
-        // This prevents a self-deadlock when we try to lock bandwidth_tracker at line 623
-        drop(tracker);
-
-        // Populate connections for each process using cached connection map
-        // This is non-blocking because we're using the cache updated by the async task
-        let conn_map = if let Ok(cached) = self.cached_connection_map.lock() {
+        // Populate connections for each process using cached data
+        // This is fast because we're reading pre-processed data from the cache
+        let processed = if let Ok(cached) = self.cached_processed_data.lock() {
             cached.clone()
         } else {
-            ConnectionMap::default()
-        };
-        let socket_map = if let Ok(tracker) = self.bandwidth_tracker.lock() {
-            tracker.socket_map.clone()
-        } else {
-            HashMap::new()
+            ProcessedConnectionData::default()
         };
 
         for process in process_map.values_mut() {
-            process.populate_connections(&conn_map, &socket_map);
+            process.populate_connections(&processed.raw_connection_map, &processed.socket_map);
         }
 
         Ok((process_map, interface_map))
     }
 
-    /// Update socket inode -> PID mapping
-    /// Uses a two-phase update to avoid race conditions:
-    /// 1. Build new maps while old maps are still valid for packet capture
-    /// 2. Atomically swap old maps with new maps
-    fn update_socket_map(&self) -> Result<()> {
-        // Phase 1: Build new maps WITHOUT holding the lock
-        // This allows packet capture to continue using old maps
+    /// Run the monitoring loop in a background thread
+    /// This is the truly async solution - the monitor runs independently and sends updates
+    /// to the UI thread via a channel, allowing the UI to remain responsive
+    pub fn run_monitoring_loop(
+        mut self,
+        mut cmd_rx: mpsc::UnboundedReceiver<MonitorCommand>,
+        update_tx: mpsc::UnboundedSender<MonitorUpdate>,
+    ) {
+        log::info!("Starting monitoring background thread");
+        let mut last_update = Instant::now();
 
-        // Get connection map from cache (non-blocking!)
-        // The cache is updated asynchronously by the background tokio task
-        let conn_map = if let Ok(cached) = self.cached_connection_map.lock() {
-            cached.clone()
-        } else {
-            ConnectionMap::default()
-        };
+        loop {
+            // Check for commands (non-blocking)
+            match cmd_rx.try_recv() {
+                Ok(MonitorCommand::Shutdown) => {
+                    log::info!("Monitoring thread received shutdown command");
+                    break;
+                }
+                Ok(MonitorCommand::SwitchSocketMapper {
+                    backend_name,
+                    response_tx,
+                }) => {
+                    log::info!(
+                        "Monitoring thread hot-swapping socket mapper to: {}",
+                        backend_name
+                    );
+
+                    // Extract bandwidth data before replacing monitor
+                    let (process_bandwidth, terminated_processes) = self.extract_bandwidth_data();
+                    let process_count = process_bandwidth.len();
+                    let terminated_count = terminated_processes.len();
+
+                    // Create new monitor with different socket mapper
+                    match NetworkMonitor::with_socket_mapper(Some(&backend_name)) {
+                        Ok(mut new_monitor) => {
+                            // Restore bandwidth data
+                            new_monitor
+                                .restore_bandwidth_data(process_bandwidth, terminated_processes);
+
+                            log::info!(
+                                "Socket mapper switched successfully (preserved {} processes, {} terminated) - hot-swapping monitor",
+                                process_count,
+                                terminated_count
+                            );
+
+                            // HOT-SWAP: Replace self with new monitor
+                            // Old monitor will be dropped (cleanup threads), new one takes over
+                            self = new_monitor;
+
+                            // Send success response
+                            let _ = response_tx.send(Ok(()));
+
+                            // Continue monitoring with new backend!
+                        }
+                        Err(e) => {
+                            log::error!("Failed to switch socket mapper: {}", e);
+                            let _ = response_tx.send(Err(e));
+                            // Continue with existing monitor
+                        }
+                    }
+                }
+                Err(mpsc::error::TryRecvError::Empty) => {
+                    // No command, continue monitoring
+                }
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    log::warn!("Command channel disconnected, shutting down monitoring thread");
+                    break;
+                }
+            }
+
+            // Perform update approximately once per second
+            let now = Instant::now();
+            if now.duration_since(last_update) >= Duration::from_secs(1) {
+                let update_start = Instant::now();
+
+                match self.update() {
+                    Ok((process_map, interface_map)) => {
+                        let update_time = update_start.elapsed();
+
+                        // Send update to UI thread (non-blocking) with socket mapper info
+                        let update_data = MonitorUpdateData {
+                            process_map,
+                            interface_map,
+                            socket_mapper_name: self.socket_mapper_name.clone(),
+                            socket_mapper_capabilities: self.socket_mapper_capabilities.clone(),
+                        };
+
+                        if update_tx.send(update_data).is_err() {
+                            log::warn!(
+                                "Update channel disconnected, shutting down monitoring thread"
+                            );
+                            break;
+                        }
+
+                        // Log performance occasionally
+                        if update_time.as_millis() > 100 {
+                            log::info!("⏱️  Background monitor.update() took {:?}", update_time);
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Monitor update failed: {}", e);
+                        // Continue trying - don't break the loop
+                    }
+                }
+
+                last_update = now;
+            }
+
+            // Sleep briefly to avoid busy-waiting
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        log::info!("Monitoring background thread exiting");
+    }
+
+    /// Process raw connection map into usable data structures
+    /// This is the heavy computation that should run in the background task
+    fn process_connection_map(conn_map: ConnectionMap) -> ProcessedConnectionData {
+        // Clone the raw map first since we'll be moving parts of it
+        let raw_map = conn_map.clone();
 
         let mut new_socket_map = conn_map.socket_to_pid;
         let mut new_connection_map = HashMap::new();
@@ -712,9 +942,7 @@ impl NetworkMonitor {
             }
         }
 
-        // Phase 2: Build list of PIDs with connections and their names
-        // This ensures all processes with active connections will be visible in the UI
-        // even if no packets have been captured yet
+        // Build list of PIDs with connections and their names
         let pids_with_names: Vec<(i32, String)> = new_connection_map
             .values()
             .copied()
@@ -730,24 +958,69 @@ impl NetworkMonitor {
             })
             .collect();
 
-        // Phase 3: Atomically replace old maps with new maps and initialize process_bandwidth
-        // This is the ONLY point where we hold the lock and modify the maps
-        // The critical section is minimal - just pointer swaps and initialization
+        ProcessedConnectionData {
+            socket_map: new_socket_map,
+            connection_map: new_connection_map,
+            pids_with_names,
+            raw_connection_map: raw_map, // Keep the raw map for populate_connections
+        }
+    }
+
+    /// Update socket inode -> PID mapping from pre-processed cache
+    /// This is now a fast operation that just copies from the cache
+    fn update_socket_map(&self) -> Result<()> {
+        // Get pre-processed data from cache (fast - already processed!)
+        let processed = if let Ok(cached) = self.cached_processed_data.lock() {
+            cached.clone()
+        } else {
+            ProcessedConnectionData::default()
+        };
+
+        // Atomically update tracker with pre-processed data (fast!)
         let mut tracker = self.bandwidth_tracker.lock().unwrap();
 
         log::debug!(
             "Updating connection maps: {} sockets, {} connections (TCP+UDP)",
-            new_socket_map.len(),
-            new_connection_map.len()
+            processed.socket_map.len(),
+            processed.connection_map.len()
         );
 
-        tracker.socket_map = new_socket_map;
-        tracker.connection_map = new_connection_map;
+        // Log sample of UDP connections for debugging
+        if log::log_enabled!(log::Level::Debug) {
+            let udp_count = processed
+                .connection_map
+                .iter()
+                .filter(|(k, _)| k.protocol == Protocol::Udp)
+                .count();
+            log::debug!("  UDP connections: {}", udp_count);
+
+            // Log first 5 UDP connections
+            for (i, (key, pid)) in processed
+                .connection_map
+                .iter()
+                .filter(|(k, _)| k.protocol == Protocol::Udp)
+                .take(5)
+                .enumerate()
+            {
+                log::debug!(
+                    "  UDP[{}]: {}:{} <-> {}:{} -> PID {}",
+                    i,
+                    key.local_addr,
+                    key.local_port,
+                    key.remote_addr,
+                    key.remote_port,
+                    pid
+                );
+            }
+        }
+
+        tracker.socket_map = processed.socket_map;
+        tracker.connection_map = processed.connection_map;
 
         // Initialize process_bandwidth entries for all processes with active connections
         // This prevents processes from being "invisible" if they have connections
         // but haven't had packets captured yet (solves the cold start problem)
-        for (pid, name) in pids_with_names {
+        for (pid, name) in processed.pids_with_names {
             tracker
                 .process_bandwidth
                 .entry(pid)
@@ -767,6 +1040,11 @@ impl NetworkMonitor {
                     last_local_tx_bytes: 0,
                 });
         }
+
+        log::debug!(
+            "Initialized {} processes in process_bandwidth map",
+            tracker.process_bandwidth.len()
+        );
 
         Ok(())
     }
@@ -842,12 +1120,43 @@ impl NetworkMonitor {
     fn find_all_interfaces() -> Vec<NetworkInterface> {
         let interfaces = datalink::interfaces();
 
-        // Return all interfaces that are up and have IP addresses
+        log::debug!("Found {} total interfaces from pnet", interfaces.len());
+        for iface in &interfaces {
+            log::debug!(
+                "  Interface: {} (up={}, ips={})",
+                iface.name,
+                iface.is_up(),
+                iface.ips.len()
+            );
+        }
+
+        // Return all interfaces that have IP addresses
+        // On Windows/Npcap, interfaces may report as "not up" even when functional
         // We include loopback as it can be useful for local services
-        interfaces
+        let filtered: Vec<_> = interfaces
             .into_iter()
-            .filter(|iface| iface.is_up() && !iface.ips.is_empty())
-            .collect()
+            .filter(|iface| {
+                // On Windows, just check for non-zero IP (0.0.0.0 means unconfigured)
+                #[cfg(target_os = "windows")]
+                {
+                    !iface.ips.is_empty() && !iface.ips.iter().all(|ip| ip.ip().is_unspecified())
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    iface.is_up() && !iface.ips.is_empty()
+                }
+            })
+            .collect();
+
+        if filtered.is_empty() {
+            log::warn!("No suitable network interfaces found for packet capture!");
+            log::warn!(
+                "This may be due to insufficient permissions (try running as Administrator)"
+            );
+            log::warn!("Or Npcap may not be installed correctly");
+        }
+
+        filtered
     }
 
     fn process_packet(
@@ -994,14 +1303,52 @@ impl NetworkMonitor {
 
         // Check for exact matches first
         let mut pid_and_direction: Option<(i32, bool)> = None; // (pid, is_outbound)
+        let debug_match = tracker.packets_unmatched < 10;
 
         if let Some(&pid) = tracker.connection_map.get(&key_outbound) {
             pid_and_direction = Some((pid, true));
+            if debug_match {
+                log::debug!(
+                    "✓ Matched outbound: {}:{} -> {}:{} to PID {}",
+                    src_addr,
+                    src_port,
+                    dst_addr,
+                    dst_port,
+                    pid
+                );
+            }
         } else if let Some(&pid) = tracker.connection_map.get(&key_inbound) {
             pid_and_direction = Some((pid, false));
+            if debug_match {
+                log::debug!(
+                    "✓ Matched inbound: {}:{} <- {}:{} to PID {}",
+                    dst_addr,
+                    dst_port,
+                    src_addr,
+                    src_port,
+                    pid
+                );
+            }
+        } else if protocol == Protocol::Tcp && debug_match {
+            // TCP should always have exact matches - log why it failed
+            log::debug!(
+                "✗ TCP no exact match: {}:{} <-> {}:{}",
+                src_addr,
+                src_port,
+                dst_addr,
+                dst_port
+            );
+            log::debug!(
+                "  Available TCP connections in map: {}",
+                tracker
+                    .connection_map
+                    .keys()
+                    .filter(|k| k.protocol == Protocol::Tcp)
+                    .count()
+            );
         } else if protocol == Protocol::Udp {
-            // Try UDP wildcard matching (for unconnected UDP sockets)
-            // Look for UDP socket with matching local addr/port but wildcard remote (0.0.0.0:0)
+            // Enhanced UDP wildcard matching for Windows
+            // Level 1: Try exact match with wildcard remote (original logic)
             for (key, &pid) in tracker.connection_map.iter() {
                 if key.protocol == Protocol::Udp
                     && key.local_addr == src_addr
@@ -1009,19 +1356,82 @@ impl NetworkMonitor {
                     && (key.remote_addr.is_unspecified() || key.remote_port == 0)
                 {
                     pid_and_direction = Some((pid, true));
+                    if debug_match {
+                        log::debug!(
+                            "✓ UDP Level 1 match (exact IP+port, wildcard remote): {}:{} -> PID {}",
+                            src_addr,
+                            src_port,
+                            pid
+                        );
+                    }
                     break;
                 }
             }
 
-            // If still no match, try inbound direction for UDP wildcard
+            // Level 2: If no match, try matching on port with 0.0.0.0 local addr
+            // Windows often reports UDP sockets as 0.0.0.0:PORT
             if pid_and_direction.is_none() {
                 for (key, &pid) in tracker.connection_map.iter() {
                     if key.protocol == Protocol::Udp
-                        && key.local_addr == dst_addr
+                        && key.local_addr.is_unspecified()  // 0.0.0.0 or ::
+                        && key.local_port == src_port
+                        && (key.remote_addr.is_unspecified() || key.remote_port == 0)
+                    {
+                        pid_and_direction = Some((pid, true));
+                        if debug_match {
+                            log::debug!(
+                                "✓ UDP Level 2 match (0.0.0.0:{}): {}:{} -> PID {}",
+                                src_port,
+                                src_addr,
+                                src_port,
+                                pid
+                            );
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // Level 3: For inbound UDP, try matching destination with wildcard binding
+            if pid_and_direction.is_none() {
+                for (key, &pid) in tracker.connection_map.iter() {
+                    if key.protocol == Protocol::Udp
+                        && (key.local_addr == dst_addr || key.local_addr.is_unspecified())
                         && key.local_port == dst_port
                         && (key.remote_addr.is_unspecified() || key.remote_port == 0)
                     {
-                        pid_and_direction = Some((pid, false));
+                        pid_and_direction = Some((pid, false)); // inbound
+                        if debug_match {
+                            log::debug!(
+                                "✓ UDP Level 3 match (inbound to {}:{}): PID {}",
+                                dst_addr,
+                                dst_port,
+                                pid
+                            );
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // Level 4: Last resort - match ANY UDP socket from same source IP
+            // Only for ephemeral ports (>1024) to avoid false positives
+            if pid_and_direction.is_none() && src_port > 1024 {
+                for (key, &pid) in tracker.connection_map.iter() {
+                    if key.protocol == Protocol::Udp
+                        && key.local_port > 1024  // Also ephemeral
+                        && (key.local_addr == src_addr || key.local_addr.is_unspecified())
+                        && (key.remote_addr.is_unspecified() || key.remote_port == 0)
+                    {
+                        pid_and_direction = Some((pid, true));
+                        if debug_match {
+                            log::debug!(
+                                "✓ UDP Level 4 match (same IP, ephemeral port): {}:{} -> PID {} (approx)",
+                                src_addr,
+                                src_port,
+                                pid
+                            );
+                        }
                         break;
                     }
                 }
@@ -1164,7 +1574,7 @@ impl NetworkMonitor {
                 });
             iface_bandwidth.rx_bytes += packet_len as u64;
 
-            // Log first few unmatched packets for debugging
+            // Log first few unmatched packets for debugging with more detail
             if tracker.packets_unmatched <= 10 {
                 log::debug!(
                     "Unmatched packet: {}:{} -> {}:{} ({:?}, {} bytes)",
@@ -1175,6 +1585,28 @@ impl NetworkMonitor {
                     protocol,
                     packet_len
                 );
+
+                // Show why it didn't match
+                if protocol == Protocol::Udp {
+                    let has_matching_port = tracker.connection_map.keys().any(|k| {
+                        k.protocol == Protocol::Udp
+                            && (k.local_port == src_port || k.local_port == dst_port)
+                    });
+                    let has_matching_ip = tracker.connection_map.keys().any(|k| {
+                        k.protocol == Protocol::Udp
+                            && (k.local_addr == src_addr || k.local_addr == dst_addr)
+                    });
+                    log::debug!(
+                        "  Match debug: port_in_map={}, ip_in_map={}, total_udp_conns={}",
+                        has_matching_port,
+                        has_matching_ip,
+                        tracker
+                            .connection_map
+                            .keys()
+                            .filter(|k| k.protocol == Protocol::Udp)
+                            .count()
+                    );
+                }
             } else if tracker.packets_unmatched == 11 {
                 log::debug!("Further unmatched packets will not be logged");
             }

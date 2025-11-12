@@ -29,11 +29,12 @@ impl MonitorBackend for PnetMonitor {
     }
 
     fn is_available() -> bool {
-        // pnet works on Linux and BSD with raw sockets
+        // pnet works on Linux and BSD with raw sockets, and Windows with Npcap
         cfg!(target_os = "linux")
             || cfg!(target_os = "freebsd")
             || cfg!(target_os = "openbsd")
             || cfg!(target_os = "netbsd")
+            || cfg!(target_os = "windows")
     }
 
     fn capabilities(&self) -> BackendCapabilities {
