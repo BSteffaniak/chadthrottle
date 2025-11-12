@@ -1898,6 +1898,45 @@ fn draw_backend_info(f: &mut Frame, area: Rect, app: &mut AppState, backend_info
     )));
     text.push(Line::from(""));
 
+    // Show currently active monitoring backend
+    if let Some(monitoring_backend) = &backend_info.active_monitoring {
+        text.push(Line::from(vec![
+            Span::styled(
+                "📡 Monitoring: ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                monitoring_backend,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" (packet capture)", Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+
+    if let Some(socket_mapper) = &backend_info.active_socket_mapper {
+        text.push(Line::from(vec![
+            Span::styled(
+                "🔌 Socket Mapper: ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                socket_mapper,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" (PID mapping)", Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+
+    text.push(Line::from(""));
+
     // Get backend stats from backend_info
     let backend_stats = &backend_info.backend_stats;
 

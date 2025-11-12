@@ -165,6 +165,7 @@ pub struct DownloadBackendInfo {
 pub struct BackendInfo {
     pub active_upload: Option<String>,
     pub active_download: Option<String>,
+    pub active_monitoring: Option<String>, // NEW: e.g., "pnet"
     pub active_socket_mapper: Option<String>,
     pub available_upload: Vec<(String, BackendPriority, bool)>,
     pub available_download: Vec<(String, BackendPriority, bool)>,
