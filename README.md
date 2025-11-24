@@ -1,6 +1,6 @@
 # 🔥 ChadThrottle
 
-**A blazingly fast TUI network monitor and throttler for Linux** - like NetLimiter for Windows or Snail for macOS, but more chad.
+**A blazingly fast cross-platform TUI network monitor with Linux throttling support** - like NetLimiter for Windows or Snail for macOS, but more chad.
 
 ## Features
 
@@ -18,15 +18,18 @@
 
 ### Prerequisites
 
-**Required:**
+**For monitoring (all platforms):**
+
+- Root/Administrator access for packet capture
+
+**For throttling (Linux only):**
 
 - Linux kernel 2.6.29+ with cgroups support
 - `tc` (traffic control) - usually part of `iproute2` package
-- Root access for packet capture and traffic control
 
-**Optional (for download throttling):**
+**Optional (for bidirectional throttling on Linux):**
 
-- `ifb` kernel module for bidirectional throttling
+- `ifb` kernel module for download throttling
 - Without IFB: Upload throttling still works
 
 ### Build from source
