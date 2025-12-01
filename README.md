@@ -94,7 +94,7 @@ sudo chadthrottle --pid 1234 --download-limit 1.5M
 sudo chadthrottle --pid 1234 --download-limit 1M --duration 30
 
 # Use specific backends
-sudo chadthrottle --pid 1234 --download-limit 1M --upload-backend tc-htb --download-backend ebpf-cgroup
+sudo chadthrottle --pid 1234 --download-limit 1M --upload-backend tc_htb --download-backend ifb_tc
 ```
 
 **Bandwidth limit formats:**
