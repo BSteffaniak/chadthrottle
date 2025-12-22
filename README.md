@@ -64,12 +64,27 @@ sudo chadthrottle
 
 #### Keyboard Shortcuts
 
+**Navigation:**
 - `↑`/`k` - Move selection up
 - `↓`/`j` - Move selection down
+- `i` - Toggle interface view
+- `l` - Cycle traffic view (All/Internet/Local)
+- `Enter` - View details (process or interface)
+- `Tab` - Switch tabs (in detail view)
+- `Space` - Toggle interface filter (in interface list)
+- `A` - Toggle All/None interfaces (in interface list)
+
+**Actions:**
 - `t` - Throttle selected process (opens dialog)
 - `r` - Remove throttle from selected process
+- `g` - Toggle bandwidth graph
+- `f` - Freeze/unfreeze sort order
+
+**System:**
+- `b` - View/switch backends
 - `h`/`?` - Toggle help
-- `q`/`Esc` - Quit
+- `q`/`Esc` - Quit (or close modal if open)
+- `Ctrl+C` - Force quit (always exits)
 
 **In Throttle Dialog:**
 
@@ -184,8 +199,8 @@ ChadThrottle implements accurate **bidirectional** per-process throttling using:
 - [x] IPv4 + IPv6 support
 - [x] Graceful degradation without IFB
 - [x] Apply throttling to existing processes (cgroups)
-- [ ] Bandwidth usage graphs
-- [ ] Save/load throttle profiles
+- [x] Bandwidth usage graphs
+- [x] Save/load throttle profiles
 - [ ] Per-connection throttling
 - [ ] Domain whitelist/blacklist
 - [x] eBPF-based throttling (alternative to IFB)
