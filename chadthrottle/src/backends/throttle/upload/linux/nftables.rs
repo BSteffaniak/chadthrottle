@@ -1,10 +1,10 @@
 // nftables Upload Throttling Backend
 
 use crate::backends::cgroup::{CgroupBackend, CgroupHandle};
-use crate::backends::throttle::UploadThrottleBackend;
 use crate::backends::throttle::linux_nft_utils::*;
+use crate::backends::throttle::UploadThrottleBackend;
 use crate::backends::{BackendCapabilities, BackendPriority};
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 
 /// nftables-based upload (egress) throttling backend
