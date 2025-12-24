@@ -32,10 +32,10 @@
 // in rules that never match, causing throttling to silently fail.
 
 use crate::backends::cgroup::{CgroupBackend, CgroupHandle};
-use crate::backends::throttle::DownloadThrottleBackend;
 use crate::backends::throttle::linux_nft_utils::*;
+use crate::backends::throttle::DownloadThrottleBackend;
 use crate::backends::{BackendCapabilities, BackendPriority};
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 
 /// nftables-based download (ingress) throttling backend

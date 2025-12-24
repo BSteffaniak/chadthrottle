@@ -18,7 +18,7 @@ pub mod linux_nft_utils;
 pub mod linux_ebpf_utils;
 
 #[cfg(all(target_os = "linux", feature = "throttle-ebpf"))]
-pub use linux_ebpf_utils::{BpfAttachMethod, BpfConfig, init_bpf_config};
+pub use linux_ebpf_utils::{init_bpf_config, BpfAttachMethod, BpfConfig};
 
 // Re-export manager
 pub use manager::ThrottleManager;
@@ -210,6 +210,15 @@ pub fn detect_upload_backends() -> Vec<UploadBackendInfo> {
         });
     }
 
+    #[cfg(target_os = "macos")]
+    {
+        backends.push(UploadBackendInfo {
+            name: "dnctl",
+            priority: BackendPriority::Best,
+            available: upload::macos::DnctlUpload::is_available(),
+        });
+    }
+
     backends
 }
 
@@ -250,6 +259,15 @@ pub fn detect_download_backends() -> Vec<DownloadBackendInfo> {
             name: "tc_police",
             priority: BackendPriority::Fallback,
             available: download::linux::tc_police::TcPoliceDownload::is_available(),
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        backends.push(DownloadBackendInfo {
+            name: "dnctl",
+            priority: BackendPriority::Best,
+            available: download::macos::DnctlDownload::is_available(),
         });
     }
 
@@ -345,6 +363,9 @@ pub fn create_upload_backend(name: &str) -> Result<Box<dyn UploadThrottleBackend
         #[cfg(feature = "throttle-tc-htb")]
         "tc_htb" => Ok(Box::new(upload::linux::tc_htb::TcHtbUpload::new()?)),
 
+        #[cfg(target_os = "macos")]
+        "dnctl" => Ok(Box::new(upload::macos::DnctlUpload::new()?)),
+
         _ => Err(anyhow::anyhow!("Unknown upload backend: {}", name)),
     }
 }
@@ -365,6 +386,9 @@ pub fn create_download_backend(name: &str) -> Result<Box<dyn DownloadThrottleBac
         "tc_police" => Ok(Box::new(
             download::linux::tc_police::TcPoliceDownload::new()?
         )),
+
+        #[cfg(target_os = "macos")]
+        "dnctl" => Ok(Box::new(download::macos::DnctlDownload::new()?)),
 
         _ => Err(anyhow::anyhow!("Unknown download backend: {}", name)),
     }

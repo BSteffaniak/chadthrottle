@@ -19,9 +19,9 @@ use std::fs;
 
 #[cfg(feature = "throttle-ebpf")]
 use aya::{
-    Ebpf,
     maps::HashMap as BpfHashMap,
     programs::{CgroupSkb, CgroupSkbAttachType},
+    Ebpf,
 };
 
 #[cfg(feature = "throttle-ebpf")]
@@ -41,9 +41,9 @@ struct AttachedProgram {
 use chadthrottle_common::{CgroupThrottleConfig, ThrottleStats, TokenBucket};
 
 #[cfg(feature = "throttle-ebpf")]
-use crate::backends::throttle::UploadThrottleBackend;
-#[cfg(feature = "throttle-ebpf")]
 use crate::backends::throttle::linux_ebpf_utils::*;
+#[cfg(feature = "throttle-ebpf")]
+use crate::backends::throttle::UploadThrottleBackend;
 #[cfg(feature = "throttle-ebpf")]
 use crate::backends::{BackendCapabilities, BackendPriority};
 
@@ -52,7 +52,7 @@ use crate::backends::throttle::UploadThrottleBackend;
 #[cfg(not(feature = "throttle-ebpf"))]
 use crate::backends::{BackendCapabilities, BackendPriority};
 #[cfg(not(feature = "throttle-ebpf"))]
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 #[cfg(not(feature = "throttle-ebpf"))]
 use std::collections::HashMap;
 
