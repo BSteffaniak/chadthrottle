@@ -15,6 +15,19 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 const INI_IPV4: u8 = 0x1;
 const INI_IPV6: u8 = 0x2;
 
+// TCP state constants from netinet/tcp_fsm.h
+const TCPS_CLOSED: i32 = 0;
+const TCPS_LISTEN: i32 = 1;
+const TCPS_SYN_SENT: i32 = 2;
+const TCPS_SYN_RECEIVED: i32 = 3;
+const TCPS_ESTABLISHED: i32 = 4;
+const TCPS_CLOSE_WAIT: i32 = 5;
+const TCPS_FIN_WAIT_1: i32 = 6;
+const TCPS_CLOSING: i32 = 7;
+const TCPS_LAST_ACK: i32 = 8;
+const TCPS_FIN_WAIT_2: i32 = 9;
+const TCPS_TIME_WAIT: i32 = 10;
+
 /// Socket mapper using native macOS libproc API
 ///
 /// This backend uses the libproc crate which wraps macOS's native
@@ -35,7 +48,7 @@ impl LibprocSocketMapper {
     /// Enumerate all network connections using libproc API
     fn enumerate_connections() -> Result<ConnectionMap> {
         use libproc::libproc::bsd_info::BSDInfo;
-        use libproc::libproc::file_info::{ListFDs, ProcFDType, pidfdinfo};
+        use libproc::libproc::file_info::{pidfdinfo, ListFDs, ProcFDType};
         use libproc::libproc::net_info::{SocketFDInfo, SocketInfoKind};
         use libproc::libproc::proc_pid::{listpidinfo, pidinfo};
         use libproc::processes;
@@ -146,12 +159,16 @@ impl LibprocSocketMapper {
             let inode =
                 Self::generate_pseudo_inode(&local_addr, local_port, &remote_addr, remote_port);
 
+            // Get TCP state
+            let state = Self::tcp_state_to_string(tcp_info.tcpsi_state);
+
             Some(ConnectionEntry {
                 local_addr,
                 local_port,
                 remote_addr,
                 remote_port,
                 inode,
+                state,
             })
         }
     }
@@ -177,6 +194,7 @@ impl LibprocSocketMapper {
                 remote_addr,
                 remote_port,
                 inode,
+                state: "UDP".to_string(),
             })
         }
     }
@@ -250,6 +268,24 @@ impl LibprocSocketMapper {
         remote_addr.hash(&mut hasher);
         remote_port.hash(&mut hasher);
         hasher.finish()
+    }
+
+    /// Convert TCP state constant to string
+    fn tcp_state_to_string(state: i32) -> String {
+        match state {
+            TCPS_CLOSED => "CLOSED".to_string(),
+            TCPS_LISTEN => "LISTEN".to_string(),
+            TCPS_SYN_SENT => "SYN_SENT".to_string(),
+            TCPS_SYN_RECEIVED => "SYN_RCVD".to_string(),
+            TCPS_ESTABLISHED => "ESTABLISHED".to_string(),
+            TCPS_CLOSE_WAIT => "CLOSE_WAIT".to_string(),
+            TCPS_FIN_WAIT_1 => "FIN_WAIT1".to_string(),
+            TCPS_CLOSING => "CLOSING".to_string(),
+            TCPS_LAST_ACK => "LAST_ACK".to_string(),
+            TCPS_FIN_WAIT_2 => "FIN_WAIT2".to_string(),
+            TCPS_TIME_WAIT => "TIME_WAIT".to_string(),
+            _ => format!("UNKNOWN({})", state),
+        }
     }
 }
 
