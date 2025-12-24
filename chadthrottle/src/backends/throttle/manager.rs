@@ -1,8 +1,8 @@
 // ThrottleManager coordinates upload and download throttling backends
 
 use super::{
-    BackendInfo, DownloadThrottleBackend, UploadThrottleBackend, create_download_backend,
-    create_upload_backend, detect_download_backends, detect_upload_backends,
+    create_download_backend, create_upload_backend, detect_download_backends,
+    detect_upload_backends, BackendInfo, DownloadThrottleBackend, UploadThrottleBackend,
 };
 use crate::backends::ActiveThrottle;
 use crate::process::ThrottleLimit;

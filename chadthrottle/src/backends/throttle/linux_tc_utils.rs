@@ -1,6 +1,6 @@
 // Shared utilities for Linux TC (traffic control) and cgroup operations
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use std::fs;
 use std::process::Command;
 

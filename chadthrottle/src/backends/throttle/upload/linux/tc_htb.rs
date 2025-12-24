@@ -1,10 +1,10 @@
 // TC HTB (Hierarchical Token Bucket) upload throttling backend
 
 use crate::backends::cgroup::{CgroupBackend, CgroupBackendType, CgroupHandle};
-use crate::backends::throttle::UploadThrottleBackend;
 use crate::backends::throttle::linux_tc_utils::*;
+use crate::backends::throttle::UploadThrottleBackend;
 use crate::backends::{BackendCapabilities, BackendPriority};
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 
 /// TC HTB upload (egress) throttling backend

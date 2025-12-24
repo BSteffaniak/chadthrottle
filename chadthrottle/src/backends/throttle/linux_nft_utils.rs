@@ -1,6 +1,6 @@
 // Shared utilities for Linux nftables operations
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use std::process::Command;
 
 use crate::backends::cgroup::{CgroupBackendType, CgroupHandle};

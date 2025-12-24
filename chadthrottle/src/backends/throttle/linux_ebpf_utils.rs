@@ -14,9 +14,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "throttle-ebpf")]
 use aya::{
-    Ebpf,
     maps::HashMap as BpfHashMap,
     programs::{CgroupAttachMode, CgroupSkb, CgroupSkbAttachType},
+    Ebpf,
 };
 #[cfg(feature = "throttle-ebpf")]
 use chadthrottle_common::{CgroupThrottleConfig, ThrottleStats, TokenBucket};

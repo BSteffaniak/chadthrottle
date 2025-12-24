@@ -1,9 +1,9 @@
 // TC Police download throttling backend (no IFB required)
 
-use crate::backends::throttle::DownloadThrottleBackend;
 use crate::backends::throttle::linux_tc_utils::*;
+use crate::backends::throttle::DownloadThrottleBackend;
 use crate::backends::{BackendCapabilities, BackendPriority};
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
 use std::process::Command;
 
