@@ -25,10 +25,10 @@
 // - See EBPF_TC_CLASSIFIER_DECISION.md for detailed analysis
 
 use crate::backends::cgroup::{CgroupBackend, CgroupBackendType, CgroupHandle};
-use crate::backends::throttle::DownloadThrottleBackend;
 use crate::backends::throttle::linux_tc_utils::*;
+use crate::backends::throttle::DownloadThrottleBackend;
 use crate::backends::{BackendCapabilities, BackendPriority};
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
 use std::process::Command;
 

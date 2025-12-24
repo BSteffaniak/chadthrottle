@@ -63,13 +63,12 @@ impl LsofSocketMapper {
                         // Parse connection and determine if it's TCP or UDP
                         // lsof doesn't explicitly mark protocol in -F output,
                         // but TCP connections usually have -> separator
-                        if let Some(entry) = Self::parse_connection(value, pid, name) {
+                        let is_tcp = value.contains("->");
+                        if let Some(entry) = Self::parse_connection(value, pid, name, is_tcp) {
                             let inode = entry.inode;
                             socket_to_pid.insert(inode, (pid, name.clone()));
 
                             // Categorize by IP version and protocol
-                            // We'll assume TCP if there's a remote address, UDP otherwise
-                            let is_tcp = value.contains("->");
                             let is_ipv6 = entry.local_addr.is_ipv6();
 
                             match (is_tcp, is_ipv6) {
@@ -102,7 +101,12 @@ impl LsofSocketMapper {
     /// - "127.0.0.1:8080->93.184.216.34:80" (TCP connection)
     /// - "*:8080" (listening socket)
     /// - "[::1]:8080->[::1]:54321" (IPv6)
-    fn parse_connection(conn_str: &str, pid: i32, _name: &str) -> Option<ConnectionEntry> {
+    fn parse_connection(
+        conn_str: &str,
+        pid: i32,
+        _name: &str,
+        is_tcp: bool,
+    ) -> Option<ConnectionEntry> {
         // Split on -> to separate local and remote addresses
         let parts: Vec<&str> = conn_str.split("->").collect();
 
@@ -143,12 +147,25 @@ impl LsofSocketMapper {
         // Generate pseudo-inode from connection tuple
         let inode = Self::generate_pseudo_inode(&local_addr, local_port, &remote_addr, remote_port);
 
+        // Determine state based on connection type
+        // lsof doesn't provide detailed TCP state, so we infer from the connection format
+        let state = if is_tcp {
+            if remote.is_some() {
+                "ESTABLISHED".to_string()
+            } else {
+                "LISTEN".to_string()
+            }
+        } else {
+            "UDP".to_string()
+        };
+
         Some(ConnectionEntry {
             local_addr,
             local_port,
             remote_addr,
             remote_port,
             inode,
+            state,
         })
     }
 
