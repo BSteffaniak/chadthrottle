@@ -1,6 +1,6 @@
 # 🔥 ChadThrottle
 
-**A blazingly fast TUI network monitor and throttler for Linux** - like NetLimiter for Windows or Snail for macOS, but more chad.
+**A blazingly fast cross-platform TUI network monitor with Linux throttling support** - like NetLimiter for Windows or Snail for macOS, but more chad.
 
 ## Features
 
@@ -18,15 +18,18 @@
 
 ### Prerequisites
 
-**Required:**
+**For monitoring (all platforms):**
+
+- Root/Administrator access for packet capture
+
+**For throttling (Linux only):**
 
 - Linux kernel 2.6.29+ with cgroups support
 - `tc` (traffic control) - usually part of `iproute2` package
-- Root access for packet capture and traffic control
 
-**Optional (for download throttling):**
+**Optional (for bidirectional throttling on Linux):**
 
-- `ifb` kernel module for bidirectional throttling
+- `ifb` kernel module for download throttling
 - Without IFB: Upload throttling still works
 
 ### Build from source
@@ -64,12 +67,27 @@ sudo chadthrottle
 
 #### Keyboard Shortcuts
 
+**Navigation:**
 - `↑`/`k` - Move selection up
 - `↓`/`j` - Move selection down
+- `i` - Toggle interface view
+- `l` - Cycle traffic view (All/Internet/Local)
+- `Enter` - View details (process or interface)
+- `Tab` - Switch tabs (in detail view)
+- `Space` - Toggle interface filter (in interface list)
+- `A` - Toggle All/None interfaces (in interface list)
+
+**Actions:**
 - `t` - Throttle selected process (opens dialog)
 - `r` - Remove throttle from selected process
+- `g` - Toggle bandwidth graph
+- `f` - Freeze/unfreeze sort order
+
+**System:**
+- `b` - View/switch backends
 - `h`/`?` - Toggle help
-- `q`/`Esc` - Quit
+- `q`/`Esc` - Quit (or close modal if open)
+- `Ctrl+C` - Force quit (always exits)
 
 **In Throttle Dialog:**
 
@@ -94,7 +112,7 @@ sudo chadthrottle --pid 1234 --download-limit 1.5M
 sudo chadthrottle --pid 1234 --download-limit 1M --duration 30
 
 # Use specific backends
-sudo chadthrottle --pid 1234 --download-limit 1M --upload-backend tc-htb --download-backend ebpf-cgroup
+sudo chadthrottle --pid 1234 --download-limit 1M --upload-backend tc_htb --download-backend ebpf
 ```
 
 **Bandwidth limit formats:**
@@ -184,8 +202,8 @@ ChadThrottle implements accurate **bidirectional** per-process throttling using:
 - [x] IPv4 + IPv6 support
 - [x] Graceful degradation without IFB
 - [x] Apply throttling to existing processes (cgroups)
-- [ ] Bandwidth usage graphs
-- [ ] Save/load throttle profiles
+- [x] Bandwidth usage graphs
+- [x] Save/load throttle profiles
 - [ ] Per-connection throttling
 - [ ] Domain whitelist/blacklist
 - [x] eBPF-based throttling (alternative to IFB)
