@@ -1,6 +1,8 @@
 # 🔥 ChadThrottle
 
-**A blazingly fast TUI network monitor and throttler for Linux** - like NetLimiter for Windows or Snail for macOS, but more chad.
+**A blazingly fast TUI network monitor and throttler** - like NetLimiter for Windows or Snail for macOS, but more chad.
+
+Supports **Linux** (full throttling), **macOS** (full throttling via dummynet), and **Windows** (monitoring only).
 
 ## Features
 
@@ -18,6 +20,8 @@
 
 ### Prerequisites
 
+#### Linux
+
 **Required:**
 
 - Linux kernel 2.6.29+ with cgroups support
@@ -29,6 +33,17 @@
 - `ifb` kernel module for bidirectional throttling
 - Without IFB: Upload throttling still works
 
+#### macOS
+
+- macOS 10.10+ (uses dummynet + PF for throttling)
+- Root access for packet capture and traffic control
+
+#### Windows
+
+- Windows 10+ (monitoring only, no throttling support yet)
+- Administrator access for network monitoring
+- Optional: Npcap for full packet capture
+
 ### Build from source
 
 ```bash
@@ -37,16 +52,19 @@ cd chadthrottle
 # Default build (monitoring only):
 cargo build --release
 
-# With all Linux throttling backends (recommended):
+# Linux - with all throttling backends (recommended):
 cargo build --release --features linux-full
 
-# Or with specific backends:
+# Linux - with specific backends:
 cargo build --release --features "throttle-tc-htb,throttle-ifb-tc"
+
+# macOS - full support (monitoring + dummynet throttling):
+cargo build --release --features macos-full
 
 sudo cp target/release/chadthrottle /usr/local/bin/
 ```
 
-**Note:** The default build includes monitoring only. To enable throttling features, you must explicitly enable cargo features (see above).
+**Note:** The default build includes monitoring only. To enable throttling features on Linux, you must explicitly enable cargo features (see above). macOS throttling (dummynet) is included automatically when building on macOS.
 
 ## Usage
 
@@ -94,7 +112,7 @@ sudo chadthrottle --pid 1234 --download-limit 1.5M
 sudo chadthrottle --pid 1234 --download-limit 1M --duration 30
 
 # Use specific backends
-sudo chadthrottle --pid 1234 --download-limit 1M --upload-backend tc-htb --download-backend ebpf-cgroup
+sudo chadthrottle --pid 1234 --download-limit 1M --upload-backend tc_htb --download-backend ebpf
 ```
 
 **Bandwidth limit formats:**
@@ -192,7 +210,7 @@ ChadThrottle implements accurate **bidirectional** per-process throttling using:
 
 ## Why "ChadThrottle"?
 
-Because monitoring network activity and throttling bandwidth at the process level on Linux should be as chad as it is on Windows and macOS. No more complicated tc commands or iptables rules - just a clean TUI that gets the job done.
+Because monitoring network activity and throttling bandwidth at the process level should be easy on any platform. No more complicated tc commands, iptables rules, or dummynet incantations - just a clean TUI that gets the job done.
 
 ## Contributing
 
