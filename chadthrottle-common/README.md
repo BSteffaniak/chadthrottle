@@ -26,6 +26,8 @@ pub struct TokenBucket {
 }
 ```
 
+Create with `TokenBucket::new()` which returns a zero-initialized instance.
+
 ### CgroupThrottleConfig
 
 Configuration for throttling a cgroup:
@@ -46,6 +48,8 @@ pub struct CgroupThrottleConfig {
 - `TRAFFIC_TYPE_INTERNET` (1): Throttle internet traffic only
 - `TRAFFIC_TYPE_LOCAL` (2): Throttle local traffic only
 
+Create with `CgroupThrottleConfig::new()` which returns a zero-initialized instance, then set the desired fields.
+
 ### ThrottleStats
 
 Statistics for a throttled cgroup:
@@ -61,6 +65,8 @@ pub struct ThrottleStats {
     pub cgroup_id_seen: u64,
 }
 ```
+
+Create with `ThrottleStats::new()` which returns a zero-initialized instance.
 
 ## Usage
 

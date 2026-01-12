@@ -68,6 +68,11 @@ sudo chadthrottle
 - `↓`/`j` - Move selection down
 - `t` - Throttle selected process (opens dialog)
 - `r` - Remove throttle from selected process
+- `i` - Toggle interface view
+- `l` - Cycle traffic view (All/Internet/Local)
+- `g` - Toggle bandwidth graph
+- `f` - Freeze/unfreeze sort order
+- `b` - View/switch backends
 - `h`/`?` - Toggle help
 - `q`/`Esc` - Quit
 
@@ -80,6 +85,12 @@ sudo chadthrottle
 - `Esc` - Cancel
 
 ### CLI Mode (Non-Interactive)
+
+List available backends:
+
+```bash
+sudo chadthrottle --list-backends
+```
 
 Throttle a specific process without the TUI:
 
