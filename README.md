@@ -1,6 +1,8 @@
 # 🔥 ChadThrottle
 
-**A blazingly fast TUI network monitor and throttler for Linux** - like NetLimiter for Windows or Snail for macOS, but more chad.
+**A blazingly fast TUI network monitor and throttler** - like NetLimiter for Windows or Snail for macOS, but more chad.
+
+Supports **Linux** (full throttling), **macOS** (throttling via dummynet), and **Windows** (monitoring only).
 
 ## Features
 
@@ -18,6 +20,8 @@
 
 ### Prerequisites
 
+#### Linux
+
 **Required:**
 
 - Linux kernel 2.6.29+ with cgroups support
@@ -29,19 +33,40 @@
 - `ifb` kernel module for bidirectional throttling
 - Without IFB: Upload throttling still works
 
+#### macOS
+
+**Required:**
+
+- macOS 10.10+ (Yosemite or later)
+- Root access for packet capture and throttling
+- `dnctl` and `pfctl` (included with macOS)
+
+#### Windows
+
+**Required:**
+
+- Windows 10+
+- Administrator access for packet capture
+- Npcap (for packet capture with pnet feature)
+
+**Note:** Windows currently supports monitoring only. Throttling is not yet implemented.
+
 ### Build from source
 
 ```bash
 cd chadthrottle
 
-# Default build (monitoring only):
+# Default build (monitoring only, cross-platform):
 cargo build --release
 
-# With all Linux throttling backends (recommended):
+# Linux with all throttling backends (recommended):
 cargo build --release --features linux-full
 
-# Or with specific backends:
+# Linux with specific backends:
 cargo build --release --features "throttle-tc-htb,throttle-ifb-tc"
+
+# macOS with all features:
+cargo build --release --features macos-full
 
 sudo cp target/release/chadthrottle /usr/local/bin/
 ```
@@ -192,7 +217,7 @@ ChadThrottle implements accurate **bidirectional** per-process throttling using:
 
 ## Why "ChadThrottle"?
 
-Because monitoring network activity and throttling bandwidth at the process level on Linux should be as chad as it is on Windows and macOS. No more complicated tc commands or iptables rules - just a clean TUI that gets the job done.
+Because monitoring network activity and throttling bandwidth at the process level should be as simple as the premium Windows and macOS apps, but available everywhere and open source. No more complicated tc commands or iptables rules - just a clean TUI that gets the job done.
 
 ## Contributing
 
