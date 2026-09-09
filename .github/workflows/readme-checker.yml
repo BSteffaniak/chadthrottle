@@ -99,7 +99,7 @@ jobs:
           claude_args: --allowedTools Edit,Read,Write
 
           template_vars: |
-            project_name: ChadThrottle
+            project_name: bproc
             package_name: ${{ matrix.package.name }}
             package_path: ${{ matrix.package.path }}
             is_workspace_package: true
@@ -149,7 +149,7 @@ jobs:
           claude_args: --allowedTools Edit,Read,Write
 
           template_vars: |
-            project_name: ChadThrottle
+            project_name: bproc
             readme_path: README.md
             is_root: true
 
@@ -193,7 +193,7 @@ jobs:
           pr_body: |
             ## 🤖 Automated README Accuracy Review
 
-            Updates to ensure all README files accurately reflect ChadThrottle's current state.
+            Updates to ensure all README files accurately reflect bproc's current state.
 
             ### 📋 What was reviewed:
             - ✅ Root README.md

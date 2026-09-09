@@ -1,6 +1,6 @@
-//! ChadThrottle Build Tasks
+//! bproc Build Tasks
 //!
-//! This binary provides build automation for ChadThrottle, particularly for
+//! This binary provides build automation for bproc, particularly for
 //! building eBPF programs which require nightly Rust.
 //!
 //! Usage:
@@ -253,7 +253,7 @@ fn ensure_nightly_available() -> Result<NightlyStrategy> {
 
 fn build_ebpf(release: bool) -> Result<()> {
     let root = workspace_root();
-    let ebpf_dir = root.join("chadthrottle-ebpf");
+    let ebpf_dir = root.join("bproc-ebpf");
 
     println!("🔨 Building eBPF programs...");
 
@@ -279,9 +279,9 @@ fn build_ebpf(release: bool) -> Result<()> {
 
     // Build all eBPF programs
     for (name, bin) in &[
-        ("egress", "chadthrottle-egress"),
-        ("ingress", "chadthrottle-ingress"),
-        ("tc_classifier", "chadthrottle-tc-classifier"),
+        ("egress", "bproc-egress"),
+        ("ingress", "bproc-ingress"),
+        ("tc_classifier", "bproc-tc-classifier"),
     ] {
         println!("  → Building {}...", bin);
 
@@ -365,7 +365,7 @@ fn build_main(release: bool, opts: &BuildOptions) -> Result<()> {
     println!("✅ Build complete");
 
     if release {
-        let binary_path = root.join("target/release/chadthrottle");
+        let binary_path = root.join("target/release/bproc");
         println!("\n📦 Release binary at: {}", binary_path.display());
     }
 
@@ -392,7 +392,7 @@ fn clean() -> Result<()> {
 }
 
 fn print_help() {
-    println!("ChadThrottle Build Tasks\n");
+    println!("bproc Build Tasks\n");
     println!("USAGE:");
     println!("  cargo xtask <COMMAND> [OPTIONS]\n");
     println!("COMMANDS:");
@@ -421,7 +421,7 @@ fn print_help() {
     println!("  - throttle-ebpf is ALWAYS included (required for eBPF programs)");
     println!("  - Default features: monitor-pnet (can disable with --no-default-features)");
     println!("  - Feature bundles: linux-full, macos-full");
-    println!("  - See chadthrottle/Cargo.toml for all available features\n");
+    println!("  - See bproc/Cargo.toml for all available features\n");
     println!("REQUIREMENTS:");
     println!("  - Rust nightly (auto-detected or auto-installed)");
     println!("  - bpf-linker: cargo install bpf-linker");

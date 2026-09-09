@@ -1,6 +1,6 @@
-# 🔥 ChadThrottle
+# bproc
 
-**A blazingly fast TUI network monitor and throttler for Linux** - like NetLimiter for Windows or Snail for macOS, but more chad.
+**Per-process network monitoring and bandwidth control for Linux.**
 
 ## Features
 
@@ -32,7 +32,7 @@
 ### Build from source
 
 ```bash
-cd chadthrottle
+cd bproc
 
 # Default build (monitoring only):
 cargo build --release
@@ -43,21 +43,21 @@ cargo build --release --features linux-full
 # Or with specific backends:
 cargo build --release --features "throttle-tc-htb,throttle-ifb-tc"
 
-sudo cp target/release/chadthrottle /usr/local/bin/
+sudo cp target/release/bproc /usr/local/bin/
 ```
 
 **Note:** The default build includes monitoring only. To enable throttling features, you must explicitly enable cargo features (see above).
 
 ## Usage
 
-ChadThrottle supports two modes: **TUI mode** (interactive) and **CLI mode** (non-interactive).
+bproc supports two modes: **TUI mode** (interactive) and **CLI mode** (non-interactive).
 
 ### TUI Mode (Interactive)
 
 Start the interactive terminal UI:
 
 ```bash
-sudo chadthrottle
+sudo bproc
 ```
 
 **Note:** Requires root/sudo for full network monitoring capabilities.
@@ -85,16 +85,16 @@ Throttle a specific process without the TUI:
 
 ```bash
 # Throttle both download and upload
-sudo chadthrottle --pid 1234 --download-limit 1M --upload-limit 500K
+sudo bproc --pid 1234 --download-limit 1M --upload-limit 500K
 
 # Throttle only download
-sudo chadthrottle --pid 1234 --download-limit 1.5M
+sudo bproc --pid 1234 --download-limit 1.5M
 
 # Throttle for a specific duration (30 seconds)
-sudo chadthrottle --pid 1234 --download-limit 1M --duration 30
+sudo bproc --pid 1234 --download-limit 1M --duration 30
 
 # Use specific backends
-sudo chadthrottle --pid 1234 --download-limit 1M --upload-backend tc-htb --download-backend ebpf-cgroup
+sudo bproc --pid 1234 --download-limit 1M --upload-backend tc-htb --download-backend ebpf-cgroup
 ```
 
 **Bandwidth limit formats:**
@@ -114,7 +114,7 @@ sudo chadthrottle --pid 1234 --download-limit 1M --upload-backend tc-htb --downl
 ## Architecture
 
 ```
-ChadThrottle
+bproc
 ├── src/
 │   ├── main.rs       # Entry point and TUI event loop
 │   ├── monitor.rs    # Network monitoring with packet capture
@@ -128,7 +128,7 @@ ChadThrottle
 
 ### Monitoring (Packet Capture with pnet)
 
-ChadThrottle uses **accurate packet-level tracking** to monitor network usage per process:
+bproc uses **accurate packet-level tracking** to monitor network usage per process:
 
 1. **Raw Packet Capture**: Uses `pnet` library to capture packets directly from network interfaces via `AF_PACKET` sockets (Linux kernel API)
 2. **Packet Parsing**: Parses Ethernet → IP (v4/v6) → TCP/UDP headers to extract connection information
@@ -144,7 +144,7 @@ ChadThrottle uses **accurate packet-level tracking** to monitor network usage pe
 
 ### Throttling (cgroups + TC + IFB)
 
-ChadThrottle implements accurate **bidirectional** per-process throttling using:
+bproc implements accurate **bidirectional** per-process throttling using:
 
 1. **Linux cgroups (net_cls)** - Tags all packets from a process
 2. **TC (Traffic Control) HTB** - Rate limits upload (egress)
@@ -167,7 +167,7 @@ ChadThrottle implements accurate **bidirectional** per-process throttling using:
 - ✅ **IPv4 + IPv6** - Both protocols fully supported
 - 🛡️ **Graceful fallback** - Upload-only if IFB unavailable
 
-**Note:** If IFB module is not available, ChadThrottle will:
+**Note:** If IFB module is not available, bproc will:
 
 - Show a warning when you try to set download limits
 - Apply upload throttling only
@@ -189,10 +189,6 @@ ChadThrottle implements accurate **bidirectional** per-process throttling using:
 - [ ] Per-connection throttling
 - [ ] Domain whitelist/blacklist
 - [x] eBPF-based throttling (alternative to IFB)
-
-## Why "ChadThrottle"?
-
-Because monitoring network activity and throttling bandwidth at the process level on Linux should be as chad as it is on Windows and macOS. No more complicated tc commands or iptables rules - just a clean TUI that gets the job done.
 
 ## Contributing
 

@@ -1,10 +1,10 @@
 # xtask
 
-Build automation for ChadThrottle, providing commands to build eBPF programs and the main project.
+Build automation for bproc, providing commands to build eBPF programs and the main project.
 
 ## Description
 
-The `xtask` binary provides build automation for ChadThrottle, particularly for building eBPF programs which require nightly Rust. It handles nightly toolchain detection, eBPF compilation with `bpf-linker`, and feature management.
+The `xtask` binary provides build automation for bproc, particularly for building eBPF programs which require nightly Rust. It handles nightly toolchain detection, eBPF compilation with `bpf-linker`, and feature management.
 
 ## Prerequisites
 

@@ -1,5 +1,5 @@
 {
-  description = "ChadThrottle - TUI network monitor and throttler for Linux";
+  description = "bproc - TUI network monitor and throttler for Linux";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -10,8 +10,15 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, rust-overlay, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      rust-overlay,
+      flake-utils,
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
       let
         pkgs = import nixpkgs {
           inherit system;
@@ -19,7 +26,10 @@
         };
 
         rustToolchain = pkgs.rust-bin.nightly.latest.default.override {
-          extensions = [ "rust-src" "llvm-tools-preview" ];
+          extensions = [
+            "rust-src"
+            "llvm-tools-preview"
+          ];
         };
       in
       {
@@ -56,5 +66,6 @@
             fi
           '';
         };
-      });
+      }
+    );
 }

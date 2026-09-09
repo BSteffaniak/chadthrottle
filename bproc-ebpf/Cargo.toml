@@ -1,0 +1,24 @@
+[package]
+name = "bproc-ebpf"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+# This crate is a standalone workspace member (excluded from parent)
+# but inherits dependencies from the parent workspace
+
+[dependencies]
+aya-ebpf = "0.1"
+bproc-common = { path = "../bproc-common", default-features = false }
+
+[[bin]]
+name = "bproc-egress"
+path = "src/egress.rs"
+
+[[bin]]
+name = "bproc-ingress"
+path = "src/ingress.rs"
+
+[[bin]]
+name = "bproc-tc-classifier"
+path = "src/tc_classifier.rs"
