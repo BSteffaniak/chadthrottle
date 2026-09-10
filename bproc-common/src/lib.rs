@@ -1,5 +1,7 @@
 #![no_std]
 
+pub mod traffic;
+
 /// Token bucket state for rate limiting
 /// This struct is shared between userspace and eBPF programs via BPF maps
 #[repr(C)]

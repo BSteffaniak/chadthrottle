@@ -14,6 +14,14 @@ fn main() {
 
         // Check if eBPF programs were already built by xtask
         let target_dir = workspace_root.join("target/bpfel-unknown-none/release");
+        // Re-run after xtask creates or replaces the embedded objects, even if
+        // the Rust sources themselves have not changed since the last check.
+        for binary in ["bproc-egress", "bproc-ingress", "bproc-tc-classifier"] {
+            println!(
+                "cargo:rerun-if-changed={}",
+                target_dir.join(binary).display()
+            );
+        }
         let egress_exists = target_dir.join("bproc-egress").exists();
         let ingress_exists = target_dir.join("bproc-ingress").exists();
         let tc_classifier_exists = target_dir.join("bproc-tc-classifier").exists();

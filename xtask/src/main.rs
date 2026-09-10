@@ -26,10 +26,12 @@ fn main() -> Result<()> {
     // Parse build options
     let build_opts = parse_build_args(&args);
 
+    // BPF objects must be optimized and use the release path consumed by build.rs,
+    // even when the userspace application is built in debug mode.
     match args.get(0).map(|s| s.as_str()) {
-        Some("build-ebpf") => build_ebpf(false)?,
+        Some("build-ebpf") => build_ebpf(true)?,
         Some("build") => {
-            build_ebpf(false)?;
+            build_ebpf(true)?;
             build_main(false, &build_opts)?;
         }
         Some("build-release") => {
